@@ -9,6 +9,7 @@ import subprocess
 import multiprocessing as mp
 from multiprocessing import Pool, cpu_count
 import threading
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 import json
 import math
 import cmath
@@ -28,6 +29,7 @@ import importlib
 from pathlib import Path
 from pathlib import PurePosixPath
 from collections.abc import Iterable, Mapping, Sequence
+from collections import Counter
 import random
 from dataclasses import dataclass
 import inspect
@@ -1872,12 +1874,19 @@ class pyExLib:
         return (given==expect)
 
     @staticmethod
-    def checkTorch():
+    def checkTorch(
+        do_smoke_test:bool=True,
+        device_str:str="cuda",
+    )->dict:
         """
         Checks the PyTorch installation and CUDA availability.
 
+        Args:
+            do_smoke_test (bool): Whether to perform smoke tests on CPU and CUDA.
+            device_str (str): Device string to use for CUDA smoke test.
+
         Returns:
-            dict: Dictionary containing PyTorch version, CUDA version, availability, cuDNN version, and smoke testing result.
+            dict: Dictionary containing information about the PyTorch installation and CUDA status.
         """
         r={
             "installed_torch":False,
@@ -1885,24 +1894,74 @@ class pyExLib:
             "cuda_version":None,
             "cuda_available":False,
             "cuDNN_version":None,
-            "cuda_smoke_testing":False,
+            "cuda_smoke_testing":None,
+            "cpu_smoke_testing":None,
+            "device_count":0,
+            "devices":[],
+            "errors":[],
         }
-        if(IMPORT_TORCH_FLAG):
-            r["installed_torch"]=True
-            r["torch_version"]=torch.__version__
-            r["cuda_version"]=torch.version.cuda
-            r["cuda_available"]=torch.cuda.is_available()
+        
+        if(not IMPORT_TORCH_FLAG):
+            r["errors"].append("torch_import_failed")
+            return r
+        
+        try:
+            import torch as _torch
+        except Exception as e:
+            return r["errors"].append(f"torch_import_error:{repr(e)}")
 
-            if(torch.cuda.is_available()):
-                r["cuDNN_version"]=torch.backends.cudnn.version()
+        r["installed_torch"]=True
+        r["torch_version"]=_torch.__version__
+        r["cuda_version"]=getattr(_torch.version,"cuda",None)
+        r["cuda_available"]=_torch.cuda.is_available()
+
+        if(r["cuda_available"]):
+            try:
+                r["cuDNN_version"]=getattr(_torch.backends.cudnn,"version",lambda:None)()
+            except Exception as e:
+                r["errors"].append(f"cudnn_version_error:{repr(e)}")
+
+            try:
+                dev_count=_torch.cuda.device_count()
+                r["device_count"]=dev_count
+                for idx in range(dev_count):
+                    props=_torch.cuda.get_device_properties(idx)
+                    r["devices"].append({
+                        "index":idx,
+                        "name":props.name,
+                        "total_memory":int(props.total_memory),
+                        "multi_processor_count":int(props.multi_processor_count),
+                        "major":int(props.major),
+                        "minor":int(props.minor),
+                    })
+            except Exception as e:
+                r["errors"].append(f"device_query_error:{repr(e)}")
+
+        if(do_smoke_test):
+            # CPU smoke test
+            try:
+                x=_torch.randn(4,3,64,64)
+                conv=_torch.nn.Conv2d(3,8,3,1,1)
+                y=conv(x)
+                z=(y.mean()+(x@x.transpose(-1,-2)).mean()).item()
+                r["cpu_smoke_testing"]=True
+            except Exception as e:
+                r["cpu_smoke_testing"]=False
+                r["errors"].append(f"cpu_smoke_test_error:{repr(e)}")
+
+            # CUDA smoke test
+            if(r["cuda_available"]):
                 try:
-                    x=torch.randn(4,3,64,64, device="cuda")
-                    conv=torch.nn.Conv2d(3,8,3,1,1).cuda()
+                    dev=_torch.device(device_str)
+                    x=_torch.randn(4,3,64,64,device=dev)
+                    conv=_torch.nn.Conv2d(3,8,3,1,1).to(dev)
                     y=conv(x)
                     z=(y.mean()+(x@x.transpose(-1,-2)).mean()).item()
                     r["cuda_smoke_testing"]=True
-                except:
+                except Exception as e:
                     r["cuda_smoke_testing"]=False
+                    r["errors"].append(f"cuda_smoke_test_error:{repr(e)}")
+
         return r
 
     class ClassDataCoreLib:
@@ -15776,6 +15835,8 @@ class imgLib:
             label_suffix_list:list=DEFAULT_YOLO_DATASET_LABEL_SUFFIX_LIST,
             img_name_tag_regex_dict:dict=None,
             print_log:bool=False,
+            num_workers:int=None,
+            parallel:str=None,
         ):
             """
             Retrieves information about a YOLO dataset.
@@ -15791,6 +15852,8 @@ class imgLib:
                 label_suffix_list (list): List of valid label file suffixes.
                 img_name_tag_regex_dict (dict): Dictionary of regex patterns for image name tags.
                 print_log (bool): Whether to print log information.
+                num_workers (int): Number of workers for parallel processing.
+                parallel (str): Parallel processing method.
             
             Returns:
                 dict: Dictionary containing dataset information.
@@ -15801,6 +15864,74 @@ class imgLib:
                 ValueError: If the data.yaml file does not exist or is not a file.
                 ValueError: If class names are not specified.
             """
+
+            # worker function
+            def _yolo_datasetinfo_worker(task):
+                img_file_path=task["img_path"]
+                img_name=img_file_path.stem
+                data_type=task["data_type"]
+                print_log=task["print_log"]
+
+                if(print_log):
+                    print(f"[imgLib.YOLODatasetInfo.YOLODatasetInfo] Checking image file : {img_file_path}")
+
+                img_data=cv2.imread(str(img_file_path))
+                valid_img_data=img_data is not None
+                img_wh=imgLib.getWH(img_data) if valid_img_data else None
+
+                tmp = {
+                    "img_name":img_name,
+                    "img_is_duplication":(img_name in task["dup_name_set"]),
+                    "img_check_valid_file_suffix":IOLib.checkFileSuffix(img_file_path, task["img_suffix_list"], False),
+                    "img_file_path":str(img_file_path),
+                    "img_data_type":data_type,
+                    "img_name_tag":None,
+                    "bad_image":(not valid_img_data),
+                    "img_wh":img_wh,
+                    "label_file_path":None,
+                    "label_file_status":None,
+                    "label_empty":None,
+                    "label_valid_range_class_nums":None,
+                    "class_name_counter":None,
+                    "final_valid_check":False,
+                }
+
+                tag_regex=task["img_name_tag_regex_dict"]
+                if(tag_regex is not None):
+                    for tag,patterns in tag_regex.items():
+                        add=any(re.match(p,img_name) for p in patterns)
+                        if(tmp["img_name_tag"] is None):
+                            tmp["img_name_tag"]=set()
+                        if(add):
+                            tmp["img_name_tag"].add(tag)
+
+                cand=task["label_index"].get(img_name,[])
+                cand=[p for p in cand if IOLib.checkFileSuffix(p,task["label_suffix_list"],False)]
+
+                if(len(cand)==0):
+                    tmp["label_file_status"]="not_exist"
+                    return tmp
+                if(len(cand)>1):
+                    tmp["label_file_status"]="multiple_exist"
+                    return tmp
+
+                label_file_path=cand[0]
+                tmp["label_file_path"]=str(label_file_path)
+                tmp["label_file_status"]="exist"
+
+                if(valid_img_data):
+                    boxes,cls_nums=imgLib.YOLOANN.readDataLabelImg(label_file_path,img_wh[0],img_wh[1])
+                    tmp["label_empty"]=(len(boxes)==0)
+                    
+                    if(len(boxes)>0):
+                        if((min(cls_nums)>=0 and max(cls_nums)<len(task["class_names"]))):
+                            tmp["label_valid_range_class_nums"]=True
+                            tmp["class_name_counter"]={name: cls_nums.count(i) for i,name in enumerate(task["class_names"])}
+                            tmp["final_valid_check"]=True
+                        else:
+                            tmp["label_valid_range_class_nums"]=False
+                return tmp
+
             if(not IMPORT_OPENCV_FLAG):
                 raise RuntimeError("Error : The opencv package is not installed!")
 
@@ -15877,121 +16008,62 @@ class imgLib:
             if(print_log):
                 print(f"[imgLib.YOLODatasetInfo.YOLODatasetInfo] Checking each files")
 
-            image_name_list=[]
-            data_info=[]
+            image_entries=[]
             for data_type in data_dirs["images"]:
-                if(print_log):
-                    print(f"[imgLib.YOLODatasetInfo.YOLODatasetInfo] Checking data type : {data_type}")
-
                 img_dir=data_dirs["images"][data_type]
+                img_files=[p for p in Path(img_dir).rglob("*") if p.is_file()]
+                image_entries.extend((data_type, p) for p in img_files)
+
+
+            name_counter=Counter(p.stem for _, p in image_entries)
+            dup_name_set={name for name,cnt in name_counter.items() if cnt>1}
+
+            label_index_by_type={}
+            for data_type in data_dirs["labels"]:
                 label_dir=data_dirs["labels"][data_type]
+                lst=[p for p in Path(label_dir).rglob("*") if p.is_file()]
+                idx={}
+                for p in lst:
+                    idx.setdefault(p.stem, []).append(p)
+                label_index_by_type[data_type]=idx
 
-                for img_file_path in Path(img_dir).rglob("*"):
-                    if(not img_file_path.is_file()):
-                        continue
+            tasks=[]
+            for data_type, img_path in image_entries:
+                tasks.append({
+                    "img_path":img_path,
+                    "img_suffix_list":img_suffix_list,
+                    "label_suffix_list":label_suffix_list,
+                    "class_names":class_names,
+                    "dup_name_set":dup_name_set,
+                    "label_index":label_index_by_type[data_type],
+                    "img_name_tag_regex_dict":img_name_tag_regex_dict,
+                    "data_type":data_type,
+                    "print_log":print_log,
+                })
 
-                    if(print_log):
-                        print(f"[imgLib.YOLODatasetInfo.YOLODatasetInfo] Checking image file : {img_file_path}")
+            if(num_workers is None or num_workers<=0):
+                try:
+                    num_workers=max(1,cpu_count()-1)
+                except Exception:
+                    num_workers=4
 
-                    img_name=img_file_path.stem
+            results=[]
+            if(parallel is None):
+                results=[_yolo_datasetinfo_worker(t) for t in tasks]
+            elif(parallel=="thread"):
+                with ThreadPoolExecutor(max_workers=num_workers) as ex:
+                    futures=[ex.submit(_yolo_datasetinfo_worker,t) for t in tasks]
+                    for f in as_completed(futures):
+                        results.append(f.result())
+            elif(parallel=="process"):
+                with ProcessPoolExecutor(max_workers=num_workers) as ex:
+                    futures=[ex.submit(_yolo_datasetinfo_worker,t) for t in tasks]
+                    for f in as_completed(futures):
+                        results.append(f.result())
+            else:
+                raise ValueError("parallel must be one of None, 'thread', or 'process'.")
 
-                    # check duplication 
-                    image_name_duplication_index_list=pyExLib.IterableLib.getIndexData(image_name_list,img_name)
-                    if(len(image_name_duplication_index_list)!=0):
-                        for image_name_duplication_index in image_name_duplication_index_list:
-                            data_info[image_name_duplication_index]["img_is_duplication"]=True
-                    
-                    img_data=cv2.imread(img_file_path)
-                    valid_img_data=img_data is not None
-                    img_wh=None
-                    if(valid_img_data):
-                        img_wh=imgLib.getWH(img_data)
-
-                    tmp_data_dict={
-                        "img_name":img_name,
-                        "img_is_duplication":len(image_name_duplication_index_list)!=0,
-                        "img_check_valid_file_suffix":IOLib.checkFileSuffix(img_file_path,img_suffix_list,False),
-                        "img_file_path":str(img_file_path),
-                        "img_data_type":data_type,
-                        "img_name_tag":None,
-                        "bad_image":not valid_img_data,
-                        "img_wh":img_wh,
-                        "label_file_path":None,
-                        "label_file_status":None,
-                        "label_empty":None,
-                        "label_valid_range_class_nums":None,
-                        "class_name_counter":None,
-                        
-                        "final_valid_check":False,
-                    }
-                    image_name_list.append(img_name)
-
-                    # append img_name_tag
-                    if(img_name_tag_regex_dict is not None):
-                        for tag in img_name_tag_regex_dict:
-                            patterns=img_name_tag_regex_dict[tag]
-                            add_tag_flag=False
-
-                            for p in patterns:
-                                if(re.match(p,img_name)):
-                                    add_tag_flag=True
-                            
-                            if(tmp_data_dict["img_name_tag"] is None):
-                                tmp_data_dict["img_name_tag"]=set()
-                            if(add_tag_flag):
-                                tmp_data_dict["img_name_tag"].add(tag)
-                            
-                    # found label file
-                    candidate_label_file_list=[]
-                    try:
-                        candidate_label_file_list=list(Path(label_dir).rglob("*"))
-                    except:
-                        try:
-                            for candidate_label_file in candidate_label_file_list:
-                                candidate_label_file_list.append(candidate_label_file)
-                        except:
-                            if(print_log):
-                                print(f"[imgLib.YOLODatasetInfo.YOLODatasetInfo] Warning : Failed to get label file list in dir : {label_dir}")
-                    
-                    if(len(candidate_label_file_list)==0):
-                        tmp_data_dict["label_file_status"]="not_exist"
-                    
-                    candidate_label_file_correct_suffix_list=[]
-                    for candidate_label_file in candidate_label_file_list:
-                        if(candidate_label_file.stem==img_name):
-                            if(IOLib.checkFileSuffix(candidate_label_file,label_suffix_list,False)):
-                                candidate_label_file_correct_suffix_list.append(candidate_label_file)
-                    
-                    if(len(candidate_label_file_correct_suffix_list)==0):
-                        tmp_data_dict["label_file_status"]="not_exist"
-                    elif(len(candidate_label_file_correct_suffix_list)==1):
-                        label_file_path=candidate_label_file_correct_suffix_list[0]
-                        tmp_data_dict["label_file_path"]=str(label_file_path)
-                        tmp_data_dict["label_file_status"]="exist"
-                        
-                        if(valid_img_data):
-                            result_boxes,result_cls_nums=imgLib.YOLOANN.readDataLabelImg(label_file_path,img_wh[0],img_wh[1])
-                            
-                            if(len(result_boxes)==0):
-                                tmp_data_dict["label_empty"]=True
-                            else:
-                                tmp_data_dict["label_empty"]=False
-
-                                # check class_name
-                                if (min(result_cls_nums)>=0 and max(result_cls_nums)<len(class_names)):
-                                    tmp_data_dict["label_valid_range_class_nums"]=True
-                                    tmp_data_dict["class_name_counter"]={}
-                                    for class_num,class_name in enumerate(class_names):
-                                        tmp_data_dict["class_name_counter"][class_name]=result_cls_nums.count(class_num)
-
-                                    tmp_data_dict["final_valid_check"]=True
-                                else:
-                                    tmp_data_dict["label_valid_range_class_nums"]=False
-
-                    else:
-                        tmp_data_dict["label_file_status"]="multiple_exist"
-                    
-                    data_info.append(tmp_data_dict)
+            data_info=results
 
             return {
                 "dataset_root_dir":str(dataset_root_dir),
@@ -16015,6 +16087,8 @@ class imgLib:
             label_suffix_list:list=DEFAULT_YOLO_DATASET_LABEL_SUFFIX_LIST,
             img_name_tag_regex_dict:dict=None,
             print_log:bool=False,
+            num_workers:int=None,
+            parallel:str=None,
         ):
             """
             Initializes the YOLODatasetInfo class.
@@ -16030,6 +16104,8 @@ class imgLib:
                 label_suffix_list (list): List of valid label file suffixes.
                 img_name_tag_regex_dict (dict): Dictionary of regex patterns for image name tags.
                 print_log (bool): Whether to print log information.
+                num_workers (int): Number of workers for parallel processing.
+                parallel (str): Parallel processing method.
             """
             self.__info_dict=imgLib.YOLODatasetInfo.YOLODatasetInfo(
                 dataset_root_dir=dataset_root_dir,
@@ -16042,6 +16118,8 @@ class imgLib:
                 label_suffix_list=label_suffix_list,
                 img_name_tag_regex_dict=img_name_tag_regex_dict,
                 print_log=print_log,
+                num_workers=num_workers,
+                parallel=parallel,
             )
 
         def __str__(self):
