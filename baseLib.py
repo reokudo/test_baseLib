@@ -1871,6 +1871,40 @@ class pyExLib:
         expect=pyExLib.computeCheckChar(body,pepper,alphabet)
         return (given==expect)
 
+    @staticmethod
+    def checkTorch():
+        """
+        Checks the PyTorch installation and CUDA availability.
+
+        Returns:
+            dict: Dictionary containing PyTorch version, CUDA version, availability, cuDNN version, and smoke testing result.
+        """
+        r={
+            "installed_torch":False,
+            "torch_version":None,
+            "cuda_version":None,
+            "cuda_available":False,
+            "cuDNN_version":None,
+            "cuda_smoke_testing":False,
+        }
+        if(IMPORT_TORCH_FLAG):
+            r["installed_torch"]=True
+            r["torch_version"]=torch.__version__
+            r["cuda_version"]=torch.version.cuda
+            r["cuda_available"]=torch.cuda.is_available()
+
+            if(torch.cuda.is_available()):
+                r["cuDNN_version"]=torch.backends.cudnn.version()
+                try:
+                    x=torch.randn(4,3,64,64, device="cuda")
+                    conv=torch.nn.Conv2d(3,8,3,1,1).cuda()
+                    y=conv(x)
+                    z=(y.mean()+(x@x.transpose(-1,-2)).mean()).item()
+                    r["cuda_smoke_testing"]=True
+                except:
+                    r["cuda_smoke_testing"]=False
+        return r
+
     class ClassDataCoreLib:
         """
         Library for converting class instances to simplified dictionary representations.

@@ -1,2 +1,10 @@
 to_google_drive.bash
 from_google_drive.bash
+.memo.md
+.vscode/*
+.DS_Store
+.env/*
+.*.py
+*.swap
+*.bak
+__pycache__/*
