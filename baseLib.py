@@ -6060,6 +6060,8 @@ class IOLib:
         char_last:str="└",
         char_horizontal:str="──",
         char_space:str=" ",
+        file_format_string:str=None,
+        directory_format_string:str=None,
         exclude_patterns:list=None,
         exclude_dir_patterns:list=None,
         exclude_file_patterns:list=None,
@@ -6078,6 +6080,11 @@ class IOLib:
             char_last (str): Character for last branch lines.
             char_horizontal (str): Character for horizontal lines.
             char_space (str): Character for spaces.
+            file_format_string (str): Format string for files.
+            directory_format_string (str): Format string for directories.
+            exclude_patterns (list): List of patterns to exclude.
+            exclude_dir_patterns (list): List of directory patterns to exclude.
+            exclude_file_patterns (list): List of file patterns to exclude.
 
         Returns:
             str: String representation of the directory tree.
@@ -6102,9 +6109,10 @@ class IOLib:
         exclude_dir_patterns=exclude_dir_patterns or []
         exclude_file_patterns=exclude_file_patterns or []
 
+        file_format_string=file_format_string or "{}"
+        directory_format_string=directory_format_string or "{}"
+
         lines:list[str]=[]
-        root_label=root_path.name if(root_path.name!="") else str(root_path)
-        lines.append(root_label)
 
         def _isHidden(path:Path)->bool:
             return path.name.startswith(".")
@@ -6164,7 +6172,17 @@ class IOLib:
             for index,child in enumerate(children):
                 is_last=(index==last_index)
                 connector=_makeConnector(is_last)
-                lines.append(prefix+connector+child.name)
+                tmp_name=None
+                if(child.is_file()):
+                    tmp_name=file_format_string.format(child.name)
+                elif(child.is_dir()):
+                    tmp_name=directory_format_string.format(child.name)
+                else:
+                    raise ValueError("Unknown file type!")
+
+                lines.append(
+                    prefix+connector+tmp_name,
+                )
 
                 if(child.is_dir()):
                     if(max_depth is not None and depth>=max_depth):
@@ -6173,7 +6191,12 @@ class IOLib:
                         extension=char_space*4
                     else:
                         extension=char_vertical+char_space*3
-                    _walk(child, prefix+extension, depth+1)
+                    _walk(child,prefix+extension,depth+1)
+
+        root_label=root_path.name if(root_path.name!="") else str(root_path)
+        lines.append(
+            directory_format_string.format(root_label)
+        )
 
         if(root_path.is_dir()):
             if(max_depth is None or max_depth>=1):
