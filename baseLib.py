@@ -47,7 +47,7 @@ import string
 import mimetypes
 import weakref
 import gc
-
+from fnmatch import fnmatch
 
 # ultralytics
 IMPORT_ULTRALYTICS_FLAG=True
@@ -6047,6 +6047,139 @@ class IOLib:
             except Exception:
                 time.sleep(base_sleep*(2**i))
         shutil.rmtree(path,ignore_errors=True)
+
+    @staticmethod
+    def directoryTreeString(
+        directory_path:Path|str,
+        include_hidden_directory:bool=True,
+        include_hidden_file:bool=True,
+        max_depth:int|None=None,
+        newline:str="\n",
+        char_vertical:str="│",
+        char_branch:str="├",
+        char_last:str="└",
+        char_horizontal:str="──",
+        char_space:str=" ",
+        exclude_patterns:list=None,
+        exclude_dir_patterns:list=None,
+        exclude_file_patterns:list=None,
+    )->str:
+        """
+        Generates a string representation of the directory tree.
+
+        Args:
+            directory_path (Path|str): Directory path.
+            include_hidden_directory (bool): Whether to include hidden directories.
+            include_hidden_file (bool): Whether to include hidden files.
+            max_depth (int|None): Maximum depth to traverse.
+            newline (str): Newline character.
+            char_vertical (str): Character for vertical lines.
+            char_branch (str): Character for branch lines.
+            char_last (str): Character for last branch lines.
+            char_horizontal (str): Character for horizontal lines.
+            char_space (str): Character for spaces.
+
+        Returns:
+            str: String representation of the directory tree.
+
+        Raises:
+            FileNotFoundError: If the directory does not exist.
+        """
+        if(isinstance(directory_path,str)):
+            root_path=Path(directory_path)
+        else:
+            root_path=directory_path
+
+        root_path=root_path.resolve()
+
+        if(not root_path.exists()):
+            raise FileNotFoundError(f"Path not found: {root_path}")
+
+        if(max_depth is not None and max_depth<0):
+            max_depth=None
+
+        exclude_patterns=exclude_patterns or []
+        exclude_dir_patterns=exclude_dir_patterns or []
+        exclude_file_patterns=exclude_file_patterns or []
+
+        lines:list[str]=[]
+        root_label=root_path.name if(root_path.name!="") else str(root_path)
+        lines.append(root_label)
+
+        def _isHidden(path:Path)->bool:
+            return path.name.startswith(".")
+
+        def _isExcluded(path:Path)->bool:
+            name=path.name
+            is_dir=path.is_dir()
+
+            for pat in exclude_patterns:
+                if(fnmatch(name,pat)):
+                    return True
+
+            if(is_dir):
+                for pat in exclude_dir_patterns:
+                    if(fnmatch(name,pat)):
+                        return True
+            else:
+                for pat in exclude_file_patterns:
+                    if(fnmatch(name,pat)):
+                        return True
+
+            return False
+
+        def _iterChildren(path:Path)->list[Path]:
+            try:
+                children=list(path.iterdir())
+            except PermissionError:
+                return []
+
+            visible:list[Path]=[]
+            for child in children:
+                if(_isExcluded(child)):
+                    continue
+
+                if(child.is_dir()):
+                    if((not include_hidden_directory) and _isHidden(child)):
+                        continue
+                else:
+                    if((not include_hidden_file) and _isHidden(child)):
+                        continue
+                visible.append(child)
+
+            visible.sort(key=lambda p:(not p.is_dir(), p.name.lower()))
+            return visible
+
+        def _makeConnector(is_last:bool)->str:
+            branch=char_last if(is_last) else char_branch
+            return branch+char_horizontal+char_space
+
+        def _walk(path:Path,prefix:str,depth:int)->None:
+            if(max_depth is not None and depth>max_depth):
+                return
+
+            children=_iterChildren(path)
+            last_index=len(children)-1
+
+            for index,child in enumerate(children):
+                is_last=(index==last_index)
+                connector=_makeConnector(is_last)
+                lines.append(prefix+connector+child.name)
+
+                if(child.is_dir()):
+                    if(max_depth is not None and depth>=max_depth):
+                        continue
+                    if(is_last):
+                        extension=char_space*4
+                    else:
+                        extension=char_vertical+char_space*3
+                    _walk(child, prefix+extension, depth+1)
+
+        if(root_path.is_dir()):
+            if(max_depth is None or max_depth>=1):
+                _walk(root_path,"",1)
+
+        return newline.join(lines)
 
     class createDeepEmptyDirs:
         """
