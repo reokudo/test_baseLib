@@ -9246,6 +9246,76 @@ class IOLib:
                 "date":datetime.now().isoformat(),
             }
 
+        def __getitem__(self,key:str):
+            """
+            Retrieves the data associated with the given key.
+
+            Args:
+                key (str): Key to identify the object.
+
+            Returns:
+                FileStoreParser: Loaded FileStoreParser object.
+
+            Raises:
+                RuntimeError: If the FileStoreVariable has been deleted.
+            """
+            if(not self.__valid_save_directory):
+                raise RuntimeError("FileStoreVariable has been deleted")
+            
+            return self.loadData(key)
+
+        def __setitem__(self,key:str,data:any):
+            """
+            Sets the data for the given key.
+
+            Args:
+                key (str): Key to identify the object.
+                data (FileStoreParser): FileStoreParser object to set.
+
+            Raises:
+                RuntimeError: If the FileStoreVariable has been deleted.
+            """
+            if(not self.__valid_save_directory):
+                raise RuntimeError("FileStoreVariable has been deleted")
+
+            if(key in self.__data_dict):
+                self.updateData(key,data)
+            else:
+                self.appendData(key,data)
+
+        def __delitem__(self,key:str):
+            """
+            Deletes the data associated with the given key.
+
+            Args:
+                key (str): Key to identify the object.
+
+            Raises:
+                RuntimeError: If the FileStoreVariable has been deleted.
+            """
+            if(not self.__valid_save_directory):
+                raise RuntimeError("FileStoreVariable has been deleted")
+            
+            self.deleteData(key)
+        
+        def __contains__(self,key:str)->bool:
+            """
+            Checks if the given key exists in the FileStoreVariable.
+
+            Args:
+                key (str): Key to check.
+
+            Returns:
+                bool: True if the key exists, False otherwise.
+
+            Raises:
+                RuntimeError: If the FileStoreVariable has been deleted.
+            """
+            if(not self.__valid_save_directory):
+                raise RuntimeError("FileStoreVariable has been deleted")
+            
+            return key in self.__data_dict
+
         def appendData(
             self,
             key:str,
