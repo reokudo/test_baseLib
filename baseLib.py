@@ -9251,6 +9251,7 @@ class IOLib:
             key:str,
             data:any,
             *,
+            use_uuid_key:bool=False,
             release_after:bool=False,
             aggressive_release:bool=False,
         ):
@@ -9260,13 +9261,25 @@ class IOLib:
             Args:
                 key (str): Key to identify the object.
                 data (FileStoreParser): FileStoreParser object to append.
+                use_uuid_key (bool): Whether to generate a UUID key if key is None.
                 release_after (bool): Whether to release memory of the data object after saving.
                 aggressive_release (bool): Whether to aggressively release memory.
+                
+            Returns:
+                str: The key used to store the object.
                 
             Raises:
                 TypeError: If data is not an instance of FileStoreParser.
                 KeyError: If the key already exists.
             """
+            if(use_uuid_key and key is None):
+                while(key is None):
+                    key=uuid.uuid4().hex
+                    if(key not in self.__data_dict):
+                        break
+                    else:
+                        key=None
+
             if(not self.__valid_save_directory):
                 raise RuntimeError("FileStoreVariable has been deleted")
             if(not _FileStore.isSupportedType(data)):
@@ -9288,6 +9301,8 @@ class IOLib:
             if(release_after):
                 IOLib.FileStoreVariable.__release_memory(data,aggressive=aggressive_release)
             
+            return key
+        
         def updateData(
             self,
             key:str,

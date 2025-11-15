@@ -1,0 +1,32 @@
+# Required packages for baseLib.py
+
+# Core data science libraries
+numpy
+pandas
+matplotlib
+
+# Optional libraries (with graceful fallback)
+# Deep learning
+torch
+ultralytics
+
+# Computer vision
+opencv-python
+
+# YAML processing
+ruamel.yaml
+
+# JSON streaming
+ijson
+
+# Compression libraries
+zstandard
+py7zr
+pyzipper
+zipencrypt
+
+# Data formats
+pyarrow
+
+# Video processing
+moviepy
