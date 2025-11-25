@@ -4235,6 +4235,53 @@ class pyExLib:
                     index_list.append(i)
             return index_list
 
+        @staticmethod
+        def sortPriority(
+            lst:list,
+            priority_lst:list,
+            priority_key:callable=None,
+            rest_key:callable=None,
+        )->list:
+            """
+            Sorts a list based on a priority list.
+
+            Args:
+                lst (list): List to be sorted.
+                priority_lst (list): List defining the priority order.
+                priority_key (callable, optional): Function to extract the priority key from elements.
+                rest_key (callable, optional): Function to sort elements not in the priority list.
+            
+            Returns:
+                list: Sorted list based on priority.
+
+            Raises:
+                TypeError: If lst or priority_lst is not a list, or if priority_key/rest_key is not callable.
+            """
+            if(not isinstance(lst,list)):
+                raise TypeError("lst must be a list!")
+            if(not isinstance(priority_lst,list)):
+                raise TypeError("priority_lst must be a list!")
+
+            priority_index={v:i for i,v in enumerate(priority_lst)}
+            default_rank=len(priority_lst)
+
+            if(priority_key is None):
+                priority_key=lambda x:x
+            if(not callable(priority_key)):
+                raise TypeError("priority_key must be a callable!")
+
+            if(rest_key is None):
+                rest_key=lambda x:x
+            if(not callable(rest_key)):
+                raise TypeError("rest_key must be a callable!")
+            
+            sorted_lst=sorted(
+                lst,
+                key=lambda x:(priority_index.get(priority_key(x),default_rank),rest_key(x))
+            )
+
+            return sorted_lst
+
         @_protectedClass.fileStoreMyLibRegister
         class weightList(list,_FileStore.FileStoreParser):
             """
@@ -17930,6 +17977,7 @@ class imgLib:
         NEW_OBJ_MODE_DELETE_ANN_CLS_NUMS="DeleteAnnClsNums"
         NEW_OBJ_MODE_AUTO_DELETE_ANN_CLS_NUMS="autoDeleteANNClsNums"
         NEW_OBJ_MODE_MARGE_CLASSES="margeClasses"
+        NEW_OBJ_MODE_FILTERED_AREA="filteredArea"
 
         def newReproductionTileObj(self,n:int,keep_raw_img_wh:bool=True,fx:float=1,fy:float=1):
             """
@@ -18606,6 +18654,157 @@ class imgLib:
             
             return tmp_obj
 
+        def filteredArea(
+            self,
+            upper_area:float=None,
+            lower_area:float=None,
+            upper_short_side:float=None,
+            lower_short_side:float=None,
+            upper_area_ratio:float=None,
+            lower_area_ratio:float=None,
+            filtered_cls_nums:list=None
+        ):
+            """
+            Filters annotation data based on area, short side length, and area ratio thresholds.
+
+            Args:
+                upper_area (float): Upper area threshold.
+                lower_area (float): Lower area threshold.
+                upper_short_side (float): Upper short side length threshold.
+                lower_short_side (float): Lower short side length threshold.
+                upper_area_ratio (float): Upper area ratio threshold.
+                lower_area_ratio (float): Lower area ratio threshold.
+                filtered_cls_nums (list): List of class numbers to filter.
+
+            Returns:
+                YOLOANN: New YOLOANN instance.
+
+            Raises:
+                ValueError: If no threshold is set.
+                ValueError: If the image area is not positive.
+                ValueError: If the area ratio thresholds are out of range.
+                TypeError: If the filtered class numbers argument is invalid.
+            """
+            # if no threshold is set
+            if(
+                upper_area is None and
+                lower_area is None and
+                upper_short_side is None and
+                lower_short_side is None and
+                upper_area_ratio is None and
+                lower_area_ratio is None
+            ):
+                raise ValueError("Error : At least one threshold must be specified in filteredArea!")
+
+            w,h=self.__wh
+            img_area=w*h
+            if(img_area<=0):
+                raise ValueError("Error : Image area must be positive!")
+
+            # check area ratio
+            if(upper_area_ratio is not None):
+                if(upper_area_ratio<=0 or upper_area_ratio>=1):
+                    raise ValueError("Error : upper_area_ratio must be in the range (0,1).")
+            if(lower_area_ratio is not None):
+                if(lower_area_ratio<0 or lower_area_ratio>=1):
+                    raise ValueError("Error : lower_area_ratio must be in the range [0,1).")
+
+            # filtered class numbers set
+            filtered_cls_nums_set=None
+            if(filtered_cls_nums is not None):
+                if(not isinstance(filtered_cls_nums,(list,tuple,set))):
+                    raise TypeError("Error : The argument \"filtered_cls_nums\" of filteredArea must be a list, tuple, or set.")
+                filtered_cls_nums_set=set([mathLib.convInt(c) for c in filtered_cls_nums])
+
+            # polygon mode check
+            new_ann_polygon_data=None if (not self.isANNPolygonMode()) else []
+            if(self.isANNPolygonMode()):
+                if(len(self.__ann_polygon_data)!=len(self.__ann_data)):
+                    raise ValueError("Error : The length of ann_polygon_data and ann_data must be the same.")
+
+            new_ann_data=[]
+            new_ann_cls_nums=[]
+
+            for i,(bbox,cls_num) in enumerate(zip(self.__ann_data,self.__ann_cls_nums)):
+                cls_num_int=mathLib.convInt(cls_num)
+
+                # check whether to filter
+                need_filter=(filtered_cls_nums_set is None) or (cls_num_int in filtered_cls_nums_set)
+
+                remove_flag=False
+
+                if(need_filter):
+                    x1,y1,x2,y2=bbox
+                    w_box=x2-x1
+                    h_box=y2-y1
+                    area=w_box*h_box
+                    short_side=min(w_box,h_box)
+                    ratio=area/img_area if img_area>0 else 0
+
+                    # lower/upper area constraints
+                    if(lower_area is not None and area<lower_area):
+                        remove_flag=True
+                    if((not remove_flag) and upper_area is not None and area>upper_area):
+                        remove_flag=True
+
+                    # lower/upper short side constraints
+                    if((not remove_flag) and lower_short_side is not None and short_side<lower_short_side):
+                        remove_flag=True
+                    if((not remove_flag) and upper_short_side is not None and short_side>upper_short_side):
+                        remove_flag=True
+
+                    # lower/upper area ratio constraints
+                    if((not remove_flag) and lower_area_ratio is not None and ratio<lower_area_ratio):
+                        remove_flag=True
+                    if((not remove_flag) and upper_area_ratio is not None and ratio>upper_area_ratio):
+                        remove_flag=True
+
+                # append if not removed
+                if(not remove_flag):
+                    new_ann_data.append(bbox)
+                    new_ann_cls_nums.append(cls_num_int)
+                    if(self.isANNPolygonMode()):
+                        new_ann_polygon_data.append(self.__ann_polygon_data[i])
+
+            new_dict={
+                "img_mode":self.__img_mode,
+                "ann_data_path":self.__ann_data_path,
+                "img":copy.deepcopy(self.__img),
+                "img_path":self.__img_path,
+                "wh":self.__wh,
+                "ann_data":new_ann_data,
+                "ann_cls_nums":new_ann_cls_nums,
+                "class_names_txt_path":self.__class_names_txt_path,
+                "class_names_data":self.__class_names_data,
+                "ann_file_mode":self.__ann_file_mode,
+                "ann_polygon_data":new_ann_polygon_data,
+                "img_specific_key_in_coco_data":self.__img_specific_key_in_coco_data,
+                "allow_reshape_flag":self.__allow_reshape_flag
+            }
+
+            new_img_reshape_log=copy.deepcopy(self.getImgReshapeLog())
+            new_img_reshape_log.append(
+                {
+                    "mode":imgLib.YOLOANN.NEW_OBJ_MODE_FILTERED_AREA,
+                    "args":{
+                        "upper_area":upper_area,
+                        "lower_area":lower_area,
+                        "upper_short_side":upper_short_side,
+                        "lower_short_side":lower_short_side,
+                        "upper_area_ratio":upper_area_ratio,
+                        "lower_area_ratio":lower_area_ratio,
+                        "filtered_cls_nums":filtered_cls_nums
+                    }
+                }
+            )
+
+            return imgLib.YOLOANN(
+                img_mode=imgLib.YOLOANN.__IMG_MODE_NEW_INSTANCE_RESHAPE,
+                ann_data_arg="",
+                arg=new_dict,
+                img_reshape_log=new_img_reshape_log
+            )
+
         # savejson file
         def toJson(self,path:str,indent:int=IOLib.JSONLib.DEFAULT_INDENT,minimalize_flag:bool=False):
             """
@@ -18749,6 +18948,8 @@ class imgLib:
                     pass
                 elif(mode==imgLib.YOLOANN.NEW_OBJ_MODE_MARGE_CLASSES):
                     pass
+                elif(mode==imgLib.YOLOANN.NEW_OBJ_MODE_FILTERED_AREA):
+                    pass
                 else:
                     raise ValueError(f"mode is incorrect => {mode}")
             return tmp_img
@@ -18807,6 +19008,8 @@ class imgLib:
                     tmp_obj=tmp_obj.autoDeleteANNClsNums(**args)
                 elif(mode==imgLib.YOLOANN.NEW_OBJ_MODE_MARGE_CLASSES):
                     tmp_obj=tmp_obj.margeClasses(**args)
+                elif(mode==imgLib.YOLOANN.NEW_OBJ_MODE_FILTERED_AREA):
+                    tmp_obj=tmp_obj.filteredArea(**args)
                 else:
                     raise ValueError(f"mode is incorrect => {mode}")
                 
