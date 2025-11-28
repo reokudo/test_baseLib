@@ -14478,6 +14478,31 @@ class mathLib:
                     distances[(i,j)]=mathLib.distanceLib.MinkowskiDistance(xs=p1,ys=p2,p=p)
             return distances
 
+        @staticmethod
+        def hammingDistance64(x,y):
+            """
+            Calculates the Hamming distance between two 64-bit integers.
+
+            Args:
+                x (int): The first 64-bit integer.
+                y (int): The second 64-bit integer.
+            
+            Returns:
+                int: Hamming distance.
+
+            Raises:
+                TypeError: If x or y is not an integer.
+            """
+            if(not (isinstance(x,int) and isinstance(y,int))):
+                raise TypeError("Both x and y must be integers.")
+            
+            v=x^y
+            cnt=0
+            while v:
+                v&=v-1
+                cnt+=1
+            return cnt
+
     class PolygonLib:
         """
         Class for polygon-related operations.
@@ -15545,7 +15570,196 @@ class imgLib:
             if(not tmp):
                 return False
         return True
-    
+
+    @staticmethod
+    def imageSimilarity(
+        img1,
+        img2,
+        method="ssim",
+        resize_shape=None,
+        use_color=True
+    ):
+        """
+        Computes the similarity between two images using the specified method.
+
+        Args:
+            img1 (np.ndarray): First image.
+            img2 (np.ndarray): Second image.
+            method (str): Similarity method ('ssim' or 'mse').
+            resize_shape (tuple): Shape to resize images to (width, height).
+            use_color (bool): Whether to use color information.
+
+        Returns:
+            float: Similarity score between 0 and 1.
+
+        Raises:
+            ValueError: If img1 or img2 is None, or if an unknown method is specified.
+        """
+        if(img1 is None or img2 is None):
+            raise ValueError("img1 or img2 is None!")
+        
+        if(img1.dtype!=np.uint8):
+            img1=img1.astype(np.uint8)
+        if(img2.dtype!=np.uint8):
+            img2=img2.astype(np.uint8)
+
+        if(resize_shape is not None):
+            w,h=resize_shape
+            img1=cv2.resize(img1,(w,h))
+            img2=cv2.resize(img2,(w,h))
+        else:
+            if(img1.shape[0]!=img2.shape[0] or img1.shape[1]!=img2.shape[1]):
+                img2=cv2.resize(img2,(img1.shape[1],img1.shape[0]))
+
+        if(use_color and len(img1.shape)==3 and img1.shape[2]==3 and len(img2.shape)==3 and img2.shape[2]==3):
+            if(method=="ssim"):
+                sims=[]
+                for c in range(3):
+                    sim_c=imgLib._imageSimilaritySsim(img1[:,:,c],img2[:,:,c])
+                    sims.append(sim_c)
+                return float(np.mean(sims))
+            elif(method=="mse"):
+                return imgLib._imageSimilarityMseColor(img1,img2)
+            else:
+                raise ValueError("unknown method: "+str(method))
+        else:
+            if(len(img1.shape)==3 and img1.shape[2]==3):
+                img1_gray=cv2.cvtColor(img1,cv2.COLOR_BGR2GRAY)
+            else:
+                img1_gray=img1.copy()
+
+            if(len(img2.shape)==3 and img2.shape[2]==3):
+                img2_gray=cv2.cvtColor(img2,cv2.COLOR_BGR2GRAY)
+            else:
+                img2_gray=img2.copy()
+
+            if(method=="ssim"):
+                return imgLib._imageSimilaritySsim(img1_gray,img2_gray)
+            elif(method=="mse"):
+                return imgLib._imageSimilarityMseGray(img1_gray,img2_gray)
+            else:
+                raise ValueError("unknown method: "+str(method))
+
+    @staticmethod
+    def _imageSimilarityMseGray(img1_gray,img2_gray):
+        """
+        Computes the Mean Squared Error (MSE) similarity between two grayscale images.
+
+        Args:
+            img1_gray (np.ndarray): First grayscale image.
+            img2_gray (np.ndarray): Second grayscale image.
+
+        Returns:
+            float: Similarity score between 0 and 1.
+        """
+        diff=img1_gray.astype(np.float32)-img2_gray.astype(np.float32)
+        mse=float(np.mean(diff*diff))
+        max_mse=255.0*255.0
+        similarity=1.0-(mse/max_mse)
+        if(similarity<0.0):
+            similarity=0.0
+        if(similarity>1.0):
+            similarity=1.0
+        return similarity
+
+    @staticmethod
+    def _imageSimilarityMseColor(img1,img2):
+        """
+        Computes the Mean Squared Error (MSE) similarity between two color images.
+
+        Args:
+            img1 (np.ndarray): First color image.
+            img2 (np.ndarray): Second color image.
+
+        Returns:
+            float: Similarity score between 0 and 1.
+        """
+        diff=img1.astype(np.float32)-img2.astype(np.float32)
+        mse=float(np.mean(diff*diff))
+        
+        max_mse=255.0*255.0
+        similarity=1.0-(mse/max_mse)
+        if(similarity<0.0):
+            similarity=0.0
+        if(similarity>1.0):
+            similarity=1.0
+        return similarity
+
+    @staticmethod
+    def _imageSimilaritySsim(img1_gray,img2_gray):
+        """
+        Computes the Structural Similarity Index (SSIM) between two grayscale images.
+
+        Args:
+            img1_gray (np.ndarray): First grayscale image.
+            img2_gray (np.ndarray): Second grayscale image.
+        
+        Returns:
+            float: SSIM score between 0 and 1.
+        """
+        img1_gray=img1_gray.astype(np.float32)
+        img2_gray=img2_gray.astype(np.float32)
+
+        C1=(0.01*255.0)**2
+        C2=(0.03*255.0)**2
+
+        kernel=cv2.getGaussianKernel(11,1.5)
+        window=kernel*kernel.T
+
+        mu1=cv2.filter2D(img1_gray,-1,window)
+        mu2=cv2.filter2D(img2_gray,-1,window)
+
+        mu1_sq=mu1*mu1
+        mu2_sq=mu2*mu2
+        mu1_mu2=mu1*mu2
+
+        sigma1_sq=cv2.filter2D(img1_gray*img1_gray,-1,window)-mu1_sq
+        sigma2_sq=cv2.filter2D(img2_gray*img2_gray,-1,window)-mu2_sq
+        sigma12=cv2.filter2D(img1_gray*img2_gray,-1,window)-mu1_mu2
+
+        ssim_map=((2.0*mu1_mu2+C1)*(2.0*sigma12+C2))/((mu1_sq+mu2_sq+C1)*(sigma1_sq+sigma2_sq+C2))
+        ssim=float(ssim_map.mean())
+
+        if(ssim<0.0):
+            ssim=0.0
+        if(ssim>1.0):
+            ssim=1.0
+        return ssim
+
+    @staticmethod
+    def ImagePHash(img,hash_size=8):
+        """
+        Computes the perceptual hash (pHash) of an image.
+
+        Args:
+            img (np.ndarray): Input image.
+            hash_size (int): Size of the hash.
+
+        Returns:
+            int: Perceptual hash value.
+        """
+        if(len(img.shape)==3 and img.shape[2]==3):
+            img_gray=cv2.cvtColor(img,cv2.COLOR_BGR2GRAY)
+        else:
+            img_gray=img.copy()
+
+        img_resized=cv2.resize(img_gray,(hash_size*4,hash_size*4))
+
+        img_f=img_resized.astype(np.float32)
+        dct=cv2.dct(img_f)
+
+        dct_low=dct[:hash_size,:hash_size]
+
+        dct_flat=dct_low.flatten()
+        mean_val=dct_flat[1:].mean()
+
+        bits=(dct_flat>mean_val).astype(np.uint8)
+
+        h=0
+        for b in bits:
+            h=(h<<1)|int(b)
+        return h
+
     @staticmethod
     def eqImgShapes(imgs:list):
         """
@@ -16095,7 +16309,249 @@ class imgLib:
             return cv2.cvtColor(norm,cv2.COLOR_GRAY2BGR)
         else:
             return norm
+        
+
+    @_protectedClass.fileStoreMyLibRegister
+    class ImageIndex(_FileStore.FileStoreParser):
+        """
+        A class to manage and find duplicate images using perceptual hashing and SSIM.
+        """
+
+        __fs_version__=1
+
+        def __init__(
+            self,
+            hash_size:int=8,
+            is_color:bool=True,
+            resize_shape:tuple=(256,256),
+        ):
+            """
+            Initializes the ImageIndex with a specified hash size.
+
+            Args:
+                hash_size (int): Size of the perceptual hash.
+                is_color (bool): Whether to use color information.
+                resize_shape (tuple): Shape to resize images for SSIM calculation.
+            """
+            self.__hash_size=hash_size
+            self.__is_color=is_color
+            self.__resize_shape=resize_shape
     
+            self.__paths=[]
+            self.__hashes=[]
+            self.__hash_to_indices={}
+
+        def addImagePath(self,img_path:str|Path):
+            """
+            Adds an image path to the index.
+
+            Args:
+                img_path (str|Path): Path to the image.
+            """
+            img_path=Path(img_path)
+            img=cv2.imread(str(img_path))
+            if(img is None):
+                raise ValueError(f"Cannot read image file: {img_path}")
+
+            h=imgLib.ImagePHash(img,self.__hash_size)
+
+            idx=len(self.__paths)
+            self.__paths.append(img_path)
+            self.__hashes.append(h)
+            if(h not in self.__hash_to_indices):
+                self.__hash_to_indices[h]=[]
+            self.__hash_to_indices[h].append(idx)
+
+            del img 
+
+        def buildFromPathList(self,path_list):
+            """
+            Builds the image index from a list of image paths.
+
+            Args:
+                path_list (list): List of image paths.
+            """
+            for path in path_list:
+                self.addImagePath(path)
+
+        def findDuplicateByPath(
+            self,
+            new_img_path:str|Path,
+            hash_thresh=0.9,
+            ssim_thresh=0.98,
+            max_scan_for_hash=5000,
+        ):
+            """
+            Finds duplicate images based on perceptual hash and SSIM.
+
+            Args:
+                new_img_path (str|Path): Path to the new image.
+                hash_thresh (float): Threshold for hash similarity.
+                ssim_thresh (float): Threshold for SSIM similarity.
+                max_scan_for_hash (int): Maximum number of images to scan for hash similarity.
+
+            Returns:
+                tuple: (is_duplicate (bool), index (int), ssim_score (float))
+            """
+            new_img_path=Path(new_img_path)
+            new_img=cv2.imread(str(new_img_path))
+            if(new_img is None):
+                raise ValueError(f"Cannot read image file: {new_img_path}")
+            
+            new_hash=imgLib.ImagePHash(new_img,self.__hash_size)
+            
+            
+            candidates=set()
+            if(new_hash in self.__hash_to_indices):
+                for idx in self.__hash_to_indices[new_hash]:
+                    candidates.add(idx)
+
+            n=len(self.__paths)
+            if(n<=max_scan_for_hash):
+                max_bits=self.__hash_size*self.__hash_size
+                for i,h in enumerate(self.__hashes):
+                    if(i in candidates):
+                        continue
+                    sim_hash=1.0-(mathLib.distanceLib.hammingDistance64(new_hash,h)/max_bits)
+                    if(sim_hash>=hash_thresh):
+                        candidates.add(i)
+
+            if(len(candidates)==0):
+                del new_img
+                return False,-1,0.0
+
+            best_ssim=-math.inf
+            best_idx=-1
+
+            for idx in candidates:
+                base_path=self.__paths[idx]
+                base_img=cv2.imread(str(base_path))
+                if(base_img is None):
+                    continue
+
+                ssim=imgLib.imageSimilarity(
+                    new_img,
+                    base_img,
+                    method="ssim",
+                    use_color=self.__is_color,
+                    resize_shape=self.__resize_shape
+                )
+
+                del base_img
+
+                if(ssim>best_ssim):
+                    best_ssim=ssim
+                    best_idx=idx
+
+            del new_img
+
+            if(best_ssim>=ssim_thresh):
+                return True,best_idx,best_ssim
+            else:
+                return False,best_idx,best_ssim
+
+        @property
+        def paths(self):
+            """
+            Gets the list of image paths in the index.
+
+            Returns:
+                list: List of image paths.
+            """
+            return self.__paths
+
+        @property
+        def hashes(self):
+            """
+            Gets the list of perceptual hashes in the index.
+
+            Returns:
+                list: List of perceptual hashes.
+            """
+            return self.__hashes
+
+        def getIndexImage(self,index:int):
+            """
+            Gets the image at the specified index.
+            
+            Args:
+                index (int): Index of the image.
+
+            Returns:
+                tuple: (image path (Path), image data (np.ndarray))
+
+            Raises:
+                IndexError: If the index is out of range.
+                ValueError: If the image cannot be read.
+            """
+            if(index<0 or index>=len(self.__paths)):
+                raise IndexError("Index out of range!")
+
+            img_path=self.__paths[index]
+            img=cv2.imread(str(img_path))
+            
+            if(img is None):
+                raise ValueError(f"Cannot read image file: {img_path}")
+            return img_path,img
+
+        def to_payload(self)->dict:
+            """
+            Converts the ImageIndex instance to a payload dictionary.
+
+            Returns:
+                dict: Payload dictionary.
+            """
+            return {
+                "version":int(getattr(self,"__fs_version__",1)),
+                "hash_size":self.__hash_size,
+                "is_color":self.__is_color,
+                "resize_shape":self.__resize_shape,
+                "paths":[str(p) for p in self.__paths],
+                "hashes":list(self.__hashes),
+            }
+
+        @classmethod
+        def from_payload(cls,payload:dict,store:"IOLib.FileStore")->"ImageIndex":
+            """
+            Creates an ImageIndex instance from a payload dictionary.
+
+            Args:
+                payload (dict): Payload dictionary.
+                store (IOLib.FileStore): FileStore instance.
+            
+            Returns:
+                ImageIndex: Created ImageIndex instance.
+            """
+            _version=int(payload.get("version",1))
+
+            hash_size=int(payload.get("hash_size",8))
+            is_color=bool(payload.get("is_color",True))
+            resize_shape=tuple(payload.get("resize_shape") or (256,256))
+
+            self=cls(
+                hash_size=hash_size,
+                is_color=is_color,
+                resize_shape=resize_shape,
+            )
+
+            paths=payload.get("paths") or []
+            hashes=payload.get("hashes") or []
+
+            if(len(paths)!=len(hashes)):
+                raise ValueError("ImageIndex payload is invalid: len(paths)!=len(hashes).")
+
+            # 内部状態を復元
+            self.__paths=[Path(p) for p in paths]
+            self.__hashes=[int(h) for h in hashes]
+            self.__hash_to_indices={}
+
+            for idx,h in enumerate(self.__hashes):
+                if(h not in self.__hash_to_indices):
+                    self.__hash_to_indices[h]=[]
+                self.__hash_to_indices[h].append(idx)
+
+            return self
+
     @_protectedClass.fileStoreMyLibRegister
     class YOLODatasetInfo(_FileStore.FileStoreParser):
         """
