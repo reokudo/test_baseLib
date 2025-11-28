@@ -16450,6 +16450,39 @@ class imgLib:
             else:
                 return False,best_idx,best_ssim
 
+        def findDuplicateByPathAndImage(
+            self,
+            new_img_path:str|Path,
+            hash_thresh=0.9,
+            ssim_thresh=0.98,
+            max_scan_for_hash=5000,
+        ):
+            """
+            Finds duplicate images based on perceptual hash and SSIM, and retrieves the duplicate image if found.
+
+            Args:
+                new_img_path (str|Path): Path to the new image.
+                hash_thresh (float): Threshold for hash similarity.
+                ssim_thresh (float): Threshold for SSIM similarity.
+                max_scan_for_hash (int): Maximum number of images to scan for hash similarity.
+
+            Returns:
+                tuple: (is_duplicate (bool), index (int), ssim_score (float), duplicate_image_path (Path|None), duplicate_image (np.ndarray|None))
+            """
+            is_duplicate,index,ssim=self.findDuplicateByPath(
+                new_img_path,
+                hash_thresh=hash_thresh,
+                ssim_thresh=ssim_thresh,
+                max_scan_for_hash=max_scan_for_hash,
+            )
+            
+            img_path=None
+            img=None
+            if(isinstance(index,int)):
+                if(index>=0):
+                    img_path,img=self.getIndexImage(index)
+            return is_duplicate,index,ssim,img_path,img
+
         @property
         def paths(self):
             """
