@@ -24596,9 +24596,15 @@ class imgLib:
         ENSEMBLE_MODE_OR_NMS="ORNMS"
         ENSEMBLE_MODE_NMW="NMW"
         ENSEMBLE_MODE_WBF="WBF"
+        ENSEMBLE_MODE_CENTER_CLUSTER="CenterCluster"
 
         ENSEMBLE_MULTI_CLASS_MODE_EACH_CLASS="EachClass"
         ENSEMBLE_MULTI_CLASS_MODE_ALL_CLASS_TOGETHER="AllClassTogether"
+
+        CENTER_CLUSTER_DEFAULT_DIST_THRESHOLD=0.5
+        CENTER_CLUSTER_DEFAULT_SIZE_RATIO_THRESHOLD=2.0
+        CENTER_CLUSTER_DEFAULT_OVERLAP_RATIO_THRESHOLD=0.2
+        CENTER_CLUSTER_DEFAULT_MIN_CLUSTER_SIZE=1
 
         @staticmethod
         def EnsembleFunc4YOLOResult(mode:str,yolo_result_list:list,iou_threshold:float=DEFAULT_IOU_THRESHOLD,multi_class_mode:str=ENSEMBLE_MULTI_CLASS_MODE_EACH_CLASS,**yolo_ensemble_argv):
@@ -24753,6 +24759,36 @@ class imgLib:
                     n=models_num
                 )
                 
+            elif(mode==imgLib.ensembleModel.ENSEMBLE_MODE_CENTER_CLUSTER):
+                dist_threshold=yolo_ensemble_argv.get(
+                    "dist_threshold",
+                    imgLib.ensembleModel.CENTER_CLUSTER_DEFAULT_DIST_THRESHOLD
+                )
+                size_ratio_threshold=yolo_ensemble_argv.get(
+                    "size_ratio_threshold",
+                    imgLib.ensembleModel.CENTER_CLUSTER_DEFAULT_SIZE_RATIO_THRESHOLD
+                )
+                overlap_ratio_threshold=yolo_ensemble_argv.get(
+                    "overlap_ratio_threshold",
+                    imgLib.ensembleModel.CENTER_CLUSTER_DEFAULT_OVERLAP_RATIO_THRESHOLD
+                )
+                min_cluster_size=yolo_ensemble_argv.get(
+                    "min_cluster_size",
+                    imgLib.ensembleModel.CENTER_CLUSTER_DEFAULT_MIN_CLUSTER_SIZE
+                )
+
+                return imgLib.ensembleModel.CenterCluster(
+                    bboxes=bboxes,
+                    scores=scores,
+                    classes=classes,
+                    iou_threshold=iou_threshold,
+                    multi_class_mode=multi_class_mode,
+                    dist_threshold=dist_threshold,
+                    size_ratio_threshold=size_ratio_threshold,
+                    overlap_ratio_threshold=overlap_ratio_threshold,
+                    min_cluster_size=min_cluster_size
+                )
+            
             else:
                 raise ValueError(f"Invalid \"mode\"! => \"{mode}\"")
 
@@ -25257,6 +25293,221 @@ class imgLib:
             result_classes=[max(set(c),key=c.count) for c in new_classes]
 
             return {"bboxes":fusions,"scores":result_confidences,"classes":result_classes}
+
+        @staticmethod
+        def CenterCluster(
+            bboxes:list,
+            scores:list,
+            classes:list,
+            iou_threshold:float,
+            multi_class_mode:str,
+            dist_threshold:float=None,
+            size_ratio_threshold:float=None,
+            overlap_ratio_threshold:float=None,
+            min_cluster_size:int=None
+        ):
+            """
+            Applies the center-distance based clustering ensemble method.
+
+            This method does not use IoU. It groups bounding boxes based on:
+              - normalized center distance (distance / min(diagonal_length))
+              - similarity of width/height
+              - 1D overlap ratio in x and y directions
+
+            Args:
+                bboxes (list): List of bounding boxes [x1,y1,x2,y2].
+                scores (list): List of scores.
+                classes (list): List of class numbers.
+                iou_threshold (float): Threshold parameter from outer API.
+                    If dist_threshold is None, this value is used as dist_threshold.
+                multi_class_mode (str): Multi-class mode.
+                dist_threshold (float): Normalized center distance threshold.
+                size_ratio_threshold (float): Max allowed ratio of width/height
+                    between boxes in the same cluster.
+                overlap_ratio_threshold (float): Min required 1D overlap ratio
+                    (x and y directions).
+                min_cluster_size (int): Minimum cluster size to output a detection.
+                    Clusters with fewer boxes are ignored.
+
+            Returns:
+                dict: Dictionary containing "bboxes", "scores", and "classes".
+            """
+            if(dist_threshold==None):
+                if(iou_threshold==None):
+                    dist_threshold=imgLib.ensembleModel.CENTER_CLUSTER_DEFAULT_DIST_THRESHOLD
+                else:
+                    dist_threshold=iou_threshold
+
+            if(size_ratio_threshold==None):
+                size_ratio_threshold=imgLib.ensembleModel.CENTER_CLUSTER_DEFAULT_SIZE_RATIO_THRESHOLD
+
+            if(overlap_ratio_threshold==None):
+                overlap_ratio_threshold=imgLib.ensembleModel.CENTER_CLUSTER_DEFAULT_OVERLAP_RATIO_THRESHOLD
+
+            if(min_cluster_size==None):
+                min_cluster_size=imgLib.ensembleModel.CENTER_CLUSTER_DEFAULT_MIN_CLUSTER_SIZE
+
+            f=imgLib.ensembleModel.CenterClusterProc
+            return imgLib.ensembleModel.multiClassesFunc(
+                func=f,
+                bboxes=bboxes,
+                scores=scores,
+                classes=classes,
+                iou_threshold=dist_threshold,
+                multi_class_mode=multi_class_mode,
+                size_ratio_threshold=size_ratio_threshold,
+                overlap_ratio_threshold=overlap_ratio_threshold,
+                min_cluster_size=min_cluster_size
+            )
+
+        @staticmethod
+        def CenterClusterProc(
+            bboxes:list,
+            scores:list,
+            classes:list,
+            iou_threshold:float,
+            size_ratio_threshold:float,
+            overlap_ratio_threshold:float,
+            min_cluster_size:int
+        ):
+            """
+            Applies the center-distance based clustering ensemble method to a single class.
+
+            Args:
+                bboxes (list): List of bounding boxes [x1,y1,x2,y2].
+                scores (list): List of scores.
+                classes (list): List of class numbers.
+                iou_threshold (float): Normalized center distance threshold
+                    (distance / min(diagonal_length)).
+                size_ratio_threshold (float): Max allowed ratio of width/height
+                    between boxes in the same cluster.
+                overlap_ratio_threshold (float): Min required 1D overlap ratio
+                    for both x and y directions.
+                min_cluster_size (int): Minimum cluster size to output a detection.
+
+            Returns:
+                dict: Dictionary containing "bboxes", "scores", and "classes".
+            """
+            n=len(bboxes)
+            if(n==0):
+                return {"bboxes":[],"scores":[],"classes":[]}
+
+            centers=[]
+            sizes=[]
+            diags=[]
+            areas=[]
+
+            for bbox in bboxes:
+                x1,y1,x2,y2=bbox
+                w=x2-x1
+                h=y2-y1
+                cx=(x1+x2)/2
+                cy=(y1+y2)/2
+                diag=math.sqrt(w*w+h*h)
+
+                if(diag<=0):
+                    diag=1e-6
+
+                centers.append((cx,cy))
+                sizes.append((w,h))
+                diags.append(diag)
+                areas.append(max(w,0)*max(h,0))
+
+            parents=list(range(n))
+
+            def _find(i:int)->int:
+                while(parents[i]!=i):
+                    parents[i]=parents[parents[i]]
+                    i=parents[i]
+                return i
+
+            def _union(i:int,j:int):
+                pi=_find(i)
+                pj=_find(j)
+                if(pi!=pj):
+                    parents[pj]=pi
+
+            for i in range(n):
+                cx_i,cy_i=centers[i]
+                w_i,h_i=sizes[i]
+                x1_i,y1_i,x2_i,y2_i=bboxes[i]
+
+                for j in range(i+1,n):
+                    cx_j,cy_j=centers[j]
+                    w_j,h_j=sizes[j]
+                    x1_j,y1_j,x2_j,y2_j=bboxes[j]
+
+                    dx=cx_i-cx_j
+                    dy=cy_i-cy_j
+                    dist=math.sqrt(dx*dx+dy*dy)
+                    diag_min=min(diags[i],diags[j])
+
+                    if(diag_min<=0):
+                        continue
+
+                    d_norm=dist/diag_min
+                    if(d_norm>iou_threshold):
+                        continue
+
+                    min_w=min(w_i,w_j)
+                    min_h=min(h_i,h_j)
+                    if(min_w<=0 or min_h<=0):
+                        continue
+
+                    width_ratio=max(w_i,w_j)/min_w
+                    height_ratio=max(h_i,h_j)/min_h
+                    if(width_ratio>size_ratio_threshold or height_ratio>size_ratio_threshold):
+                        continue
+
+                    overlap_x=max(0,min(x2_i,x2_j)-max(x1_i,x1_j))
+                    overlap_y=max(0,min(y2_i,y2_j)-max(y1_i,y1_j))
+
+                    overlap_x_ratio=overlap_x/min_w
+                    overlap_y_ratio=overlap_y/min_h
+
+                    if(overlap_x_ratio<overlap_ratio_threshold or overlap_y_ratio<overlap_ratio_threshold):
+                        continue
+
+                    _union(i,j)
+
+            clusters={}
+            for i in range(n):
+                root=_find(i)
+                if(root not in clusters):
+                    clusters[root]=[]
+                clusters[root].append(i)
+
+            new_bboxes=[]
+            new_scores=[]
+            new_classes=[]
+
+            for index_list in clusters.values():
+                if(len(index_list)<min_cluster_size):
+                    continue
+
+                if(len(index_list)==1):
+                    i=index_list[0]
+                    new_bboxes.append(bboxes[i])
+                    new_scores.append(scores[i])
+                    new_classes.append(classes[i])
+                    continue
+
+                max_area_index=index_list[0]
+                max_area=areas[max_area_index]
+                for idx in index_list[1:]:
+                    if(areas[idx]>max_area):
+                        max_area=areas[idx]
+                        max_area_index=idx
+
+                cluster_scores=[scores[idx] for idx in index_list]
+                best_score=max(cluster_scores)
+                best_score_index=index_list[cluster_scores.index(best_score)]
+
+                new_bboxes.append(bboxes[max_area_index])
+                new_scores.append(best_score)
+                new_classes.append(classes[best_score_index])
+
+            return {"bboxes":new_bboxes,"scores":new_scores,"classes":new_classes}
 
     class YOLOModelLib:
         """
