@@ -37,7 +37,7 @@ import itertools
 from itertools import chain, dropwhile
 import colorsys
 import uuid
-from typing import Dict, Tuple, Any, Callable, Iterable, Optional, List, TYPE_CHECKING, BinaryIO, Literal
+from typing import Dict, Tuple, Any, Callable, Iterable, Optional, List, TYPE_CHECKING, BinaryIO, Literal, Union
 import ast
 import hashlib
 import codecs
@@ -48,6 +48,8 @@ import mimetypes
 import weakref
 import gc
 from fnmatch import fnmatch
+import smtplib
+from email.message import EmailMessage
 
 # ultralytics
 IMPORT_ULTRALYTICS_FLAG=True
@@ -1963,6 +1965,112 @@ class pyExLib:
                     r["errors"].append(f"cuda_smoke_test_error:{repr(e)}")
 
         return r
+
+    def sendGMail(
+        subject:str,
+        body:str,
+        to_addrs:Union[str,Iterable[str]],
+        from_mail_user:str|None=None,
+        from_mail_app_pass:str|None=None,
+        cc_addrs:Union[str,Iterable[str],None]=None,
+        bcc_addrs:Union[str,Iterable[str],None]=None,
+        body_html:str|None=None,
+        attachments:Optional[Iterable[str]]=None,
+        reply_to:str|None=None,
+        smtp_host:str="smtp.gmail.com",
+        smtp_port:int=587,
+        use_ssl:bool=False,
+        use_starttls:bool=True,
+        charset:str="utf-8"
+    )->None:
+        """
+        Sends an email using Gmail's SMTP server.
+
+        Args:
+            subject (str): Email subject.
+            body (str): Email body in plain text.
+            to_addrs (str or Iterable[str]): Recipient email address(es).
+            from_mail_user (str or None): Sender email address. If None, uses the `GMAIL_USER` environment variable.
+            from_mail_app_pass (str or None): App password for the sender email. If None, uses the `GMAIL_APP_PASS` environment variable. 
+            cc_addrs (str or Iterable[str] or None): CC email address(es).
+            bcc_addrs (str or Iterable[str] or None): BCC email address(es).
+            body_html (str or None): Email body in HTML format.
+            attachments (Iterable[str] or None): List of file paths to attach.
+            reply_to (str or None): Reply-To email address.
+            smtp_host (str): SMTP server host.
+            smtp_port (int): SMTP server port.
+            use_ssl (bool): Whether to use SSL for the SMTP connection.
+            use_starttls (bool): Whether to use STARTTLS for the SMTP connection.
+            charset (str): Character set for the email content.
+        
+        Raises:
+            ValueError: If required parameters are missing or invalid.
+        """
+
+        def _normalize_addrs(addrs:Union[str,Iterable[str],None])->list[str]:
+            if(addrs is None):
+                return []
+            if(isinstance(addrs,str)):
+                return [addrs]
+            return list(addrs)
+
+        if(from_mail_user is None):
+            from_mail_user=os.environ.get("GMAIL_USER")
+        if(from_mail_app_pass is None):
+            from_mail_app_pass=os.environ.get("GMAIL_APP_PASS")
+
+        if(from_mail_user is None or from_mail_app_pass is None):
+            raise ValueError("from_mail_user and from_mail_app_pass must be provided or set in environment variables!")
+
+        to_list=_normalize_addrs(to_addrs)
+        cc_list=_normalize_addrs(cc_addrs)
+        bcc_list=_normalize_addrs(bcc_addrs)
+
+        if(len(to_list)==0 and len(cc_list)==0 and len(bcc_list)==0):
+            raise ValueError("At least one recipient address must be provided!")
+
+        msg=EmailMessage()
+        msg["Subject"]=subject
+        msg["From"]=from_mail_user
+        msg["To"]=",".join(to_list)
+
+        if(len(cc_list)>0):
+            msg["Cc"]=",".join(cc_list)
+
+        if(reply_to is not None):
+            msg["Reply-To"]=reply_to
+
+        if(body_html is None):
+            msg.set_content(body,subtype="plain",charset=charset)
+        else:
+            msg.set_content(body,subtype="plain",charset=charset)
+            msg.add_alternative(body_html,subtype="html",charset=charset)
+
+        if(attachments is not None):
+            for path in attachments:
+                ctype,encoding=mimetypes.guess_type(path)
+                if(ctype is None or encoding is not None):
+                    ctype="application/octet-stream"
+                maintype,subtype=ctype.split("/",1)
+
+                with open(path,"rb") as f:
+                    data=f.read()
+
+                filename=os.path.basename(path)
+                msg.add_attachment(data,maintype=maintype,subtype=subtype,filename=filename)
+
+        if(use_ssl):
+            smtp_class=smtplib.SMTP_SSL
+        else:
+            smtp_class=smtplib.SMTP
+
+        with smtp_class(smtp_host,smtp_port) as server:
+            server.ehlo()
+            if(use_starttls and not use_ssl):
+                server.starttls()
+                server.ehlo()
+            server.login(from_mail_user,from_mail_app_pass)
+            server.send_message(msg)
 
     class ClassDataCoreLib:
         """
