@@ -24715,7 +24715,13 @@ class imgLib:
         CENTER_CLUSTER_DEFAULT_MIN_CLUSTER_SIZE=1
 
         @staticmethod
-        def EnsembleFunc4YOLOResult(mode:str,yolo_result_list:list,iou_threshold:float=DEFAULT_IOU_THRESHOLD,multi_class_mode:str=ENSEMBLE_MULTI_CLASS_MODE_EACH_CLASS,**yolo_ensemble_argv):
+        def EnsembleFunc4YOLOResult(
+            mode:str,
+            yolo_result_list:list,
+            iou_threshold:float=DEFAULT_IOU_THRESHOLD,
+            multi_class_mode:str=ENSEMBLE_MULTI_CLASS_MODE_EACH_CLASS,
+            **yolo_ensemble_argv
+        ):
             """
             Ensemble function for YOLO results.
 
@@ -24724,7 +24730,7 @@ class imgLib:
                 yolo_result_list (list): List of YOLO results.
                 iou_threshold (float): IoU threshold.
                 multi_class_mode (str): Multi-class mode.
-                **yolo_ensemble_argv: Additional arguments for the ensemble function.
+                **yolo_ensemble_argv: Additional arguments for the ensemble function. `model_weights` can be provided as a list of weights for each model.
 
             Returns:
                 dict: Dictionary containing bounding boxes, scores, and class numbers.
@@ -24742,13 +24748,33 @@ class imgLib:
 
             models_num=len(yolo_result_list) # Number of models
 
+            # model_weights
+            model_weights=yolo_ensemble_argv.pop("model_weights",None)
+            if(model_weights!=None):
+                if(not isinstance(model_weights,list)):
+                    raise ValueError("Error : \"model_weights\" must be a list!")
+                if(len(model_weights)!=models_num):
+                    raise ValueError("Error : The length of \"model_weights\" must be equal to the number of models!")
+                try:
+                    model_weights=[float(w) for w in model_weights]
+                except Exception:
+                    raise ValueError("Error : \"model_weights\" must contain numeric values!")
+
             if(all([isinstance(yri,ultralytics.engine.results.Results) for yri in yolo_result_list])):                
                 if(not IMPORT_TORCH_FLAG):
                     raise RuntimeError("Error : The torch package is not installed!")
                 
-                for yri in yolo_result_list:
+                for i,yri in enumerate(yolo_result_list):
+                    if(model_weights==None):
+                        w=1.0
+                    else:
+                        w=model_weights[i]
+                    
                     bboxes.append(yri.boxes.xyxy)
-                    scores.append(yri.boxes.conf)
+                    if(w==1.0):
+                        scores.append(yri.boxes.conf)
+                    else:
+                        scores.append(yri.boxes.conf*w)
                     classes.append(yri.boxes.cls)
 
                 bboxes=torch.cat(bboxes)
@@ -24760,14 +24786,23 @@ class imgLib:
                 classes=classes.tolist()
 
             elif(all([isinstance(yri,dict) for yri in yolo_result_list])):
-                for yri in yolo_result_list:
+                for i,yri in enumerate(yolo_result_list):
                     if("boxes" not in yri):
                         raise ValueError("Error : yolo_result_list must be a list of ultralytics.engine.results.Results or dict with 'boxes' key!") 
                     if("xyxy" not in yri["boxes"] or "conf" not in yri["boxes"] or "cls" not in yri["boxes"]):
                         raise ValueError("Error : yolo_result_list must be a list of ultralytics.engine.results.Results or dict with 'boxes' key containing 'xyxy', 'conf', and 'cls' keys!")
 
+                    if(model_weights==None):
+                        w=1.0
+                    else:
+                        w=model_weights[i]
+
+                    tmp_conf_list=yri["boxes"]["conf"]
+                    if(w!=1.0):
+                        tmp_conf_list=[float(c)*w for c in tmp_conf_list]
+
                     bboxes.extend(yri["boxes"]["xyxy"])
-                    scores.extend(yri["boxes"]["conf"])
+                    scores.extend(tmp_conf_list)
                     classes.extend(yri["boxes"]["cls"])
 
             else:
@@ -27720,11 +27755,11 @@ class imgLib:
                 d={}
                 for model_name,results in self.generatorPerModel():
                     d[model_name]=imgLib.BBimgJson.BuildConfusionMatrixFromBBimgJsonList(
-                            [ri for ri in results.values()],
-                            iou_threshold=iou_threshold,
-                            include_background=include_background,
-                            background_label=background_label,
-                            orientation=imgLib.BBimgJson.BUILD_CONFUSION_MATRIX_FROM_BB_IMG_JSON_LIST_ORIENTATION_ULTRALYTICS
+                        [ri for ri in results.values()],
+                        iou_threshold=iou_threshold,
+                        include_background=include_background,
+                        background_label=background_label,
+                        orientation=imgLib.BBimgJson.BUILD_CONFUSION_MATRIX_FROM_BB_IMG_JSON_LIST_ORIENTATION_ULTRALYTICS
                     )
                 if(self.__lock_append and self.__cache_mode):
                     if(self.__confusion_matrix_dict is None):
