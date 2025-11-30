@@ -27791,6 +27791,86 @@ class imgLib:
                     background_label=background_label
                 )
 
+            DEFAULT_CM_FIG_HEADER_INDEX_FACE_COLOR="#888888"
+            DEFAULT_CM_FIG_GRADIENT_CMAP="Blues"
+
+            def saveConfusionMatrixFig(
+                self,
+                save_dir:Path|str,
+                iou_threshold:float=None,
+                include_background:bool=True,
+                background_label:str=None,
+                cm_fig_header_index_face_color:str=DEFAULT_CM_FIG_HEADER_INDEX_FACE_COLOR,
+                cm_fig_gradient_cmap:str=DEFAULT_CM_FIG_GRADIENT_CMAP,
+                cm_fig_include_title:bool=True,
+                cm_fig_title_args:dict=None,
+            ):
+                """
+                Saves confusion matrix figures for each model.
+
+                Args:
+                    save_dir (Path|str): Directory to save the confusion matrix figures.
+                    iou_threshold (float, optional): IoU threshold for the confusion matrix.
+                    include_background (bool, optional): Whether to include background class.
+                    background_label (str, optional): Label for the background class.
+                    cm_fig_header_index_face_color (str, optional): Face color for the header index.
+                    cm_fig_gradient_cmap (str, optional): Colormap for the gradient.
+                    cm_fig_include_title (bool, optional): Whether to include title in the figure.
+                    cm_fig_title_args (dict, optional): Additional arguments for the figure title.
+                """
+                save_dir=Path(save_dir)
+                save_dir.mkdir(parents=True,exist_ok=True)
+
+                cm_dict=self.getConfusionMatrixDict(
+                    iou_threshold=iou_threshold,
+                    include_background=include_background,
+                    background_label=background_label
+                )
+
+                cm_fig_header_index_styles={
+                    "fontweight":"bold",
+                    "facecolor":cm_fig_header_index_face_color,
+                    "loc":"center",
+                }
+
+                for model_name in cm_dict.keys():
+                    cm_df=cm_dict[model_name]
+                    if(not isinstance(cm_df,pd.DataFrame)):
+                        raise ValueError(f"Confusion matrix for model {model_name} is not a DataFrame.")
+
+                    cm_fig_title=None
+                    if(cm_fig_include_title):
+                        cm_fig_title=str(model_name)
+
+                    cm_df.insert(0,(cm_df.index.name or "index"),cm_df.index)
+
+                    columns=list(cm_df.columns)
+                    index_column_name=columns.pop(0)
+                    
+                    vmin=float(cm_df.min(skipna=True,numeric_only=True).min())
+                    vmax=float(cm_df.max(skipna=True,numeric_only=True).max())
+
+                    out_path=save_dir/f"{model_name}.png"
+                    pyExLib.DataFrameExLib.TablePlotter.dataFrameTablePlot(
+                        cm_df,
+                        output_path=out_path,
+                        gradient_columns=columns,
+                        gradient_cmap=cm_fig_gradient_cmap,
+                        gradient_vmin=vmin,
+                        gradient_vmax=vmax,
+                        header_styles={
+                            "all":cm_fig_header_index_styles,
+                            index_column_name:{
+                                "color":cm_fig_header_index_face_color
+                            }
+                        },
+                        col_styles={
+                            index_column_name:cm_fig_header_index_styles
+                        },
+                        fig_title=cm_fig_title,
+                        title_args=cm_fig_title_args,
+                    )
+
             def getEvaluationDict(
                 self,
                 iou_threshold:float=None,
@@ -28036,7 +28116,12 @@ class imgLib:
                 include_index:bool=True,
                 include_title:bool=True,
                 freeze_head:bool=True,
-                save_data_frame_csvs:bool=False
+                save_data_frame_csvs:bool=False,
+                save_data_cm_fig:bool=False,
+                cm_fig_header_index_face_color:str=DEFAULT_CM_FIG_HEADER_INDEX_FACE_COLOR,
+                cm_fig_gradient_cmap:str=DEFAULT_CM_FIG_GRADIENT_CMAP,
+                cm_fig_include_title:bool=True,
+                cm_fig_title_args:dict=None,
             ):
                 """
                 Saves all data related to the evaluation.
@@ -28064,6 +28149,11 @@ class imgLib:
                 output_dir_obj=Path(output_dir)
                 output_dir_obj.mkdir(parents=True,exist_ok=True)
 
+                if(evaluation_args is None):
+                    evaluation_args={}
+                elif(not isinstance(evaluation_args,dict)):
+                    raise TypeError("evaluation_args should be a dict!")
+
                 if(save_bb_img_json or save_img):
                     for img_name,result_obj in self.generator():
                         if(not isinstance(result_obj,imgLib.YOLOModelLib.resultBBImgJsonCombinationsModel)):
@@ -28084,11 +28174,13 @@ class imgLib:
                 if(save_all_iou_df):
                     all_iou_df=self.getAllIoUDataFrame(include_iou_mean=include_mean_iou)
                     all_iou_df.to_csv(output_dir_obj/Path("all_iou_df.csv"))
+                
                 if(save_evaluation_json):
                     self.saveEvaluationJson(
                         output_dir_obj/Path("evaluation.json"),
                         evaluation_args=evaluation_args
                     )
+
                 if(save_evaluation_excel):
                     self.saveEvaluationsExcel(
                         output_dir_obj/Path("evaluation.xlsx"),
@@ -28100,6 +28192,22 @@ class imgLib:
                         freeze_head=freeze_head,
                         save_data_frame_csvs=save_data_frame_csvs,
                         evaluation_csvs_dir=output_dir_obj/Path("evaluation_csvs")
+                    )
+
+                if(save_data_cm_fig):
+                    cm_fig_iou_threshold=evaluation_args.get("iou_threshold",None)
+                    cm_fig_include_background=evaluation_args.get("include_background",True)
+                    cm_fig_background_label=evaluation_args.get("background_label",None)
+
+                    self.saveConfusionMatrixFig(
+                        save_dir=output_dir_obj/Path("cm_fig/"),
+                        iou_threshold=cm_fig_iou_threshold,
+                        include_background=cm_fig_include_background,
+                        background_label=cm_fig_background_label,
+                        cm_fig_header_index_face_color=cm_fig_header_index_face_color,
+                        cm_fig_gradient_cmap=cm_fig_gradient_cmap,
+                        cm_fig_include_title=cm_fig_include_title,
+                        cm_fig_title_args=cm_fig_title_args,
                     )
 
             META_ALL_IMAGES_RESULT_BB_IMG_JSON_COMBINATION_MODEL_OBJ="AllImagesResultBBImgJsonCombinationsModelObj"
