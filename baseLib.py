@@ -25678,7 +25678,9 @@ class imgLib:
             save_bb_img_json_each_img:bool=False,
             save_bb_img_json_each_img_out_dir:str=None,
             save_bb_img_json_each_img_out_dir_format:str=None,
-            save_bb_img_json_each_img_args:dict={},
+            save_bb_img_json_each_img_json_args:dict={},
+            save_bb_img_json_each_img_img:bool=False,
+            save_bb_img_json_each_img_img_args:dict={},
 
             cache_mode:bool=False
         ):
@@ -25701,7 +25703,11 @@ class imgLib:
                 auto_img_name_function (callable): Function to generate image names automatically. If None, the default function will be used.
                 save_bb_img_json_each_img (bool): Whether to save bounding box, image, and JSON for each image.
                 save_bb_img_json_each_img_out_dir_format (str): Output directory format for saving bounding box, image, and JSON for each image. Use {img_name} as a placeholder for the image name.
-                save_bb_img_json_each_img_args (dict): Arguments for saving bounding box, image, and JSON for each image.
+                save_bb_img_json_each_img_out_dir (str): Output directory for saving bounding box, image, and JSON for each image.
+                save_bb_img_json_each_img_json_args (dict): Additional arguments for saving JSON.
+                save_bb_img_json_each_img_img (bool): Whether to save bounding box image for each image.
+                save_bb_img_json_each_img_img_args (dict): Additional arguments for saving bounding box image.
+
                 cache_mode (bool): Whether to use cache mode.
             
             Returns:
@@ -25767,7 +25773,9 @@ class imgLib:
                     tmp_results,
                     save_bb_img_json=save_bb_img_json_each_img,
                     output_dir=tmp_save_bb_img_json_each_img_out_dir,
-                    save_json_args=save_bb_img_json_each_img_args
+                    save_json_args=save_bb_img_json_each_img_json_args,
+                    save_bb_img_json_img=save_bb_img_json_each_img_img,
+                    save_bb_img_json_img_args=save_bb_img_json_each_img_img_args,
                 )
             
             all_imgs_results.setLockAppend()
@@ -27416,7 +27424,9 @@ class imgLib:
                     result_obj,
                     save_bb_img_json:bool=True,
                     output_dir:str=None,
-                    save_json_args:dict={},                    
+                    save_json_args:dict={},
+                    save_bb_img_json_img:bool=True,
+                    save_bb_img_json_img_args:dict={},
                 ):
                 """
                 Appends the result object for a specific image.
@@ -27424,6 +27434,11 @@ class imgLib:
                 Args:
                     img_name (str): Name of the image.
                     result_obj: Result object to append.
+                    save_bb_img_json (bool): Whether to save bounding box image JSON.
+                    output_dir (str): Output directory for saving bounding box image JSON.
+                    save_json_args (dict): Additional arguments for saving JSON.
+                    save_bb_img_json_img (bool): Whether to save bounding box image.
+                    save_bb_img_json_img_args (dict): Additional arguments for saving bounding box image.
 
                 Raises:
                     RuntimeError: If appending results is locked.
@@ -27463,6 +27478,11 @@ class imgLib:
                         out_dir=str(save_img_dir),
                         **save_json_args
                     )
+                    if(save_bb_img_json_img):
+                        result_obj.allSaveImg(
+                            out_dir=str(save_img_dir),
+                            **save_bb_img_json_img_args
+                        )
                     
             def getClassNames(self):
                 """
