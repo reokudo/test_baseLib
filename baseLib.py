@@ -10824,7 +10824,7 @@ class IOLib:
             Returns:
                 list: List of file paths.
             """
-            return self.__file_list
+            return self.__file_list.copy()
 
         @property
         def file_asset_list(self):
@@ -10834,7 +10834,7 @@ class IOLib:
             Returns:
                 list: List of FileAsset instances.
             """
-            return self.__file_asset_list
+            return self.__file_asset_list.copy()
 
         @property
         def file_hash_list(self):
@@ -10844,7 +10844,7 @@ class IOLib:
             Returns:
                 list: List of file hashes.
             """
-            return self.__file_hash_list
+            return self.__file_hash_list.copy()
 
         @property
         def total_file_size(self):
@@ -16837,7 +16837,7 @@ class imgLib:
             Returns:
                 list: List of image paths.
             """
-            return self.__paths
+            return self.__paths.copy()
 
         @property
         def hashes(self):
@@ -16847,7 +16847,7 @@ class imgLib:
             Returns:
                 list: List of perceptual hashes.
             """
-            return self.__hashes
+            return self.__hashes.copy()
 
         def getIndexImage(self,index:int):
             """
@@ -17262,7 +17262,7 @@ class imgLib:
             Returns:
                 dict: Information dictionary.
             """
-            return self.__info_dict
+            return self.__info_dict.copy()
 
         @property
         def dataset_root_dir(self):
@@ -28661,6 +28661,7 @@ class imgLib:
                 self,
                 output_dir:str,
                 save_bb_img_json:bool=True,
+                save_bb_img_json_inner_dir:str|Path=None,
                 save_json_args:dict={},
                 save_img:bool=False,
                 save_img_args:dict={},
@@ -28686,6 +28687,7 @@ class imgLib:
                 Args:
                     output_dir (str): Directory to save the output files.
                     save_bb_img_json (bool, optional): Whether to save bounding box image JSON files.
+                    save_bb_img_json_inner_dir (str|Path, optional): Inner directory for saving bounding box image JSON files.
                     save_json_args (dict, optional): Arguments for saving JSON files.
                     save_img (bool, optional): Whether to save bounding box images.
                     save_img_args (dict, optional): Arguments for saving images.
@@ -28715,7 +28717,12 @@ class imgLib:
                     for img_name,result_obj in self.generator():
                         if(not isinstance(result_obj,imgLib.YOLOModelLib.resultBBImgJsonCombinationsModel)):
                             raise TypeError(f"Expected resultBBImgJsonCombinationsModel for image {img_name}, got {type(result_obj)}")
-                        save_img_dir=output_dir_obj/Path(img_name)
+
+                        save_img_dir=None
+                        if(save_bb_img_json_inner_dir is not None):
+                            save_img_dir=output_dir_obj/Path(save_bb_img_json_inner_dir)/Path(img_name)
+                        else:
+                            save_img_dir=output_dir_obj/Path(img_name)
                         
                         if(save_bb_img_json):
                             result_obj.allSaveJson(
@@ -29382,7 +29389,7 @@ class imgLib:
                 Returns:
                     list: A list of model names.
                 """
-                return self.__read_model_list.getModelNames()
+                return self.__read_model_list.getModelNames().copy()
             
             def getImageNames(self):
                 """
@@ -29391,7 +29398,7 @@ class imgLib:
                 Returns:
                     list: A list of image names.
                 """
-                return list(self.__predict_image_data.keys())
+                return list(self.__predict_image_data.keys()).copy()
 
             def getEnsembleModelNames(self):
                 """
@@ -29408,7 +29415,7 @@ class imgLib:
                     return imgLib.YOLOModelLib.YOLOModelPredict.simulateEnsembleCombinationsModelNameList(
                         self.__read_model_list,
                         self.__predict_config_list
-                    )
+                    ).copy()
 
             def getImgTagTypes(self):
                 """
@@ -29417,7 +29424,7 @@ class imgLib:
                 Returns:
                     set: A set of image tag types.
                 """
-                return self.__img_tag_types
+                return self.__img_tag_types.copy()
 
             def __renewDonePredictMatrix(self):
                 """
@@ -29907,6 +29914,11 @@ class imgLib:
                 if(img_tags is None):
                     img_tags=self.getImgTagTypes()
 
+                append_img_names=self.extractImageNamesEachAnyImgTags(
+                    img_tags=list(img_tags),
+                    target_img_names=img_names
+                )
+
                 if(save_bb_img_json):
                     if(output_dir is None):
                         raise ValueError("output_dir must be specified when save_bb_img_json is True")
@@ -29917,7 +29929,7 @@ class imgLib:
 
                 all_model=imgLib.YOLOModelLib.AllImagesResultBBImgJsonCombinationsModel()
 
-                for img_name in img_names:
+                for img_name in append_img_names:
                     result_obj=self.__buildResultObjForImage(img_name,ensemble_model_names,strict=strict)
                     all_model.append(
                         img_name,
@@ -29960,7 +29972,7 @@ class imgLib:
                         img_name_list.append(img_name)
                 return img_name_list
 
-            def extractImageNamesEachAnyImgTags(self,img_tags:list,target_img_names:list=None):
+            def extractImageNamesEachAnyImgTags(self,img_tags:list|tuple|set,target_img_names:list=None):
                 """
                 Extracts image names associated with any of the specified image tags.
 
@@ -29974,7 +29986,7 @@ class imgLib:
                 if(target_img_names is None):
                     target_img_names=self.getImageNames()
                 result_img_name_set=set()
-                for img_tag in img_tags:
+                for img_tag in list(img_tags):
                     result_img_name_set.update(self.extractImageNamesEachImgTag(img_tag,target_img_names=target_img_names))    
                 return list(result_img_name_set)
 
@@ -30096,7 +30108,7 @@ class imgLib:
                 Returns:
                     imgLib.YOLOModelLib.ReadYOLOModelList: The list of YOLO models.
                 """
-                return self.__read_model_list
+                return self.__read_model_list.copy()
 
             @property
             def predict_config_list(self):
@@ -30106,7 +30118,7 @@ class imgLib:
                 Returns:
                     list: The list of prediction configurations.
                 """
-                return self.__predict_config_list
+                return self.__predict_config_list.copy()
 
             @property
             def predict_image_data(self):
@@ -30116,7 +30128,7 @@ class imgLib:
                 Returns:
                     dict: The dictionary of prediction image data.
                 """
-                return self.__predict_image_data
+                return self.__predict_image_data.copy()
 
             @property
             def done_one_model_predict_matrix(self):
@@ -30127,7 +30139,7 @@ class imgLib:
                     pd.DataFrame: The done prediction matrix for individual one models.
                 """
                 self.__renewDonePredictMatrix()
-                return self.__done_one_model_predict_matrix
+                return self.__done_one_model_predict_matrix.copy()
 
             @property
             def done_ensemble_model_predict_matrix(self):
@@ -30138,7 +30150,7 @@ class imgLib:
                     pd.DataFrame: The done prediction matrix for individual ensemble models.
                 """
                 self.__renewDonePredictMatrix()
-                return self.__done_ensemble_model_predict_matrix
+                return self.__done_ensemble_model_predict_matrix.copy()
 
             @property
             def img_tag_types(self):
@@ -30148,7 +30160,7 @@ class imgLib:
                 Returns:
                     set: The set of image tag types.
                 """
-                return self.__img_tag_types
+                return self.__img_tag_types.copy()
 
     class asciiArtLib:
         """

@@ -30,3 +30,6 @@ pyarrow
 
 # Video processing
 moviepy
+
+# cloudpickle
+cloudpickle
