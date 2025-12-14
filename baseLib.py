@@ -29410,6 +29410,15 @@ class imgLib:
                         self.__predict_config_list
                     )
 
+            def getImgTagTypes(self):
+                """
+                Returns the set of image tag types.
+
+                Returns:
+                    set: A set of image tag types.
+                """
+                return self.__img_tag_types
+
             def __renewDonePredictMatrix(self):
                 """
                 Renews the done prediction matrices based on the current models and images.
@@ -29863,6 +29872,7 @@ class imgLib:
                 self,
                 img_names:list=None,
                 ensemble_model_names:list=None,
+                img_tags:list|tuple|set=None,
                 strict:bool=True,
 
                 save_bb_img_json:bool=False,
@@ -29894,6 +29904,8 @@ class imgLib:
                     img_names=self.getImageNames()
                 if(ensemble_model_names is None):
                     ensemble_model_names=self.getEnsembleModelNames()
+                if(img_tags is None):
+                    img_tags=self.getImgTagTypes()
 
                 if(save_bb_img_json):
                     if(output_dir is None):
@@ -29918,26 +29930,53 @@ class imgLib:
                     )
                 return all_model
 
-            def imgTagImageNames(self,img_tag:str):
+            def extractImageNamesEachImgTag(self,img_tag:str,target_img_names:list=None):
                 """
-                Retrieves the list of image names associated with a specific image tag.
+                Extracts image names associated with a specific image tag.
 
                 Args:
                     img_tag (str): The image tag to filter by.
-                
+                    target_img_names (list, optional): The list of target image names to consider. If None, all image names will be used.
+
                 Returns:
-                    list: A list of image names associated with the specified tag.
+                    list: A list of image names associated with the specified image tag.
+
+                Raises:
+                    ValueError: If the specified image tag is not found.            
                 """
+                if(target_img_names is None):
+                    target_img_names=self.getImageNames()
+
                 if(img_tag not in self.__img_tag_types):
                     raise ValueError(f"Image tag {img_tag} not found")
                 img_name_list=[]
                 for img_name,img_data in self.__predict_image_data.items():
+                    if(img_name not in target_img_names):
+                        continue
                     if(not isinstance(img_data,dict)):
                         raise TypeError("img_data should be a dict")
                     
                     if(img_tag in img_data.get("img_tags",set())):
                         img_name_list.append(img_name)
                 return img_name_list
+
+            def extractImageNamesEachAnyImgTags(self,img_tags:list,target_img_names:list=None):
+                """
+                Extracts image names associated with any of the specified image tags.
+
+                Args:
+                    img_tags (list): The list of image tags to filter by.
+                    target_img_names (list, optional): The list of target image names to consider. If None, all image names will be used.
+                
+                Returns:
+                    list: A list of image names associated with all specified image tags.
+                """
+                if(target_img_names is None):
+                    target_img_names=self.getImageNames()
+                result_img_name_set=set()
+                for img_tag in img_tags:
+                    result_img_name_set.update(self.extractImageNamesEachImgTag(img_tag,target_img_names=target_img_names))    
+                return list(result_img_name_set)
 
             def __copyDictOrEmpty(self,d):
                 """
@@ -30031,7 +30070,7 @@ class imgLib:
                     out["__all__"]=self.calcEnsembleEvaluationAll(evaluation_args=ea,build_args=ba)
 
                 for tag in img_tags:
-                    img_names=self.imgTagImageNames(tag)
+                    img_names=self.extractImageNamesEachImgTag(tag)
                     if(len(img_names)==0):
                         continue
 
@@ -30049,6 +30088,68 @@ class imgLib:
 
                 return out
             
+            @property
+            def read_model_list(self):
+                """
+                Returns the list of YOLO models in the project.
+
+                Returns:
+                    imgLib.YOLOModelLib.ReadYOLOModelList: The list of YOLO models.
+                """
+                return self.__read_model_list
+
+            @property
+            def predict_config_list(self):
+                """
+                Returns the list of prediction configurations in the project.
+
+                Returns:
+                    list: The list of prediction configurations.
+                """
+                return self.__predict_config_list
+
+            @property
+            def predict_image_data(self):
+                """
+                Returns the dictionary of prediction image data in the project.
+                
+                Returns:
+                    dict: The dictionary of prediction image data.
+                """
+                return self.__predict_image_data
+
+            @property
+            def done_one_model_predict_matrix(self):
+                """
+                Returns the done prediction matrix for individual one models.
+                
+                Returns:
+                    pd.DataFrame: The done prediction matrix for individual one models.
+                """
+                self.__renewDonePredictMatrix()
+                return self.__done_one_model_predict_matrix
+
+            @property
+            def done_ensemble_model_predict_matrix(self):
+                """
+                Returns the done prediction matrix for individual ensemble models.
+                
+                Returns:
+                    pd.DataFrame: The done prediction matrix for individual ensemble models.
+                """
+                self.__renewDonePredictMatrix()
+                return self.__done_ensemble_model_predict_matrix
+
+            @property
+            def img_tag_types(self):
+                """
+                Returns the set of image tag types in the project.
+                
+                Returns:
+                    set: The set of image tag types.
+                """
+                return self.__img_tag_types
+
     class asciiArtLib:
         """
         ASCII art generation library.
