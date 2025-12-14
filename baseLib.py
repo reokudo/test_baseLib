@@ -17,6 +17,7 @@ from decimal import Decimal
 import shutil
 import zipfile
 import gzip
+import pickle
 import tempfile
 import tarfile
 from contextlib import contextmanager
@@ -96,6 +97,15 @@ try:
 except ImportError:
     IMPORT_IJSON_FLAG=False
     print("Pass ijson import! ijson related functions will not be available. \nYou must install ijson package to use ijson related functions. `pip install ijson`\n")
+
+# cloudpickle (optional, for serializing callables/lambdas/closures)
+IMPORT_CLOUDPICKLE_FLAG=True
+try:
+    import cloudpickle
+except ImportError:
+    IMPORT_CLOUDPICKLE_FLAG=False
+    cloudpickle=None
+    print("Pass cloudpickle import! Callable serialization may be limited. \nYou can install cloudpickle: `pip install cloudpickle`\n")
 
 # zstandard
 IMPORT_ZSTANDARD_FLAG=True
@@ -542,6 +552,163 @@ class _FileStore:
         self.__content_hash2path[content_hash]=proposed_relpath
         return proposed_relpath
 
+    __BLOB_NAME_HINT="blob"
+    __CALLABLE_NAME_HINT="callable"
+
+    def saveBlobBytes(
+        self,
+        raw:bytes,
+        name_hint:str=__BLOB_NAME_HINT,
+        ext:str="bin",
+        compress_gzip:bool=False,
+        kind:str="blob.bytes",
+        extra_meta:dict|None=None,
+    ):
+        """
+        Saves raw bytes into the blobs directory.
+        Args:
+            raw (bytes): Raw bytes to save.
+            name_hint (str): Hint for naming the file.
+            ext (str): File extension.
+            compress_gzip (bool): Whether to compress the file using gzip.
+            kind (str): Kind of the blob.
+            extra_meta (dict or None): Additional metadata to include in the returned dictionary.
+
+        Returns:
+            dict: {"__type__":"external_ref","kind":..., "path":..., "format":..., "size":..., "hash":...}
+
+        Raises:
+            ValueError: If the raw data is not bytes-like.
+        """
+        if(not isinstance(raw,(bytes,bytearray,memoryview))):
+            raise ValueError("raw must be bytes-like")
+        b=bytes(raw)
+
+        h=pyExLib.sha256Bytes(b)
+
+        ext=str(ext or "bin").lstrip(".")
+        fmt=f"{ext}.gz" if(compress_gzip) else ext
+
+        rel=f"{pyExLib.slugString(name_hint or _FileStore.__BLOB_NAME_HINT)}_{self._hash_prefix(h)}.{fmt}"
+        rel=os.path.join(os.path.relpath(self.__blobs_dir,self.__base_dir),rel)
+        rel=self.__deDupByHash(h,rel)
+        full=os.path.join(self.__base_dir,rel)
+
+        if(not os.path.exists(full)):
+            os.makedirs(os.path.dirname(full),exist_ok=True)
+            if(compress_gzip):
+                with gzip.open(full,mode="wb") as f:
+                    f.write(b)
+            else:
+                with open(full,mode="wb") as f:
+                    f.write(b)
+
+        meta={
+            "__type__":"external_ref",
+            "kind":str(kind or "blob.bytes"),
+            "path":rel,
+            "format":fmt,
+            "size":int(len(b)),
+            "hash":h,
+        }
+        if(isinstance(extra_meta,dict)):
+            meta.update(extra_meta)
+        return meta
+
+    @staticmethod
+    def __pickleDumps(obj:Any, prefer_cloudpickle:bool=True):
+        """
+        Dumps an object to bytes using cloudpickle if available; otherwise uses pickle.
+
+        Args:
+            obj (Any): Object to serialize.
+            prefer_cloudpickle (bool): Whether to prefer cloudpickle for serialization.
+            
+        Returns:
+            (bytes, str): (raw_bytes, pickle_lib)
+        """
+        if(prefer_cloudpickle and IMPORT_CLOUDPICKLE_FLAG and cloudpickle is not None):
+            return cloudpickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL), "cloudpickle"
+        return pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL), "pickle"
+
+    @staticmethod
+    def __pickleLoads(raw:bytes, pickle_lib:str="pickle"):
+        """
+        Loads an object from bytes using the specified pickle library.
+
+        Args:
+            raw (bytes): Raw bytes to deserialize.
+            pickle_lib (str): Pickle library to use ("pickle" or "cloudpickle").
+        
+        Returns:
+            Any: Deserialized object.
+        """
+        if(pickle_lib=="cloudpickle"):
+            if(not (IMPORT_CLOUDPICKLE_FLAG and cloudpickle is not None)):
+                raise ImportError("cloudpickle is required to load this object")
+            return cloudpickle.loads(raw)
+        return pickle.loads(raw)
+
+    @staticmethod
+    def __resolveModuleQualname(module_name:str, qualname:str):
+        """
+        Resolves `module_name` + `qualname` into an attribute object (or None).
+        
+        Args:
+            module_name (str): Module name.
+            qualname (str): Qualified name within the module.
+
+        Returns:
+            Any or None: Resolved attribute object, or None if not found.
+        """
+        if(not (isinstance(module_name,str) and isinstance(qualname,str))):
+            return None
+        if(not module_name or not qualname):
+            return None
+        try:
+            mod=importlib.import_module(module_name)
+            attr=mod
+            for part in qualname.split("."):
+                attr=getattr(attr,part)
+            return attr
+        except Exception:
+            return None
+
+    @staticmethod
+    def __callableRefValues(fn:Any):
+        """
+        Returns a dict for reference-serialization if the callable is import-resolvable; otherwise None.
+
+        Args:
+            fn (Any): Callable object to serialize.
+            
+        Returns:
+            dict or None: Dictionary with module, qualname, and name if resolvable; otherwise None.
+
+        Raises:
+            ValueError: If fn is not a callable.
+        """
+        if(not (inspect.isfunction(fn) or inspect.isbuiltin(fn))):
+            return None
+        module_name=getattr(fn,"__module__",None)
+        qualname=getattr(fn,"__qualname__",None)
+        name=getattr(fn,"__name__",None)
+
+        if(not (isinstance(module_name,str) and isinstance(qualname,str))):
+            return None
+        if("<locals>" in qualname):
+            return None
+        # __main__ is usually not stable across processes
+        if(module_name=="__main__"):
+            return None
+
+        resolved=_FileStore.__resolveModuleQualname(module_name,qualname)
+        if(resolved is None):
+            return None
+        if(resolved is fn):
+            return {"module":module_name,"qualname":qualname,"name":name}
+        return None
+
     __DATAFRAME_NAME_HINT="df"
 
     def saveDataframe(self,df:pd.DataFrame,name_hint:str=__DATAFRAME_NAME_HINT,compress_csv:bool=True,include_index:bool=False):
@@ -725,7 +892,7 @@ class _FileStore:
                 type,
                 pd.DataFrame,
                 np.ndarray,
-            ]+[torch.Tensor] if IMPORT_TORCH_FLAG else []
+            ]+([torch.Tensor] if IMPORT_TORCH_FLAG else [])
         )
 
     @staticmethod
@@ -939,6 +1106,30 @@ class _FileStore:
         if(isinstance(obj,type)):
             return {"__type__":"type","values":{"module":obj.__module__,"qualname":obj.__qualname__,"name":obj.__name__}}
 
+        # callable (functions, builtins, lambdas, etc.)
+        if(callable(obj)):
+            ref_vals=_FileStore.__callableRefValues(obj)
+            if(ref_vals is not None):
+                wrapped={"__type__":"callable_ref","values":ref_vals}
+                store._objid2ref[oid]=wrapped
+                return wrapped
+            try:
+                raw,lib=_FileStore.__pickleDumps(obj,prefer_cloudpickle=True)
+                ref=store.saveBlobBytes(
+                    raw,
+                    name_hint=(key_hint or _FileStore.__CALLABLE_NAME_HINT),
+                    ext="pkl",
+                    compress_gzip=False,
+                    kind="python.pickle",
+                    extra_meta={"pickle_lib":lib,"object_kind":"callable"},
+                )
+                store._objid2ref[oid]=ref
+                return ref
+            except Exception as e:
+                if(raise_unsupported_object):
+                    raise ValueError(f"Cannot externalize callable of type {type(obj)}: {e}")
+                return {"__type__":"callable_str_repr","value":str(obj)}
+
         # pandas.DataFrame
         if(pd is not None and isinstance(obj, pd.DataFrame)):
             ref=store.saveDataframe(obj,name_hint=(key_hint or _FileStore.__DATAFRAME_NAME_HINT),compress_csv=csv_gzip,include_index=df_index)
@@ -986,6 +1177,7 @@ class _FileStore:
         base_dir:str,
         additional_func:callable=None,
         force_decimal_to_float:bool=False,
+        allow_unpickle:bool=False,
     ):
         """
         Recursively internalizes objects by loading pandas DataFrames and numpy ndarrays from the file store.
@@ -995,6 +1187,7 @@ class _FileStore:
             base_dir (str): Base directory for loading files.
             additional_func (callable or None): Additional function for handling custom types during internalization.
             force_decimal_to_float (bool): Whether to convert Decimal objects to float.
+            allow_unpickle (bool): Whether to allow unpickling of python.pickle objects.
 
         Returns:
             Any: Internalized object with loaded files.
@@ -1010,7 +1203,7 @@ class _FileStore:
                 return res
 
         if(isinstance(node,list)):
-            return [_FileStore.__internalize(v,base_dir,additional_func=additional_func,force_decimal_to_float=force_decimal_to_float) for v in node]
+            return [_FileStore.__internalize(v,base_dir,additional_func=additional_func,force_decimal_to_float=force_decimal_to_float,allow_unpickle=allow_unpickle) for v in node]
         if(isinstance(node,dict)):
             t=node.get("__type__")
             if(t=="external_ref"):
@@ -1085,21 +1278,60 @@ class _FileStore:
                         ten.requires_grad_(True)
                     return ten
 
+                if(kind=="python.pickle"):
+                    allow_unpickle_flag=bool(allow_unpickle)
+                    if(not allow_unpickle_flag):
+                        env_allow=os.environ.get("FILESTORE_ALLOW_UNPICKLE")
+                        if(env_allow is not None):
+                            s=str(env_allow).strip().lower()
+                            allow_unpickle_flag=(s in ("1","true","yes","on"))
+                    if(not allow_unpickle_flag):
+                        return {
+                            "__unpickle_blocked__":True,
+                            "kind":"python.pickle",
+                            "path":rel,
+                            "format":node.get("format","pkl"),
+                            "pickle_lib":node.get("pickle_lib","pickle"),
+                            "hash":node.get("hash"),
+                        }
+                    
+                    fmt=node.get("format","pkl")
+                    lib=node.get("pickle_lib","pickle")
+                    if(isinstance(fmt,str) and fmt.endswith("gz")):
+                        with gzip.open(path,mode="rb") as f:
+                            raw=f.read()
+                    else:
+                        with open(path,mode="rb") as f:
+                            raw=f.read()
+                    return _FileStore.__pickleLoads(raw,pickle_lib=lib)
+
             if(t=="fs.custom"):
                 tname=node.get("type")
                 payload_node=node.get("payload")
-                payload=_FileStore.__internalize(payload_node,base_dir,additional_func=additional_func,force_decimal_to_float=force_decimal_to_float)
+                payload=_FileStore.__internalize(payload_node,base_dir,additional_func=additional_func,force_decimal_to_float=force_decimal_to_float,allow_unpickle=allow_unpickle)
                 parser_cls=_FileStore._parser_registry.get(tname)
                 if(parser_cls is None):
                     return {"__unparsed_custom_type__":tname,"payload":payload,"version":node.get("version")}
                 return parser_cls.fsFromPayload(payload,_FileStore(base_dir))
 
+            if(t=="callable_ref"):
+                v=node.get("values") or {}
+                module_name=v.get("module")
+                qualname=v.get("qualname")
+                resolved=_FileStore.__resolveModuleQualname(module_name,qualname)
+                if(resolved is not None and callable(resolved)):
+                    return resolved
+                return {"__unresolved_callable__":v}
+
+            if(t=="callable_str_repr"):
+                return str(node.get("value"))
+            
             if(t=="tuple"):
-                return tuple(_FileStore.__internalize(v,base_dir,additional_func=additional_func,force_decimal_to_float=force_decimal_to_float) for v in node["items"])
+                return tuple(_FileStore.__internalize(v,base_dir,additional_func=additional_func,force_decimal_to_float=force_decimal_to_float,allow_unpickle=allow_unpickle) for v in node["items"])
             if(t=="frozenset"):
-                return frozenset(_FileStore.__internalize(v,base_dir,additional_func=additional_func,force_decimal_to_float=force_decimal_to_float) for v in node["items"])
+                return frozenset(_FileStore.__internalize(v,base_dir,additional_func=additional_func,force_decimal_to_float=force_decimal_to_float,allow_unpickle=allow_unpickle) for v in node["items"])
             if(t=="set"):
-                return set(_FileStore.__internalize(v,base_dir,additional_func=additional_func,force_decimal_to_float=force_decimal_to_float) for v in node["items"])
+                return set(_FileStore.__internalize(v,base_dir,additional_func=additional_func,force_decimal_to_float=force_decimal_to_float,allow_unpickle=allow_unpickle) for v in node["items"])
             
             if(t=="range"):
                 items=node.get("items") or []
@@ -1165,7 +1397,7 @@ class _FileStore:
             if(t=="str_repr"):
                 return str(node.get("value"))
 
-            return {k:_FileStore.__internalize(v,base_dir,additional_func=additional_func,force_decimal_to_float=force_decimal_to_float) for k,v in node.items()}
+            return {k:_FileStore.__internalize(v,base_dir,additional_func=additional_func,force_decimal_to_float=force_decimal_to_float,allow_unpickle=allow_unpickle) for k,v in node.items()}
 
         if(force_decimal_to_float and isinstance(node,Decimal)):
             return float(node)
@@ -1267,6 +1499,7 @@ class _FileStore:
         load_lazy_mode:bool=False,
         load_additional_func:callable=None,
         force_decimal_to_float:bool=False,
+        allow_unpickle:bool=False,
         json_cls:type=None,
         encoding:str=None,
     ):
@@ -1279,6 +1512,7 @@ class _FileStore:
             load_lazy_mode (bool): Whether to load the JSON file in lazy mode using ijson.
             load_additional_func (callable or None): Additional function to handle custom types during internalization.
             force_decimal_to_float (bool): Whether to convert Decimal types to float during internalization.
+            allow_unpickle (bool): Whether to allow unpickling of python.pickle objects.
             json_cls (type or None): Custom JSON decoder class. If None, uses default.
             encoding (str or None): Encoding for the JSON file. If None, uses default.
 
@@ -1436,6 +1670,7 @@ class _FileStore:
         load_lazy_mode:bool=False,
         load_additional_func:callable=None,
         force_decimal_to_float:bool=False,
+        allow_unpickle:bool=False,
         json_cls:type=None,
         encoding:str=None,
         bundle_filename:str=DEFAULT_BUNDLE_JSON_PATH,
@@ -1451,6 +1686,7 @@ class _FileStore:
             load_lazy_mode (bool): Whether to load the JSON file in lazy mode using ijson.
             load_additional_func (callable or None): Additional function to handle custom types during internalization.
             force_decimal_to_float (bool): Whether to convert Decimal types to float during internalization.
+            allow_unpickle (bool): Whether to allow unpickling of python.pickle objects.
             json_cls (type or None): Custom JSON decoder class. If None, uses default.
             encoding (str or None): Encoding for the JSON file. If None, uses default.
             bundle_filename (str): Name of the JSON bundle file inside the zip archive.
@@ -1489,6 +1725,7 @@ class _FileStore:
                         load_lazy_mode=load_lazy_mode,
                         load_additional_func=load_additional_func,
                         force_decimal_to_float=force_decimal_to_float,
+                        allow_unpickle=allow_unpickle,
                         json_cls=json_cls,
                         encoding=encoding,
                     )
@@ -1511,6 +1748,7 @@ class _FileStore:
                     load_lazy_mode=load_lazy_mode,
                     load_additional_func=load_additional_func,
                     force_decimal_to_float=force_decimal_to_float,
+                    allow_unpickle=allow_unpickle,
                     json_cls=json_cls,
                     encoding=encoding,
                 )
@@ -18310,16 +18548,16 @@ class imgLib:
         META_YOLOANN="YOLOANN"
 
         def __init__(
-                self,
-                img_mode:str,
-                ann_data_arg,
-                arg,
-                img_reshape_log:list=[],
-                class_names_txt_path:str=None,
-                ann_file_mode:str=ANN_FILE_MODE_YOLOV3,
-                img_specific_key_in_coco_data=None,
-                allow_reshape_flag:bool=True
-            ):
+            self,
+            img_mode:str,
+            ann_data_arg,
+            arg,
+            img_reshape_log:list=[],
+            class_names_txt_path:str=None,
+            ann_file_mode:str=ANN_FILE_MODE_YOLOV3,
+            img_specific_key_in_coco_data=None,
+            allow_reshape_flag:bool=True
+        ):
             """
             Initializes the YOLOANN instance.
 
@@ -20260,6 +20498,132 @@ class imgLib:
             return [imgLib.YOLOANNResult(self,ri) for ri in r]
 
     @_protectedClass.fileStoreMyLibRegister
+    class wrapperYOLOANN(_FileStore.FileStoreParser):
+        """
+        Wrapper class for YOLOANN with image and label paths.
+        ️"""
+
+        @staticmethod
+        def DEFAULT_AUTO_IMG_NAME_FUNCTION(image_path:str|Path):
+            """
+            Default function to automatically generate image names from image paths.
+
+            Args:
+                image_path (str|Path): Path to the image.
+            
+            Returns:
+                str: Generated image name.
+            """
+            image_path=Path(image_path)
+            return image_path.stem
+        
+        def __init__(
+            self,
+            image_path:str|Path,
+            label_path:str|Path,
+            img_name:str=None,
+            is_auto_img_name:bool=False,
+            auto_img_name_function:callable=DEFAULT_AUTO_IMG_NAME_FUNCTION,
+            img_reshape_log:list=[],
+            class_names_txt_path:str=None,
+            ann_file_mode:str=None,
+            img_specific_key_in_coco_data=None,
+            allow_reshape_flag:bool=True,
+        ):
+            """
+            Initializes the wraperYOLOANN instance.
+
+            Args:
+                image_path (str|Path): Path to the image.
+                label_path (str|Path): Path to the label.
+                img_name (str): Name of the image.
+                is_auto_img_name (bool): Whether to automatically generate the image name.
+                auto_img_name_function (callable): Function to automatically generate the image name.
+                img_reshape_log (list): Image reshape log.
+                class_names_txt_path (str): Path to the class names file.
+                ann_file_mode (str): Annotation file mode.
+                img_specific_key_in_coco_data: Image specific key in COCO data.
+                allow_reshape_flag (bool): Whether to allow reshaping.
+            
+            Raises:
+                FileNotFoundError: If the image_path or label_path does not exist.
+                TypeError: If img_name is not specified when is_auto_img_name is False.
+            """
+            image_path=Path(image_path)
+            if(not image_path.exists()):
+                raise FileNotFoundError(f"Error : The image_path \"{str(image_path)}\" does not exist!")
+            elif(not image_path.is_file()):
+                raise FileNotFoundError(f"Error : The image_path \"{str(image_path)}\" is not a file!")
+
+            label_path=Path(label_path)
+            if(not label_path.exists()):
+                raise FileNotFoundError(f"Error : The label_path \"{str(label_path)}\" does not exist!")
+            elif(not label_path.is_file()):
+                raise FileNotFoundError(f"Error : The label_path \"{str(label_path)}\" is not a file!")
+
+            if(is_auto_img_name):
+                img_name=auto_img_name_function(image_path)
+            elif(img_name is None):
+                raise TypeError("Error : img_name must be specified if is_auto_img_name is False!")
+
+            if(ann_file_mode is None):
+                ann_file_mode=imgLib.YOLOANN.ANN_FILE_MODE_YOLOV3
+
+            self.__image_path=image_path
+            self.__label_path=label_path
+            self.__img_name=str(img_name)
+            self.__yolo_ann=imgLib.YOLOANN(
+                img_mode=imgLib.YOLOANN.IMG_MODE_FILE,
+                ann_data_arg=str(label_path),
+                arg=str(image_path),
+                img_reshape_log=img_reshape_log,
+                class_names_txt_path=class_names_txt_path,
+                ann_file_mode=ann_file_mode,
+                img_specific_key_in_coco_data=img_specific_key_in_coco_data,
+                allow_reshape_flag=allow_reshape_flag
+            )
+
+        @property
+        def image_path(self):
+            """
+            Gets the image path.
+
+            Returns:
+                str: Image path.
+            """
+            return self.__image_path
+
+        @property
+        def label_path(self):
+            """
+            Gets the label path.
+
+            Returns:
+                str: Label path.
+            """
+            return self.__label_path
+
+        @property
+        def img_name(self):
+            """
+            Gets the image name.
+
+            Returns:
+                str: Image name.
+            """
+            return self.__img_name
+
+        @property
+        def yolo_ann(self):
+            """
+            Gets the YOLOANN instance.
+
+            Returns:
+                imgLib.YOLOANN: YOLOANN instance.
+            """
+            return self.__yolo_ann
+
+    @_protectedClass.fileStoreMyLibRegister
     class YOLOANNResult(YOLOANN,_FileStore.FileStoreParser):
         """
         Class for YOLOANN result data.
@@ -21036,7 +21400,7 @@ class imgLib:
                 imgLib.YOLOANNDataset: YOLOANNDataset instance for each batch
             """
 
-            _,_,detail_file_info_list=imgLib.YOLOANNDataset.__static_init_import_ann_data(
+            _,_,detail_file_info_list=imgLib.YOLOANNDataset._static_init_import_ann_data(
                 ann_ptn_list=ann_ptn_list,
                 img_ptn_list=img_ptn_list,
                 ann_re_str=ann_re_str,
@@ -21174,7 +21538,7 @@ class imgLib:
                 raise TypeError("Error : The filename list must not contain duplicate file names!")
 
         @staticmethod
-        def __static_init_import_ann_data(
+        def _static_init_import_ann_data(
             ann_ptn_list:list,
             img_ptn_list:list,
             ann_re_str:str="",
@@ -21268,7 +21632,7 @@ class imgLib:
                 TypeError: If the lengths of the annotation pattern list and image pattern list are not the same.
             """
             
-            self.__ann_data_list,self.__filename_list,_=imgLib.YOLOANNDataset.__static_init_import_ann_data(
+            self.__ann_data_list,self.__filename_list,_=imgLib.YOLOANNDataset._static_init_import_ann_data(
                 ann_ptn_list=self.__ann_ptn_list,
                 img_ptn_list=self.__img_ptn_list,
                 ann_re_str=self.__ann_re_str,
@@ -26000,14 +26364,15 @@ class imgLib:
                 tmp_read_yolo_model_obj_list=[]
                 for dir_path in dir_list:
                     tmp_dir_path=Path(dir_path)
-                    if((tmp_dir_path/Path("weights/best.pt")).exists()):
-                        tmp_read_yolo_model_obj_list.append(
-                            imgLib.YOLOModelLib.readYOLOModel(
-                                dir_path,
-                                is_auto_name=is_auto_name,
-                                auto_name_func=auto_name_func
+                    if(tmp_dir_path.is_dir()):
+                        if((tmp_dir_path/Path("weights/best.pt")).exists()):
+                            tmp_read_yolo_model_obj_list.append(
+                                imgLib.YOLOModelLib.readYOLOModel(
+                                    dir_path,
+                                    is_auto_name=is_auto_name,
+                                    auto_name_func=auto_name_func
+                                )
                             )
-                        )
                 return imgLib.YOLOModelLib.readYOLOModelList(read_yolo_model_obj_list=tmp_read_yolo_model_obj_list)
 
             def __init__(self,read_yolo_model_obj_list:list=None):
@@ -26191,20 +26556,7 @@ class imgLib:
                     if(not isinstance(model_obj,imgLib.YOLOModelLib.readYOLOModel)):
                         raise TypeError("Invalid readYOLOModel object.")
                     yield model_obj
-
-            def generatorCombinationsReadYOLOModel(self,r:int):
-                """
-                Generates all combinations of readYOLOModel objects from the list.
-
-                Args:
-                    r (int): The length of the combinations.
-
-                Yields:
-                    readYOLOModel: The next readYOLOModel object in the list.
-                """
-                for comb in itertools.combinations(self.__read_yolo_model_obj_list,r):
-                    yield imgLib.YOLOModelLib.readYOLOModelList(list(comb))
-
+                
             def getClassNames(self):
                 """
                 Returns a list of class names from all readYOLOModel objects in the list.
@@ -26230,6 +26582,35 @@ class imgLib:
                         raise TypeError("Invalid readYOLOModel object.")
                     yield model_obj.getModel()
 
+            def generatorCombinationsModelWithComb(self,r:int):
+                """
+                Generates all combinations of YOLO model objects from the list along with their combinations.
+
+                Args:
+                    r (int): The length of the combinations.
+                
+                Yields:
+                    tuple: A tuple containing the combination indices and the corresponding readYOLOModelList.
+
+                Raises:
+                    TypeError: If any readYOLOModel object is invalid.
+                """
+                for comb in itertools.combinations(list(range(len(self.__read_yolo_model_obj_list))),r):
+                    yield comb,imgLib.YOLOModelLib.readYOLOModelList([self.__read_yolo_model_obj_list[i] for i in comb])
+
+            def generatorCombinationsModel(self,r:int):
+                """
+                Generates all combinations of YOLO model objects from the list.
+
+                Args:
+                    r (int): The length of the combinations.
+
+                Yields:
+                    YOLOModel: The next YOLOModel object in the list.
+                """
+                for comb,new_read_yolo_model_list in self.generatorCombinationsModelWithComb(r):
+                    yield new_read_yolo_model_list
+
             def getYOLOModels(self):
                 """
                 Returns a list of all YOLO model objects in the list.
@@ -26238,7 +26619,7 @@ class imgLib:
                     list: A list of YOLOModel objects.
                 """
                 return list(self.generatorYOLOModels())
-
+            
             def getAllDict(self,light_mode:bool=False):
                 """
                 Returns a list of all data dictionaries from readYOLOModel objects in the list.
@@ -26283,6 +26664,46 @@ class imgLib:
                     tmp_list.append(read_yolo_model_obj.getModelName())
                 return tmp_list
 
+            def getReadYOLOModelDataByName(self,model_name:str):
+                """
+                Returns the readYOLOModel object with the specified model name.
+
+                Args:
+                    model_name (str): The model name.
+
+                Returns:
+                    readYOLOModel: The readYOLOModel object with the specified model name.
+                
+                Raises:
+                    ValueError: If no models are in the list or if the model name is not found.
+                """
+                model_names=self.getModelNames()
+                if(len(model_names)==0):
+                    raise ValueError("No models in the list.")
+                elif(model_name not in model_names):
+                    raise ValueError(f"Model name {model_name} not found in the list.")
+                else:
+                    index=model_names.index(model_name)
+                    return self.getReadYOLOModelData(index)
+
+            def getYOLOModelByName(self,model_name:str):
+                """
+                Returns the YOLO model with the specified model name.
+
+                Args:
+                    model_name (str): The model name.
+
+                Returns:
+                    YOLOModel: The YOLO model with the specified model name.
+
+                Raises:
+                    TypeError: If the readYOLOModel object is invalid.
+                """
+                read_yolo_model_obj=self.getReadYOLOModelDataByName(model_name)
+                if(not isinstance(read_yolo_model_obj,imgLib.YOLOModelLib.readYOLOModel)):
+                    raise TypeError("Invalid readYOLOModel object.")
+                return read_yolo_model_obj.getModel()
+        
         @_protectedClass.fileStoreMyLibRegister
         class YOLOModelPredict(_FileStore.FileStoreParser):
             """
@@ -26341,7 +26762,7 @@ class imgLib:
                     yolo_args:dict={},
                     raw_img:np.ndarray=None,
                     ns:int=None,
-                    all_results:list=None
+                    all_results:list=None,
                 ):
                 """
                 Initializes the YOLOModelPredict instance.
@@ -26454,7 +26875,7 @@ class imgLib:
                     str: The default ensemble model name.
                 """
                 return f"{mode}_{multi_class_mode}_{'_'.join(model_name_list)}"
-            
+
             def procEnsembleModel(
                 self,
                 mode:str,
@@ -26498,7 +26919,6 @@ class imgLib:
 
                 tmp_yolo_ann_result_list=[imgLib.YOLOANNResult(self.__yolo_ann_obj,ri) for ri in r]
                 if(bb_img_json_mode):
-                    
                     yolo_model_config={
                         "proc_ensemble_model_name":proc_ensemble_model_name_func(
                             mode=mode,
@@ -26523,7 +26943,7 @@ class imgLib:
                     return tmp_result_list
                 else:
                     return tmp_yolo_ann_result_list
-            
+
             def generatorCombinationsModel(self,r:int):
                 """
                 Generates combinations of the YOLO model list.
@@ -26534,11 +26954,7 @@ class imgLib:
                 Yields:
                     YOLOModelPredict: The YOLO model prediction object.
                 """
-
-                tmp_yolo_model_list=self.__read_yolo_model_list_obj.getReadYOLOModelList()
-                for comb in itertools.combinations(list(range(len(tmp_yolo_model_list))),r=r):
-
-                    new_yolo_model_list=imgLib.YOLOModelLib.readYOLOModelList([tmp_yolo_model_list[i] for i in comb])
+                for comb,new_yolo_model_list in self.__read_yolo_model_list_obj.generatorCombinationsModelWithComb(r):
                     new_all_results=[self.__all_results[i] for i in comb]
 
                     yield imgLib.YOLOModelLib.YOLOModelPredict(
@@ -26603,6 +27019,39 @@ class imgLib:
                     }
                 ]
 
+            @staticmethod
+            def _generatePredictConfigListForR(predict_config_list:list):
+                """
+                Generates prediction configuration dictionaries for each combination of YOLO models.
+
+                Args:
+                    predict_config_list (list): List of prediction configuration dictionaries.
+                
+                Yields:
+                    dict: The next prediction configuration dictionary.
+
+                Raises:
+                    TypeError: If predict_config_list is not a list or if any item is not a dictionary.
+                    KeyError: If any required key is missing from the configuration dictionaries.
+                """
+                if(not isinstance(predict_config_list,list)):
+                    raise TypeError("predict_config_list must be a list.")
+                for predict_config_dict in predict_config_list:
+                    if(not isinstance(predict_config_dict,dict)):
+                        raise TypeError("Each item in predict_config_list must be a dictionary.")
+                    
+                    if("combinations_r" not in predict_config_dict):
+                        raise KeyError("Each dictionary in predict_config_list must contain 'combinations_r' key.")
+                    elif(not isinstance(predict_config_dict["combinations_r"],int)):
+                        raise TypeError("'combinations_r' must be an integer.")
+
+                    if("config_for_each_combination" not in predict_config_dict):
+                        raise KeyError("Each dictionary in predict_config_list must contain 'config_for_each_combination' key.")
+                    elif(not isinstance(predict_config_dict["config_for_each_combination"],list)):
+                        raise TypeError("'config_for_each_combination' must be a list.")
+                    
+                    yield predict_config_dict
+
             def generatorPredictCombinationsModel(
                 self,
                 predict_config_list:list,
@@ -26622,37 +27071,121 @@ class imgLib:
                     TypeError: If predict_config_list is not a list or if any item is not a dictionary.
                     KeyError: If any required key is missing from the configuration dictionaries.
                 """
-
-                if(not isinstance(predict_config_list,list)):
-                    raise TypeError("predict_config_list must be a list.")
-                for predict_config_dict in predict_config_list:
-                    if(not isinstance(predict_config_dict,dict)):
-                        raise TypeError("Each item in predict_config_list must be a dictionary.")
-                    
-                    if("combinations_r" not in predict_config_dict):
-                        raise KeyError("Each dictionary in predict_config_list must contain 'combinations_r' key.")
-                    elif(not isinstance(predict_config_dict["combinations_r"],int)):
-                        raise TypeError("'combinations_r' must be an integer.")
-
-                    if("config_for_each_combination" not in predict_config_dict):
-                        raise KeyError("Each dictionary in predict_config_list must contain 'config_for_each_combination' key.")
-                    elif(not isinstance(predict_config_dict["config_for_each_combination"],list)):
-                        raise TypeError("'config_for_each_combination' must be a list.")
-
+                for predict_config_dict in imgLib.YOLOModelLib.YOLOModelPredict._generatePredictConfigListForR(predict_config_list):
                     for comb_yolo_model_predict in self.generatorCombinationsModel(predict_config_dict["combinations_r"]):
                         for config in predict_config_dict["config_for_each_combination"]:
                             if(not isinstance(config,dict)):
                                 raise TypeError("Each item in 'config_for_each_combination' must be a dictionary.")
+                            
+                            tmp_config=copy.deepcopy(config)
                             if(force_bb_img_json_mode):
-                                config["bb_img_json_mode"]=True
+                                tmp_config["bb_img_json_mode"]=True
 
-                            yield comb_yolo_model_predict,config
+                            ensemble_model_name=imgLib.YOLOModelLib.YOLOModelPredict.__checkConfigData(config,comb_yolo_model_predict.getReadYOLOModelListObj())
+
+                            yield ensemble_model_name,comb_yolo_model_predict,tmp_config
+
+            @staticmethod
+            def __checkConfigData(config:dict,yolo_model_list:"imgLib.YOLOModelLib.readYOLOModelList"):
+                if(not isinstance(config,dict)):
+                    raise TypeError("config must be a dictionary.")
+                if(not isinstance(yolo_model_list,imgLib.YOLOModelLib.readYOLOModelList)):
+                    raise TypeError("yolo_model_list must be an instance of readYOLOModelList.")
+
+                if("mode" not in config):
+                    raise KeyError("config must contain 'mode' key.")
+                if("iou_threshold" not in config):
+                    raise KeyError("config must contain 'iou_threshold' key.")
+                if("multi_class_mode" not in config):
+                    raise KeyError("config must contain 'multi_class_mode' key.")
+                if("ensemble_args" not in config):
+                    raise KeyError("config must contain 'ensemble_args' key.")
+                if("proc_ensemble_model_name_func" not in config):
+                    raise KeyError("config must contain 'proc_ensemble_model_name_func' key.")
+
+                proc_ensemble_model_name_func=config["proc_ensemble_model_name_func"]
+                if(not callable(proc_ensemble_model_name_func)):
+                    raise TypeError("proc_ensemble_model_name_func must be callable.")
+                
+                ensemble_model_name=proc_ensemble_model_name_func(
+                    mode=config["mode"],
+                    model_name_list=yolo_model_list.getModelNames(),
+                    iou_threshold=config["iou_threshold"],
+                    multi_class_mode=config["multi_class_mode"],
+                    ensemble_args=config["ensemble_args"],
+                )
+                
+                ensemble_model_name=str(ensemble_model_name)
+                return ensemble_model_name
+    
+            @staticmethod
+            def simulateEnsembleCombinationsModelNameList(
+                read_yolo_model_list_obj:"imgLib.YOLOModelLib.readYOLOModelList",
+                predict_config_list:list,
+            ):
+                """
+                Simulates the ensemble combinations model names based on the provided configuration list.
+
+                Args:
+                    read_yolo_model_list_obj (readYOLOModelList): The list of YOLO models to read.
+                    predict_config_list (list): List of prediction configuration dictionaries.
+
+                Returns:
+                    tuple: A tuple containing the list of ensemble combinations model names and their corresponding configuration list.
+                
+                Raises:
+                    ValueError: If predict_config_list is empty.
+                """
+                ensemble_combinations_models_name_list=[]
+
+                if(len(predict_config_list)==0):
+                    raise ValueError("predict_config_list cannot be empty.")
+
+                if(not isinstance(read_yolo_model_list_obj,imgLib.YOLOModelLib.readYOLOModelList)):
+                    raise TypeError("read_yolo_model_list_obj must be an instance of readYOLOModelList.")
+                
+                for predict_config_dict in imgLib.YOLOModelLib.YOLOModelPredict._generatePredictConfigListForR(predict_config_list):
+                    for new_yolo_model_list in read_yolo_model_list_obj.generatorCombinationsModel(predict_config_dict["combinations_r"]):
+                        for config in predict_config_dict["config_for_each_combination"]:
+                            if(not isinstance(new_yolo_model_list,imgLib.YOLOModelLib.readYOLOModelList)):
+                                raise TypeError("Expected new_yolo_model_list to be an instance of readYOLOModelList.")
+
+                            ensemble_name=imgLib.YOLOModelLib.YOLOModelPredict.__checkConfigData(config,new_yolo_model_list)
+                            if(ensemble_name in ensemble_combinations_models_name_list):
+                                raise ValueError(f"Duplicate ensemble model name found: {ensemble_name}")
+
+                            ensemble_combinations_models_name_list.append(ensemble_name)
+                            
+                return ensemble_combinations_models_name_list
             
+            def checkEnsembleCombinationsModelNameList(
+                self,
+                predict_config_list:list,
+            ):
+                """
+                Checks the ensemble combinations model names based on the provided configuration list.
+
+                Args:
+                    predict_config_list (list): List of prediction configuration dictionaries.
+
+                Returns:
+                    list: The list of ensemble combinations model names.
+                
+                Raises:
+                    ValueError: If predict_config_list is empty.
+                """
+                ensemble_combinations_models_name_list=imgLib.YOLOModelLib.YOLOModelPredict.simulateEnsembleCombinationsModelNameList(
+                    self.getReadYOLOModelListObj(),
+                    predict_config_list
+                )
+                return ensemble_combinations_models_name_list
+
             def predictCombinationsModel(
                     self,
                     predict_config_list:list,
                     is_auto_img_name:bool=False,
-                    auto_img_name_function:callable=None
+                    auto_img_name_function:callable=None,
+                    is_check_ensemble_model_name:bool=False
                 ):
                 """
                 Predicts combinations of models based on the provided configuration list.
@@ -26661,6 +27194,7 @@ class imgLib:
                     predict_config_list (list): List of prediction configuration dictionaries.
                     is_auto_img_name (bool): Flag to indicate if automatic image naming is enabled.
                     auto_img_name_function (callable): Function to generate image names automatically.
+                    is_check_ensemble_model_name (bool): Flag to indicate if ensemble model names should be checked.
 
                 Returns:
                     resultBBImgJsonCombinationsModel: The model containing the results in BBImgJson format.
@@ -26673,11 +27207,14 @@ class imgLib:
                 if(len(predict_config_list)==0):
                     raise ValueError("predict_config_list cannot be empty.")
 
+                if(is_check_ensemble_model_name):
+                    self.checkEnsembleCombinationsModelNameList(predict_config_list)
+
                 if(auto_img_name_function is None):
                     auto_img_name_function=imgLib.BBimgJson.DEFAULT_AUTO_IMG_NAME_FUNCTION
 
                 result_obj=imgLib.YOLOModelLib.resultBBImgJsonCombinationsModel()
-                for ymp_comb,config in self.generatorPredictCombinationsModel(predict_config_list,force_bb_img_json_mode=True):
+                for ensemble_model_name,ymp_comb,config in self.generatorPredictCombinationsModel(predict_config_list,force_bb_img_json_mode=True):
                     if(not isinstance(ymp_comb,imgLib.YOLOModelLib.YOLOModelPredict)):
                         raise TypeError("Expected ymp_comb to be an instance of YOLOModelPredict.")
 
@@ -28619,6 +29156,899 @@ class imgLib:
 
                     yield img_name,result_obj
 
+        @_protectedClass.fileStoreMyLibRegister
+        class IncrementalYOLOEvalProject(_FileStore.FileStoreParser):
+            """
+            Class for managing incremental YOLO evaluation projects.
+            """
+
+            __fs_version__=1
+                
+            def __init__(
+                self,
+                is_auto_model_name:bool=False,
+                auto_model_name_func:callable=None,
+
+                gpu_flag:bool=True,
+                yolo_args:dict=None,
+                
+                is_auto_img_name:bool=False,
+                auto_img_name_function:callable=None,
+            ):
+                """
+                Initializes the IncrementalYOLOEvalProject instance.
+
+                Args:
+                    is_auto_model_name (bool, optional): Whether to automatically name models.
+                    auto_model_name_func (callable, optional): Function to automatically name models.
+                    gpu_flag (bool, optional): Whether to use GPU for processing.
+                    yolo_args (dict, optional): Additional arguments for YOLO processing.
+                    is_auto_img_name (bool, optional): Whether to automatically name images.
+                    auto_img_name_function (callable, optional): Function to automatically name images.
+                """
+                # model setting parameters
+                self.__read_model_list=imgLib.YOLOModelLib.readYOLOModelList()
+                
+                self.__is_auto_model_name=is_auto_model_name
+                if(auto_model_name_func is None):
+                    auto_model_name_func=imgLib.YOLOModelLib.readYOLOModel.DEFAULT_AUTO_NAME_FUNC
+                self.__auto_model_name_func=auto_model_name_func
+                
+                # ensemble predict setting parameters
+                self.__predict_config_list=[]
+                self.__gpu_flag=gpu_flag
+                if(yolo_args is None):
+                    yolo_args={}
+                self.__yolo_args=copy.deepcopy(yolo_args)
+
+                # image setting parameters
+                self.__predict_image_data={}
+                self.__yolo_ann_fsv=IOLib.FileStoreVariable()
+
+                self.__is_auto_img_name=is_auto_img_name
+                if(auto_img_name_function is None):
+                    auto_img_name_function=imgLib.wrapperYOLOANN.DEFAULT_AUTO_IMG_NAME_FUNCTION
+                self.__auto_img_name_function=auto_img_name_function
+
+                # one model predict data parameters
+                self.__done_one_model_predict_matrix=pd.DataFrame(
+                    False,
+                    index=pd.Index([],name="img_name"),
+                    columns=pd.Index([],name="model_name"),
+                    dtype="bool",
+                )
+
+                self.__one_model_result_fsv=IOLib.FileStoreVariable()
+
+                self.__ns=None
+                self.__done_ensemble_model_predict_matrix=pd.DataFrame(
+                    False,
+                    index=pd.Index([],name="img_name"),
+                    columns=pd.Index([],name="ensemble_model_name"),
+                    dtype="bool",
+                )
+
+                self.__ensemble_model_result_fsv=IOLib.FileStoreVariable()
+
+                # other parameters
+                self.__img_tag_types=set()
+                
+            def size(self):
+                """
+                Returns the size of the IncrementalYOLOEvalProject instance.
+
+                Returns:
+                    dict: A dictionary containing the sizes of models, images, and ensemble models.
+                """
+                return {
+                    "model_size":len(self.__read_model_list),
+                    "image_size":len(self.__predict_image_data),
+                    "ensemble_model_size":len(self.getEnsembleModelNames()),
+                }
+
+            def to_payload(self)->dict:
+                """
+                Converts the IncrementalYOLOEvalProject instance to a payload dictionary.
+
+                Returns:
+                    dict: The payload dictionary.
+                """
+                payload={
+                    "version":int(getattr(self,"__fs_version__",1)),
+                    "gpu_flag":bool(self.__gpu_flag),
+                    "yolo_args":self.__yolo_args,
+
+                    "read_model_list":self.__read_model_list,
+                    "predict_config_list":self.__predict_config_list,
+
+                    "predict_image_data":self.__predict_image_data,
+                    "img_tag_types":sorted(list(self.__img_tag_types)),
+
+                    "yolo_ann_fsv":self.__yolo_ann_fsv,
+                    "one_model_result_fsv":self.__one_model_result_fsv,
+                    "ensemble_model_result_fsv":self.__ensemble_model_result_fsv,
+
+                    "ns":self.__ns,
+
+                    "is_auto_model_name":bool(self.__is_auto_model_name),
+                    "is_auto_img_name":bool(self.__is_auto_img_name),
+                }
+                return payload
+
+            @staticmethod
+            def __split_fsv_key(key:str)->tuple[str|None,str|None]:
+                """
+                Splits a FileStoreVariable key into model name and image name.
+
+                Args:
+                    key (str): The FileStoreVariable key.
+
+                Returns:
+                    tuple: A tuple containing the model name and image name, or (None, None) if the key is invalid.
+                """
+                if(not isinstance(key,str)):
+                    return (None,None)
+                if((not key.startswith("(")) or (not key.endswith(")"))):
+                    return (None,None)
+                sep=")::("
+                p=key.find(sep)
+                if(p==-1):
+                    return (None,None)
+                left=key[1:p]
+                right=key[p+len(sep):-1]
+                return (left,right)
+
+            def __sync_done_matrices_from_fsv(self):
+                """
+                Synchronizes the done prediction matrices from the FileStoreVariables.
+                """
+                self.__renewDonePredictMatrix()
+
+                # one-model
+                for k in self.__one_model_result_fsv.getKeys():
+                    model_name,img_name=self.__split_fsv_key(k)
+                    if((model_name is None) or (img_name is None)):
+                        continue
+                    if((img_name in self.__done_one_model_predict_matrix.index) and (model_name in self.__done_one_model_predict_matrix.columns)):
+                        self.__done_one_model_predict_matrix.loc[img_name,model_name]=True
+
+                # ensemble
+                for k in self.__ensemble_model_result_fsv.getKeys():
+                    ensemble_model_name,img_name=self.__split_fsv_key(k)
+                    if((ensemble_model_name is None) or (img_name is None)):
+                        continue
+                    if((img_name in self.__done_ensemble_model_predict_matrix.index) and (ensemble_model_name in self.__done_ensemble_model_predict_matrix.columns)):
+                        self.__done_ensemble_model_predict_matrix.loc[img_name,ensemble_model_name]=True
+
+            @classmethod
+            def from_payload(cls,payload:dict,store):
+                """
+                Creates an IncrementalYOLOEvalProject instance from a payload dictionary.
+
+                Args:
+                    payload (dict): The payload dictionary.
+                    store (IOLib.FileStore): The file store instance.
+
+                Returns:
+                    imgLib.YOLOModelLib.IncrementalYOLOEvalProject: The created IncrementalYOLOEvalProject object.
+                """
+                if(not isinstance(payload,dict)):
+                    raise ValueError("payload must be dict")
+                    
+                pv=int(payload.get("version",1))
+                cv=int(getattr(cls,"__fs_version__",1))
+                if(pv>cv):
+                    raise ValueError(f"Unsupported payload version: {pv} > {cv}")
+
+                obj=cls.__new__(cls)
+
+                obj.__gpu_flag=bool(payload.get("gpu_flag",True))
+                obj.__yolo_args=payload.get("yolo_args") or {}
+
+                obj.__read_model_list=payload.get("read_model_list") or imgLib.YOLOModelLib.readYOLOModelList()
+                obj.__predict_config_list=payload.get("predict_config_list") or []
+
+                obj.__predict_image_data=payload.get("predict_image_data") or {}
+                img_tag_types=payload.get("img_tag_types")
+                if(isinstance(img_tag_types,set)):
+                    obj.__img_tag_types=set(img_tag_types)
+                elif(isinstance(img_tag_types,(list,tuple))):
+                    obj.__img_tag_types=set(img_tag_types)
+                else:
+                    obj.__img_tag_types=set()
+
+                obj.__yolo_ann_fsv=payload.get("yolo_ann_fsv") or IOLib.FileStoreVariable()
+                obj.__one_model_result_fsv=payload.get("one_model_result_fsv") or IOLib.FileStoreVariable()
+                obj.__ensemble_model_result_fsv=payload.get("ensemble_model_result_fsv") or IOLib.FileStoreVariable()
+
+                obj.__ns=payload.get("ns")
+
+                obj.__is_auto_model_name=bool(payload.get("is_auto_model_name",False))
+                obj.__is_auto_img_name=bool(payload.get("is_auto_img_name",False))
+
+                obj.__auto_model_name_func=imgLib.YOLOModelLib.readYOLOModel.DEFAULT_AUTO_NAME_FUNC
+                obj.__auto_img_name_function=imgLib.wrapperYOLOANN.DEFAULT_AUTO_IMG_NAME_FUNCTION
+
+                obj.__done_one_model_predict_matrix=pd.DataFrame(False,index=[],columns=[],dtype=bool)
+                obj.__done_ensemble_model_predict_matrix=pd.DataFrame(False,index=[],columns=[],dtype=bool)
+
+                obj.__sync_done_matrices_from_fsv()
+                return obj
+
+            def getModelNames(self):
+                """
+                Returns the list of model names.
+
+                Returns:
+                    list: A list of model names.
+                """
+                return self.__read_model_list.getModelNames()
+            
+            def getImageNames(self):
+                """
+                Returns the list of image names.
+
+                Returns:
+                    list: A list of image names.
+                """
+                return list(self.__predict_image_data.keys())
+
+            def getEnsembleModelNames(self):
+                """
+                Returns the list of ensemble model names.
+
+                Returns:
+                    list: A list of ensemble model names.
+                """
+                if(self.__predict_config_list is None):
+                    return []
+                elif(len(self.__predict_config_list)<=0):
+                    return []
+                else:
+                    return imgLib.YOLOModelLib.YOLOModelPredict.simulateEnsembleCombinationsModelNameList(
+                        self.__read_model_list,
+                        self.__predict_config_list
+                    )
+
+            def __renewDonePredictMatrix(self):
+                """
+                Renews the done prediction matrices based on the current models and images.
+                """
+                self.__done_one_model_predict_matrix=self.__done_one_model_predict_matrix.reindex(
+                    index=self.getImageNames(),
+                    columns=self.getModelNames(),
+                    fill_value=False,
+                ).astype("bool")
+                
+                if(not self.getEnsembleModelNames()==[]):
+                    self.__done_ensemble_model_predict_matrix=self.__done_ensemble_model_predict_matrix.reindex(
+                        index=self.getImageNames(),
+                        columns=self.getEnsembleModelNames(),
+                        fill_value=False,
+                    ).astype("bool")
+
+            def appendModel(
+                self,
+                model_dir:str|Path
+            ):
+                """
+                Appends a YOLO model to the project.
+
+                Args:
+                    model_dir (str|Path): The directory of the YOLO model to append.
+                """
+                tmp_read_yolo_model_obj=imgLib.YOLOModelLib.readYOLOModel(
+                    str(model_dir),
+                    is_auto_name=self.__is_auto_model_name,
+                    auto_name_func=self.__auto_model_name_func,
+                )
+                self.__read_model_list.append(tmp_read_yolo_model_obj)
+                self.__renewDonePredictMatrix()
+
+            def appendPredictConfigList(
+                self,
+                append_predict_config_list:list
+            ):
+                """
+                Appends a list of prediction configurations to the project.
+                
+                Args:
+                    append_predict_config_list (list): The list of prediction configurations to append.
+                """
+                if(not isinstance(append_predict_config_list,list)):
+                    raise TypeError("append_predict_config_list should be a list")
+                self.__predict_config_list+=append_predict_config_list
+                self.__renewDonePredictMatrix()
+
+            def appendImage(
+                self,
+                image_path:str|Path,
+                label_path:str|Path,
+                img_name:str=None,
+                img_tags:list|set|tuple=None,
+                dont_renew_done_predict_matrix:bool=False,
+            ):
+                """
+                Appends an image and its corresponding label to the project.
+
+                Args:
+                    image_path (str|Path): The path to the image file.
+                    label_path (str|Path): The path to the label file.
+                    img_name (str, optional): The name of the image. If None and is_auto_img_name is True, the name will be generated automatically.
+                    img_tags (list|set|tuple, optional): Tags associated with the image.
+                    dont_renew_done_predict_matrix (bool, optional): Whether to skip renewing the done prediction matrix after appending the image.
+
+                Raises:
+                    TypeError: If the input types are invalid.
+                    FileNotFoundError: If the image or label file does not exist.
+                    ValueError: If the image name already exists in the project.
+                """
+                if(not isinstance(image_path,(str,Path))):
+                    raise TypeError("image_path should be a string or Path")
+                if(not isinstance(label_path,(str,Path))):
+                    raise TypeError("label_path should be a string or Path")
+
+                if(img_tags is None):
+                    img_tags=set()
+                elif(not isinstance(img_tags,(list,set,tuple))):
+                    raise TypeError("img_tags should be a list, set, or tuple")
+                img_tags=set(list(img_tags))
+
+                image_path=Path(image_path)
+                if(not image_path.exists()):
+                    raise FileNotFoundError(f"Image path {image_path} does not exist")
+                elif(not image_path.is_file()):
+                    raise FileNotFoundError(f"Image path {image_path} is not a file")
+
+                label_path=Path(label_path)
+                if(not label_path.exists()):
+                    raise FileNotFoundError(f"Label path {label_path} does not exist")
+                elif(not label_path.is_file()):
+                    raise FileNotFoundError(f"Label path {label_path} is not a file")
+            
+                if(self.__is_auto_img_name):
+                    img_name=self.__auto_img_name_function(image_path)
+                elif(img_name is None):
+                    raise ValueError("img_name must be provided if is_auto_img_name is False")
+                img_name=str(img_name)
+
+                if(img_name in self.getImageNames()):
+                    raise ValueError(f"Image name {img_name} already exists")
+
+                self.__predict_image_data[img_name]={
+                    "img_name":img_name,
+                    "image_path":image_path,
+                    "label_path":label_path,
+                    "img_tags":img_tags,
+                }
+                self.__img_tag_types.update(img_tags)
+
+                tmp_yolo_ann=imgLib.YOLOANN(
+                    img_mode=imgLib.YOLOANN.IMG_MODE_FILE,
+                    ann_data_arg=str(label_path),
+                    arg=str(image_path),
+                    ann_file_mode=imgLib.YOLOANN.ANN_FILE_MODE_YOLOV3,
+                )
+                self.__yolo_ann_fsv.appendData(
+                    key=img_name,
+                    data=tmp_yolo_ann,
+                    release_after=True,
+                    aggressive_release=True,
+                )
+                del tmp_yolo_ann
+
+                if(not dont_renew_done_predict_matrix):
+                    self.__renewDonePredictMatrix()
+
+            def __getYOLOANN(self,img_name:str):
+                """
+                Retrieves the YOLOANN object for the specified image name.
+
+                Args:
+                    img_name (str): The name of the image.
+                
+                Returns:
+                    imgLib.YOLOANN: The YOLOANN object for the specified image.
+                """
+                tmp_yolo_ann=self.__yolo_ann_fsv.loadData(img_name)
+                if(not isinstance(tmp_yolo_ann,imgLib.YOLOANN)):
+                    raise TypeError("tmp_yolo_ann should be a YOLOANN instance")
+                return tmp_yolo_ann
+            
+            def appendModelsByGlob(
+                self,
+                glob_dir_str_list:list,
+                recursive:bool=False,
+            ):
+                """
+                Appends YOLO models to the project using glob patterns.
+
+                Args:
+                    glob_dir_str_list (list): List of glob patterns for model directories.
+                    recursive (bool, optional): Whether to search directories recursively.
+                
+                Raises:
+                    TypeError: If the input types are invalid.
+                """
+                if(not isinstance(glob_dir_str_list,list)):
+                    raise TypeError("glob_dir_str_list must be a list.")
+                dir_list=[]
+                for glob_dir_str in glob_dir_str_list:
+                    dir_list.extend(glob.glob(glob_dir_str,recursive=recursive))
+
+                for dir_path in dir_list:
+                    tmp_dir_path=Path(dir_path)
+                    if(tmp_dir_path.is_dir()):
+                        if((tmp_dir_path/Path("weights/best.pt")).exists()):
+                            self.appendModel(tmp_dir_path)
+
+            def appendImagesByGlob(
+                self,
+                ann_ptn_list:list,
+                img_ptn_list:list,
+                ann_re_str:str="",
+                img_re_str:str="",
+                img_tags:list|set|tuple=None
+            ):
+                """
+                Appends images and their corresponding labels to the project using glob patterns.
+
+                Args:
+                    ann_ptn_list (list): List of glob patterns for annotation files.
+                    img_ptn_list (list): List of glob patterns for image files.
+                    ann_re_str (str, optional): Regular expression string for filtering annotation files.
+                    img_re_str (str, optional): Regular expression string for filtering image files.
+                    img_tags (list|set|tuple, optional): Tags associated with the images.
+
+                Raises:
+                    TypeError: If the input types are invalid.
+                """
+                _,_,detail_file_info_list=imgLib.YOLOANNDataset._static_init_import_ann_data(
+                    ann_ptn_list=ann_ptn_list,
+                    img_ptn_list=img_ptn_list,
+                    ann_re_str=ann_re_str,
+                    img_re_str=img_re_str,
+                    create_yolo_ann_obj=False
+                )
+                for detail_file_info in detail_file_info_list:
+                    img_name=detail_file_info.get("file_name",None)
+                    label_path=detail_file_info.get("ann_file",None)
+                    image_path=detail_file_info.get("img_file",None)
+                    if((label_path is not None) and (image_path is not None)):
+                        self.appendImage(
+                            image_path=image_path,
+                            label_path=label_path,
+                            img_name=img_name,
+                            img_tags=img_tags,
+                            dont_renew_done_predict_matrix=True,
+                        )
+                self.__renewDonePredictMatrix()
+
+            @staticmethod
+            def __one_model_result_fsv_key(model_name:str,img_name:str):
+                """
+                Generates a FileStoreVariable key for one model result.
+
+                Args:
+                    model_name (str): The name of the model.
+                    img_name (str): The name of the image.
+
+                Returns:
+                    str: The generated FileStoreVariable key.
+                """
+                return f"({model_name})::({img_name})"
+
+            def calcOneModel(self):
+                """
+                Calculates predictions for each individual model on all images.
+
+                Raises:
+                    ValueError: If there are inconsistencies in the done prediction matrix.
+                """
+                self.__renewDonePredictMatrix()
+                
+                for model_name in self.__done_one_model_predict_matrix.columns:
+                    tmp_yolo_model=self.__read_model_list.getYOLOModelByName(model_name)
+                    for img_name in self.__done_one_model_predict_matrix.index:
+                        if(not self.__done_one_model_predict_matrix.loc[img_name,model_name]):
+                            tmp_yolo_ann=self.__getYOLOANN(img_name)
+
+                            ns,tmp_all_results=imgLib.ensembleModel.MultiYOLOModelModule.predictAllYOLOModels(
+                                [tmp_yolo_model],
+                                tmp_yolo_ann.getImg(draw_shape_flag=False,label_flag=False),
+                                gpu_flag=self.__gpu_flag,
+                                yolo_args=self.__yolo_args,
+                            )
+                            if(not isinstance(tmp_all_results,list)):
+                                raise TypeError("tmp_all_results should be a list")
+                            if(len(tmp_all_results)!=1):
+                                raise ValueError("tmp_all_results should contain one result")
+                            
+                            if(self.__ns is None):
+                                self.__ns=ns
+                            elif(self.__ns!=ns):
+                                raise ValueError("Inconsistent namespace detected during prediction")
+
+                            self.__one_model_result_fsv.appendData(
+                                key=imgLib.YOLOModelLib.IncrementalYOLOEvalProject.__one_model_result_fsv_key(model_name,img_name),
+                                data=imgLib.ensembleModel._YOLOResult2ClassDataInfo(tmp_all_results),
+                                release_after=True,
+                                aggressive_release=True,
+                            )
+
+                            del tmp_yolo_ann
+                            del tmp_all_results
+
+                            self.__done_one_model_predict_matrix.loc[img_name,model_name]=True
+                        
+                    del tmp_yolo_model
+
+            def __getOneModelResult(self,model_name:str,img_name:str):
+                """
+                Retrieves the prediction result for a specific model and image.
+
+                Args:
+                    model_name (str): The name of the model.
+                    img_name (str): The name of the image.
+
+                Returns:
+                    list: The prediction result for the specified model and image.
+                
+                Raises:
+                    ValueError: If the model name or image name is not found, or if the prediction is not done yet.
+                """
+                if(model_name not in self.__done_one_model_predict_matrix.columns):
+                    raise ValueError(f"Model name {model_name} not found")
+                if(img_name not in self.__done_one_model_predict_matrix.index):
+                    raise ValueError(f"Image name {img_name} not found")
+                if(not self.__done_one_model_predict_matrix.loc[img_name,model_name]):
+                    raise ValueError(f"Prediction for model {model_name} and image {img_name} not done yet")
+                tmp_data=self.__one_model_result_fsv.loadData(
+                    imgLib.YOLOModelLib.IncrementalYOLOEvalProject.__one_model_result_fsv_key(model_name,img_name)
+                )
+                if(not isinstance(tmp_data,list)):
+                    raise TypeError("tmp_data should be a list")
+                for tmp_data_i in tmp_data:
+                    if(not isinstance(tmp_data_i,list)):
+                        raise TypeError("Element in tmp_data should be a list") 
+                    for tmp_data_ij in tmp_data_i:
+                        if(not isinstance(tmp_data_ij,dict)):
+                            raise TypeError("Element in tmp_data_i should be a dict")
+                return tmp_data
+
+            def __getAllOneModelResult(self,img_name:str):
+                """
+                Retrieves the prediction results for all models on a specific image.
+
+                Args:
+                    img_name (str): The name of the image.
+                
+                Returns:
+                    list: A list of prediction results for all models on the specified image.
+
+                Raises:
+                    ValueError: If the image name is not found.
+                """
+                all_results=[]
+                for model_name in self.getModelNames():
+                    tmp_data=self.__getOneModelResult(model_name,img_name)
+                    if(not isinstance(tmp_data,list)):
+                        raise TypeError("tmp_data should be a list")
+                    if(len(tmp_data)!=1):
+                        raise ValueError("tmp_data should contain one result")
+                    if(not isinstance(tmp_data[0],list)):
+                        raise TypeError("Element in tmp_data should be a list")
+                    all_results.append(tmp_data[0])
+                return all_results
+
+            @staticmethod
+            def __ensemble_model_result_fsv_key(ensemble_model_name:str,img_name:str):
+                """
+                Generates a FileStoreVariable key for ensemble model result.
+
+                Args:
+                    ensemble_model_name (str): The name of the ensemble model.
+                    img_name (str): The name of the image.
+
+                    Returns:
+                        str: The generated FileStoreVariable key.
+                """
+                return f"({ensemble_model_name})::({img_name})"
+
+            def calcEnsembleAllImages(self):
+                """
+                Calculates ensemble predictions for all images based on the configured prediction settings.
+
+                Raises:
+                    ValueError: If there are inconsistencies in the done prediction matrix.
+                """
+                self.__renewDonePredictMatrix()
+
+                self.calcOneModel()
+
+                for img_name in self.getImageNames():
+                    tmp_all_results=self.__getAllOneModelResult(img_name)
+                    tmp_yolo_ann=self.__getYOLOANN(img_name)
+                    tmp_yolo_model_predict=imgLib.YOLOModelLib.YOLOModelPredict(
+                        self.__read_model_list,
+                        tmp_yolo_ann,
+                        gpu_flag=self.__gpu_flag,
+                        yolo_args=self.__yolo_args,
+                        raw_img=tmp_yolo_ann.getImg(draw_shape_flag=False,label_flag=False),
+                        ns=self.__ns,
+                        all_results=tmp_all_results,
+                    )
+
+                    for ensemble_model_name,ymp_comb,ensemble_predict_config in tmp_yolo_model_predict.generatorPredictCombinationsModel(self.__predict_config_list,force_bb_img_json_mode=True):
+                        if(
+                            not (
+                                (img_name in self.__done_ensemble_model_predict_matrix.index) and
+                                (ensemble_model_name in self.__done_ensemble_model_predict_matrix.columns)
+                            )
+                        ):
+                            raise ValueError(f"Ensemble model name {ensemble_model_name} or image name {img_name} not found in done matrix")
+
+                        if(not self.__done_ensemble_model_predict_matrix.loc[img_name,ensemble_model_name]):
+                            r=ymp_comb.procEnsembleModel(**ensemble_predict_config)
+                            if(len(r)!=1):
+                                raise ValueError("Expected exactly one result from procEnsembleModel.")
+                            if(not isinstance(r[0],imgLib.BBimgJson)):
+                                raise TypeError("Expected result to be an instance of imgLib.BBimgJson.")
+                            result_bb_img_json=r[0]
+                            result_bb_img_json.setImgName(img_name=img_name)
+
+                            self.__ensemble_model_result_fsv.appendData(
+                                key=imgLib.YOLOModelLib.IncrementalYOLOEvalProject.__ensemble_model_result_fsv_key(ensemble_model_name,img_name),
+                                data=result_bb_img_json,
+                                release_after=True,
+                                aggressive_release=True,
+                            )
+                            del r
+                            del result_bb_img_json
+                            
+                            self.__done_ensemble_model_predict_matrix.loc[img_name,ensemble_model_name]=True
+
+                    del tmp_all_results
+                    del tmp_yolo_ann
+                    del tmp_yolo_model_predict
+
+            def __loadEnsembleBBImgJson(self,ensemble_model_name:str,img_name:str):
+                """
+                Loads the BBimgJson result for a specific ensemble model and image.
+
+                Args:
+                    ensemble_model_name (str): The name of the ensemble model.
+                    img_name (str): The name of the image.
+                
+                Returns:
+                    imgLib.BBimgJson: The BBimgJson result for the specified ensemble model and image.
+                """
+                key=self.__ensemble_model_result_fsv_key(ensemble_model_name,img_name)
+                return self.__ensemble_model_result_fsv.loadData(key)
+            
+            def __buildResultObjForImage(
+                self,
+                img_name:str,
+                ensemble_model_names:list=None,
+                strict:bool=True
+            ):
+                """
+                Builds the result object for a specific image.
+
+                Args:
+                    img_name (str): The name of the image.
+                    ensemble_model_names (list, optional): The list of ensemble model names to include. If None, all ensemble model names will be used.
+                    strict (bool, optional): Whether to enforce strict checking for done predictions.
+
+                Returns:
+                    imgLib.YOLOModelLib.resultBBImgJsonCombinationsModel: The result object for the specified image.
+                """
+                if(ensemble_model_names is None):
+                    ensemble_model_names=self.getEnsembleModelNames()
+
+                bb_list=[]
+                for emn in ensemble_model_names:
+                    if(strict):
+                        if(not self.__done_ensemble_model_predict_matrix.loc[img_name,emn]):
+                            raise ValueError(f"Ensemble result not ready: {img_name} / {emn}")
+                    if(self.__done_ensemble_model_predict_matrix.loc[img_name, emn]):
+                        bb=self.__loadEnsembleBBImgJson(emn,img_name)
+                        bb_list.append(bb)
+
+                result_obj=imgLib.YOLOModelLib.resultBBImgJsonCombinationsModel(bb_list)
+                result_obj.setLockAppend()
+                return result_obj
+
+            def buildAllImagesResultModel(
+                self,
+                img_names:list=None,
+                ensemble_model_names:list=None,
+                strict:bool=True,
+
+                save_bb_img_json:bool=False,
+                output_dir:str=None,
+                save_json_args:dict=None,
+                save_bb_img_json_img:bool=False,
+                save_bb_img_json_img_args:dict=None,
+            ):
+                """
+                Builds the result model for all images.
+
+                Args:
+                    img_names (list, optional): The list of image names to include. If None, all image names will be used.
+                    ensemble_model_names (list, optional): The list of ensemble model names to include. If None, all ensemble model names will be used.
+                    strict (bool, optional): Whether to enforce strict checking for done predictions.
+                    save_bb_img_json (bool, optional): Whether to save BBimgJson files.
+                    output_dir (str, optional): The output directory for saving BBimgJson files.
+                    save_json_args (dict, optional): Additional arguments for saving JSON files.
+                    save_bb_img_json_img (bool, optional): Whether to save BB images.
+                    save_bb_img_json_img_args (dict, optional): Additional arguments for saving BB images.
+
+                Returns:
+                    imgLib.YOLOModelLib.AllImagesResultBBImgJsonCombinationsModel: The result model for all images.
+
+                Raises:
+                    ValueError: If output_dir is not specified when save_bb_img_json is True.
+                """
+                if(img_names is None):
+                    img_names=self.getImageNames()
+                if(ensemble_model_names is None):
+                    ensemble_model_names=self.getEnsembleModelNames()
+
+                if(save_bb_img_json):
+                    if(output_dir is None):
+                        raise ValueError("output_dir must be specified when save_bb_img_json is True")
+                if(save_json_args is None):
+                    save_json_args={}
+                if(save_bb_img_json_img_args is None):
+                    save_bb_img_json_img_args={}
+
+                all_model=imgLib.YOLOModelLib.AllImagesResultBBImgJsonCombinationsModel()
+
+                for img_name in img_names:
+                    result_obj=self.__buildResultObjForImage(img_name,ensemble_model_names,strict=strict)
+                    all_model.append(
+                        img_name,
+                        result_obj,
+                        save_bb_img_json=save_bb_img_json,
+                        output_dir=output_dir,
+                        save_json_args=save_json_args,
+                        save_bb_img_json_img=save_bb_img_json_img,
+                        save_bb_img_json_img_args=save_bb_img_json_img_args,
+                    )
+                return all_model
+
+            def imgTagImageNames(self,img_tag:str):
+                """
+                Retrieves the list of image names associated with a specific image tag.
+
+                Args:
+                    img_tag (str): The image tag to filter by.
+                
+                Returns:
+                    list: A list of image names associated with the specified tag.
+                """
+                if(img_tag not in self.__img_tag_types):
+                    raise ValueError(f"Image tag {img_tag} not found")
+                img_name_list=[]
+                for img_name,img_data in self.__predict_image_data.items():
+                    if(not isinstance(img_data,dict)):
+                        raise TypeError("img_data should be a dict")
+                    
+                    if(img_tag in img_data.get("img_tags",set())):
+                        img_name_list.append(img_name)
+                return img_name_list
+
+            def __copyDictOrEmpty(self,d):
+                """
+                Creates a copy of the input dictionary or returns an empty dictionary if the input is None.
+
+                Args:
+                    d (dict|None): The input dictionary to copy.
+
+                Returns:
+                    dict: A copy of the input dictionary or an empty dictionary.
+                """
+                if(d is None):
+                    return {}
+                return dict(d)
+            
+            def __filterEvaluationArgs(self,evaluation_args:dict):
+                """
+                Filters the evaluation arguments to include only allowed keys.
+
+                Args:
+                    evaluation_args (dict): The input evaluation arguments.
+
+                Returns:
+                    dict: A dictionary containing only the allowed evaluation arguments.
+                """
+                allowed={
+                    "iou_threshold",
+                    "include_background",
+                    "background_label",
+                    "is_transpose",
+                    "NEAR_ZERO",
+                    "include_confusion_matrix_df",
+                }
+                ea=self.__copyDictOrEmpty(evaluation_args)
+                return {k:ea[k] for k in ea if(k in allowed)}
+
+            def calcEnsembleEvaluationAll(self,evaluation_args:dict=None,build_args:dict=None):
+                """
+                Calculates the ensemble evaluation for all images.
+
+                Args:
+                    evaluation_args (dict, optional): Arguments for evaluation calculation.
+                    build_args (dict, optional): Arguments for building the result model.
+                
+                Returns:
+                    dict: The evaluation results for all images.
+                """
+                ea=self.__filterEvaluationArgs(evaluation_args)
+
+                ba=self.__copyDictOrEmpty(build_args)
+                
+                all_model=self.buildAllImagesResultModel(
+                    img_names=ba.get("img_names",None),
+                    ensemble_model_names=ba.get("ensemble_model_names",None),
+                    strict=ba.get("strict",True),
+                    save_bb_img_json=ba.get("save_bb_img_json",False),
+                    output_dir=ba.get("output_dir",None),
+                    save_json_args=ba.get("save_json_args",{}),
+                    save_bb_img_json_img=ba.get("save_bb_img_json_img",False),
+                    save_bb_img_json_img_args=ba.get("save_bb_img_json_img_args",{}),
+                )
+                return all_model.getEvaluationDict(**ea)
+
+            def calcEnsembleEvaluationByImgTag(
+                self,
+                evaluation_args:dict=None,
+                img_tags:list=None,
+                build_args:dict=None,
+                include_all:bool=True
+            ):
+                """
+                Calculates the ensemble evaluation grouped by image tags.
+
+                Args:
+                    evaluation_args (dict, optional): Arguments for evaluation calculation.
+                    img_tags (list, optional): The list of image tags to include. If None, all image tags will be used.
+                    build_args (dict, optional): Arguments for building the result model.
+                    include_all (bool, optional): Whether to include the overall evaluation for all images.
+                
+                Returns:
+                    dict: A dictionary containing evaluation results for each image tag and optionally for all images.
+                """
+                ea=self.__filterEvaluationArgs(evaluation_args)
+                ba=self.__copyDictOrEmpty(build_args)
+
+                if(img_tags is None):
+                    img_tags=sorted(list(self.__img_tag_types))
+
+                out={}
+                if(include_all):
+                    out["__all__"]=self.calcEnsembleEvaluationAll(evaluation_args=ea,build_args=ba)
+
+                for tag in img_tags:
+                    img_names=self.imgTagImageNames(tag)
+                    if(len(img_names)==0):
+                        continue
+
+                    tag_model=self.buildAllImagesResultModel(
+                        img_names=img_names,
+                        ensemble_model_names=ba.get("ensemble_model_names",None),
+                        strict=ba.get("strict",True),
+                        save_bb_img_json=ba.get("save_bb_img_json",False),
+                        output_dir=ba.get("output_dir",None),
+                        save_json_args=ba.get("save_json_args",{}),
+                        save_bb_img_json_img=ba.get("save_bb_img_json_img",False),
+                        save_bb_img_json_img_args=ba.get("save_bb_img_json_img_args",{}),
+                    )
+                    out[tag]=tag_model.getEvaluationDict(**ea)
+
+                return out
+            
     class asciiArtLib:
         """
         ASCII art generation library.
