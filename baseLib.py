@@ -21367,6 +21367,280 @@ class imgLib:
             else:
                 raise ValueError("Error : The orientation must be \"gt_pred\", \"pred_gt\" or \"ultralytics\"!")
 
+        DEFAULT_MAP_IOU_THRESHOLDS=[round(0.5+0.05*i,2) for i in range(10)]
+        DEFAULT_MAP_AP_MODE="interp101"  # COCO-style interpolation by default (101-point)
+
+        @staticmethod
+        def CalcMAPFromBBimgJsonList(
+            bb_img_json_list:list,
+            iou_thresholds:list=None,
+            ap_mode:str=DEFAULT_MAP_AP_MODE,
+            score_key:str="scores",
+            bbox_key:str="bboxes",
+            cls_key:str="classes",
+            gt_block_key:str="YOLOANN_obj_additional_info",
+            gt_bbox_key:str="ann",
+            gt_cls_key:str="ann_cls_nums",
+            eps:float=1e-12
+        ):
+            """
+            Calculates detection mAP from a list of BBimgJson objects.
+
+            Notes:
+                - Ground truth is taken from bb.getDict()[gt_block_key] (YOLOANN_obj_additional_info).
+                - Predictions are taken from bb.getANN() with keys bbox_key/cls_key/score_key.
+                - For each class and IoU threshold, predictions are matched to GT greedily per-image
+                  (best IoU match among not-yet-matched GTs).
+                - AP is computed by COCO-style 101-point interpolation by default (ap_mode="interp101").
+
+            Args:
+                bb_img_json_list (list): List of BBimgJson objects (each corresponds to one image).
+                iou_thresholds (list, optional): IoU thresholds, e.g., [0.5] or [0.5..0.95].
+                ap_mode (str): "interp101" or "trapz".
+                score_key, bbox_key, cls_key: Keys in prediction ann dict.
+                gt_block_key, gt_bbox_key, gt_cls_key: Keys for GT inside bb.getDict().
+                eps (float): Small value to avoid division by zero.
+
+            Returns:
+                dict: {
+                    "iou_thresholds": [...],
+                    "ap_mode": str,
+                    "mAP50": float|None,
+                    "mAP50_95": float|None,
+                    "AP50_per_class": {class_name: ap, ...},
+                    "AP50_95_per_class": {class_name: ap, ...},
+                    "per_iou": {thr: {"mAP": float|None, "AP_per_class": {...}}, ...},
+                    "n_gt_per_class": {...},
+                    "n_pred_per_class": {...},
+                }
+            """
+            if(iou_thresholds is None):
+                iou_thresholds=imgLib.BBimgJson.DEFAULT_MAP_IOU_THRESHOLDS
+            if(not isinstance(iou_thresholds,list) or len(iou_thresholds)==0):
+                raise TypeError("iou_thresholds must be a non-empty list.")
+            for thr in iou_thresholds:
+                if(not (isinstance(thr,(int,float)) and 0.0<=float(thr)<=1.0)):
+                    raise ValueError("Each IoU threshold must be between 0 and 1.")
+
+            if(ap_mode not in ["interp101","trapz"]):
+                raise ValueError("ap_mode must be 'interp101' or 'trapz'.")
+
+            # Build class-id to name map (best-effort, same policy as confusion matrix)
+            class_id_to_name={}
+            for bb in bb_img_json_list:
+                if(not isinstance(bb,imgLib.BBimgJson)):
+                    raise TypeError("bb_img_json_list must be a list of BBimgJson objects.")
+                try:
+                    names=bb.getClsNames()
+                    if(isinstance(names,list)):
+                        for i,v in enumerate(names):
+                            class_id_to_name.setdefault(int(i),str(v))
+                    d=bb.getDict()
+                    if(isinstance(d,dict)):
+                        gt_block=d.get(gt_block_key,{}) or {}
+                        gt_names=gt_block.get("class_names_data",None)
+                        if(isinstance(gt_names,list)):
+                            for i,v in enumerate(gt_names):
+                                class_id_to_name.setdefault(int(i),str(v))
+                except Exception:
+                    pass
+
+            if(len(class_id_to_name)==0):
+                # fallback to a single class
+                class_id_to_name={0:"class_0"}
+
+            # Collect GT and predictions per class
+            # image_id is just enumeration index (stable within this call)
+            gt_by_class={}   # cls_id -> {img_id: [bbox,...]}
+            pred_by_class={} # cls_id -> [(img_id, score, bbox), ...]
+            n_gt_per_class={}
+            n_pred_per_class={}
+
+            for img_id,bb in enumerate(bb_img_json_list):
+                ann=bb.getANN() or {}
+                pred_boxes=ann.get(bbox_key,[]) or []
+                pred_classes=ann.get(cls_key,[]) or []
+                pred_scores=ann.get(score_key,[]) or []
+
+                # Normalize list lengths
+                n_pred=min(len(pred_boxes),len(pred_classes))
+                if(len(pred_scores)<n_pred):
+                    # If scores are missing, treat as 1.0 (keeps ordering stable enough)
+                    pred_scores=list(pred_scores)+[1.0]*(n_pred-len(pred_scores))
+                n_pred=min(n_pred,len(pred_scores))
+
+                d=bb.getDict() or {}
+                gt_block=d.get(gt_block_key,{}) or {}
+                gt_boxes=gt_block.get(gt_bbox_key,[]) or []
+                gt_classes=gt_block.get(gt_cls_key,[]) or []
+
+                n_gt=min(len(gt_boxes),len(gt_classes))
+
+                # GT
+                for gi in range(n_gt):
+                    try:
+                        cid=int(gt_classes[gi])
+                    except Exception:
+                        continue
+                    gt_by_class.setdefault(cid,{})
+                    gt_by_class[cid].setdefault(img_id,[])
+                    gt_by_class[cid][img_id].append(gt_boxes[gi])
+
+                # Pred
+                for pi in range(n_pred):
+                    try:
+                        cid=int(pred_classes[pi])
+                    except Exception:
+                        continue
+                    score=float(pred_scores[pi])
+                    pred_by_class.setdefault(cid,[])
+                    pred_by_class[cid].append((img_id,score,pred_boxes[pi]))
+
+            # counts
+            all_cls_ids=set(list(gt_by_class.keys())+list(pred_by_class.keys()))
+            for cid in all_cls_ids:
+                # GT count
+                gtc=0
+                if(cid in gt_by_class):
+                    for _,boxes in gt_by_class[cid].items():
+                        gtc+=len(boxes)
+                n_gt_per_class[class_id_to_name.get(cid,f"class_{cid}")]=int(gtc)
+
+                # Pred count
+                pc=len(pred_by_class.get(cid,[]))
+                n_pred_per_class[class_id_to_name.get(cid,f"class_{cid}")]=int(pc)
+
+            def _compute_ap(rec,prec):
+                # rec,prec are 1D numpy arrays increasing in recall order
+                if(rec.size==0):
+                    return None
+                if(ap_mode=="interp101"):
+                    # precision envelope
+                    mpre=np.maximum.accumulate(prec[::-1])[::-1]
+                    rs=np.linspace(0.0,1.0,101)
+                    p_at_r=[]
+                    for r in rs:
+                        inds=np.where(rec>=r)[0]
+                        p_at_r.append(float(mpre[inds].max()) if inds.size>0 else 0.0)
+                    return float(np.mean(p_at_r))
+                else:
+                    # trapz on precision envelope (VOC-style continuous)
+                    mrec=np.concatenate(([0.0],rec,[1.0]))
+                    mpre=np.concatenate(([0.0],prec,[0.0]))
+                    mpre=np.maximum.accumulate(mpre[::-1])[::-1]
+                    # integrate area under curve
+                    return float(np.trapz(mpre,mrec))
+
+            def _eval_for_thr(thr:float):
+                ap_per_class={}
+                for cid in sorted(all_cls_ids):
+                    cname=class_id_to_name.get(cid,f"class_{cid}")
+                    preds=pred_by_class.get(cid,[])
+                    # sort by descending score
+                    preds_sorted=sorted(preds,key=lambda x:x[1],reverse=True)
+
+                    # total GT for this class
+                    gt_imgs=gt_by_class.get(cid,{})
+                    n_gt=sum(len(v) for v in gt_imgs.values())
+                    if(n_gt==0):
+                        # If no GT, AP is undefined; follow common convention -> None
+                        ap_per_class[cname]=None
+                        continue
+
+                    # Per-image matched flags
+                    matched={}
+                    for img_id,boxes in gt_imgs.items():
+                        matched[img_id]=[False]*len(boxes)
+
+                    tp=np.zeros(len(preds_sorted),dtype=np.float64)
+                    fp=np.zeros(len(preds_sorted),dtype=np.float64)
+
+                    for i,(img_id,score,pbox) in enumerate(preds_sorted):
+                        gt_boxes=gt_imgs.get(img_id,[])
+                        if(len(gt_boxes)==0):
+                            fp[i]=1.0
+                            continue
+
+                        best_iou=-1.0
+                        best_j=-1
+                        for j,gbox in enumerate(gt_boxes):
+                            if(matched[img_id][j]):
+                                continue
+                            try:
+                                iou_val=imgLib.IoULib.IoU(gbox,pbox)
+                            except Exception:
+                                iou_val=0.0
+                            if(iou_val>best_iou):
+                                best_iou=iou_val
+                                best_j=j
+                        if(best_iou>=thr and best_j>=0):
+                            tp[i]=1.0
+                            matched[img_id][best_j]=True
+                        else:
+                            fp[i]=1.0
+
+                    tp_c=np.cumsum(tp)
+                    fp_c=np.cumsum(fp)
+                    rec=tp_c/(n_gt+eps)
+                    prec=tp_c/(tp_c+fp_c+eps)
+
+                    ap=_compute_ap(rec,prec)
+                    ap_per_class[cname]=ap
+
+                # mean over classes that have GT (ignore None)
+                valid=[v for v in ap_per_class.values() if isinstance(v,(int,float))]
+                map_val=float(np.mean(valid)) if len(valid)>0 else None
+                return {
+                    "mAP":map_val,
+                    "AP_per_class":ap_per_class
+                }
+
+            per_iou={}
+            for thr in iou_thresholds:
+                thr_f=round(float(thr),4)
+                per_iou[thr_f]=_eval_for_thr(thr_f)
+
+            # Common summary keys
+            mAP50=None
+            AP50_per_class={}
+            if(0.5 in per_iou):
+                mAP50=per_iou[0.5]["mAP"]
+                AP50_per_class=per_iou[0.5]["AP_per_class"]
+            else:
+                # find close
+                for k in per_iou:
+                    if(abs(float(k)-0.5)<1e-6):
+                        mAP50=per_iou[k]["mAP"]
+                        AP50_per_class=per_iou[k]["AP_per_class"]
+                        break
+
+            # mAP50_95 and per-class mean across thresholds
+            thr_keys=sorted(per_iou.keys())
+            maps=[per_iou[k]["mAP"] for k in thr_keys if isinstance(per_iou[k]["mAP"],(int,float))]
+            mAP50_95=float(np.mean(maps)) if len(maps)>0 else None
+
+            AP50_95_per_class={}
+            # per-class average over thresholds (ignore None)
+            for cname in set().union(*[set(per_iou[k]["AP_per_class"].keys()) for k in thr_keys]):
+                vals=[]
+                for k in thr_keys:
+                    v=per_iou[k]["AP_per_class"].get(cname,None)
+                    if(isinstance(v,(int,float))):
+                        vals.append(v)
+                AP50_95_per_class[cname]=float(np.mean(vals)) if len(vals)>0 else None
+
+            return {
+                "iou_thresholds":[float(k) for k in thr_keys],
+                "ap_mode":ap_mode,
+                "mAP50":mAP50,
+                "mAP50_95":mAP50_95,
+                "AP50_per_class":AP50_per_class,
+                "AP50_95_per_class":AP50_95_per_class,
+                "per_iou":per_iou,
+                "n_gt_per_class":n_gt_per_class,
+                "n_pred_per_class":n_pred_per_class
+            }
+        
     @_protectedClass.fileStoreMyLibRegister
     class YOLOANNDataset(_FileStore.FileStoreParser):
         """
@@ -27802,6 +28076,7 @@ class imgLib:
                 self.__features_per_images_df=None
                 self.__confusion_matrix_dict=None
                 self.__evaluation_dict=None
+                self.__map_dict=None
 
             def to_payload(self):
                 """
@@ -28348,6 +28623,62 @@ class imgLib:
                     background_label=background_label
                 )
 
+            def calcMAP(
+                self,
+                iou_thresholds:list=None,
+                ap_mode:str=None
+            ):
+                """
+                Calculates detection mAP for each model.
+
+                Args:
+                    iou_thresholds (list, optional): IoU thresholds for AP/mAP.
+                        If None, defaults to BBimgJson.DEFAULT_MAP_IOU_THRESHOLDS (0.50..0.95).
+                    ap_mode (str, optional): "interp101" or "trapz". If None, uses BBimgJson.DEFAULT_MAP_AP_MODE.
+
+                Returns:
+                    dict: {model_name: map_data_dict, ...}
+                """
+                args_list=[
+                    tuple(iou_thresholds) if isinstance(iou_thresholds,list) else None,
+                    ap_mode
+                ]
+
+                if(self.__map_dict is not None):
+                    if(tuple(args_list) in self.__map_dict):
+                        return self.__map_dict[tuple(args_list)]
+
+                if(ap_mode is None):
+                    ap_mode=imgLib.BBimgJson.DEFAULT_MAP_AP_MODE
+
+                d={}
+                for model_name,results in self.generatorPerModel():
+                    d[model_name]=imgLib.BBimgJson.CalcMAPFromBBimgJsonList(
+                        [ri for ri in results.values()],
+                        iou_thresholds=iou_thresholds,
+                        ap_mode=ap_mode
+                    )
+
+                if(self.__lock_append and self.__cache_mode):
+                    if(self.__map_dict is None):
+                        self.__map_dict={}
+                    self.__map_dict[tuple(args_list)]=d
+
+                return d
+
+            def getMAPDict(
+                self,
+                iou_thresholds:list=None,
+                ap_mode:str=None
+            ):
+                """
+                Gets the cached (or newly computed) mAP dictionary for each model.
+                """
+                return self.calcMAP(
+                    iou_thresholds=iou_thresholds,
+                    ap_mode=ap_mode
+                )
+
             DEFAULT_CM_FIG_HEADER_INDEX_FACE_COLOR="#888888"
             DEFAULT_CM_FIG_GRADIENT_CMAP="Blues"
 
@@ -28435,7 +28766,9 @@ class imgLib:
                 background_label:str=None,
                 is_transpose:bool=False,
                 NEAR_ZERO:float=None,
-                include_confusion_matrix_df:bool=False
+                include_confusion_matrix_df:bool=False,
+                include_map:bool=False,
+                map_args:dict=None
             ):
                 """
                 Gets the evaluation metrics for the model.
@@ -28447,6 +28780,8 @@ class imgLib:
                     is_transpose (bool, optional): Whether to transpose the confusion matrix.
                     NEAR_ZERO (float, optional): Near zero value for the confusion matrix.
                     include_confusion_matrix_df (bool, optional): Whether to include the confusion matrix DataFrame.
+                    include_map (bool, optional): Whether to include mAP in the evaluation.
+                    map_args (dict, optional): Additional arguments for mAP calculation.
 
                 Returns:
                     dict: A dictionary containing evaluation metrics.
@@ -28455,8 +28790,15 @@ class imgLib:
                     ValueError: If no results are available or if the result format is invalid.
                     TypeError: If the result format is invalid.
                 """
-                args_list=[iou_threshold,include_background,background_label,is_transpose,NEAR_ZERO,include_confusion_matrix_df]
+                map_args_key=None
+                if(include_map):
+                    try:
+                        map_args_key=json.dumps(map_args or {},sort_keys=True,default=str)
+                    except Exception:
+                        map_args_key=str(map_args)
 
+                args_list=[iou_threshold,include_background,background_label,is_transpose,NEAR_ZERO,include_confusion_matrix_df,include_map,map_args_key]
+                
                 if(self.__evaluation_dict is not None):
                     if(tuple(args_list) in self.__evaluation_dict):
                         return self.__evaluation_dict[tuple(args_list)]
@@ -28469,6 +28811,15 @@ class imgLib:
                     include_background=include_background,
                     background_label=background_label
                 )
+
+                map_dict=None
+                if(include_map):
+                    if(map_args is None):
+                        map_args={}
+                    elif(not isinstance(map_args,dict)):
+                        raise TypeError("map_args should be a dict!")
+                    map_dict=self.calcMAP(**map_args)
+
                 result_dict={}
 
                 for model_name,cmi in cm_dict.items():
@@ -28489,6 +28840,9 @@ class imgLib:
                     }
                     if(include_confusion_matrix_df):
                         append_dict["confusion_matrix_df"]=cmi
+
+                    if(include_map and isinstance(map_dict,dict) and model_name in map_dict):
+                        append_dict["map_data"]=map_dict[model_name]
                                     
                     result_dict[model_name]={
                         **append_dict,
@@ -28556,6 +28910,12 @@ class imgLib:
                 )
 
                 dfl.append(
+                    "AllMAPSummary",
+                    pd.DataFrame(),
+                    "All mAP Summary"
+                )
+
+                dfl.append(
                     "AllFeaturesPerImages",
                     self.getFeaturesPerImagesDataFrame(),
                     "All Features Per Images"
@@ -28588,6 +28948,11 @@ class imgLib:
                     all_evaluate_data_dict[data_key]={}
                     all_evaluate_data_dict[data_key]["all_sum"]=data[data_key]["all_sum"]
                     all_evaluate_data_dict[data_key]["accuracy"]=data[data_key]["accuracy"]
+                    map_data=data[data_key].get("map_data",None)
+                    if(isinstance(map_data,dict)):
+                        all_evaluate_data_dict[data_key]["mAP50"]=map_data.get("mAP50",None)
+                        all_evaluate_data_dict[data_key]["mAP50_95"]=map_data.get("mAP50_95",None)
+
                     for cls_name,cls_data in data[data_key]["class_data"].items():
                         all_evaluate_data_dict[data_key][f"{cls_name}_TP"]=cls_data["TP"]
                         all_evaluate_data_dict[data_key][f"{cls_name}_FP"]=cls_data["FP"]
@@ -28599,7 +28964,18 @@ class imgLib:
 
                 all_evaluate_df=pd.DataFrame(all_evaluate_data_dict).T.reset_index().rename(columns={"index":"model_name"})
                 dfl.renewDataFrameByKey("AllEvaluateData",all_evaluate_df)
-                
+                if(isinstance(all_evaluate_df,pd.DataFrame)):
+                    if(("mAP50" in all_evaluate_df.columns) or ("mAP50_95" in all_evaluate_df.columns)):
+                        cols=["model_name"]
+                        if("mAP50" in all_evaluate_df.columns):
+                            cols.append("mAP50")
+                        if("mAP50_95" in all_evaluate_df.columns):
+                            cols.append("mAP50_95")
+                        try:
+                            dfl.renewDataFrameByKey("AllMAPSummary",all_evaluate_df[cols].copy())
+                        except Exception:
+                            pass
+
                 return dfl
 
             def saveEvaluationsExcel(
@@ -29911,13 +30287,16 @@ class imgLib:
                     img_names=self.getImageNames()
                 if(ensemble_model_names is None):
                     ensemble_model_names=self.getEnsembleModelNames()
-                if(img_tags is None):
-                    img_tags=self.getImgTagTypes()
 
                 append_img_names=self.extractImageNamesEachAnyImgTags(
-                    img_tags=list(img_tags),
+                    img_tags=img_tags,
                     target_img_names=img_names
                 )
+
+                if(len(append_img_names)<=0):
+                    raise ValueError("No images to process after filtering by img_tags")
+                if(len(ensemble_model_names)<=0):
+                    raise ValueError("No ensemble models to process")
 
                 if(save_bb_img_json):
                     if(output_dir is None):
@@ -29985,10 +30364,14 @@ class imgLib:
                 """
                 if(target_img_names is None):
                     target_img_names=self.getImageNames()
-                result_img_name_set=set()
+
+                if(img_tags is None):
+                    return target_img_names
+
+                result_img_name=[]
                 for img_tag in list(img_tags):
-                    result_img_name_set.update(self.extractImageNamesEachImgTag(img_tag,target_img_names=target_img_names))    
-                return list(result_img_name_set)
+                    result_img_name+=list(self.extractImageNamesEachImgTag(img_tag,target_img_names=target_img_names))
+                return list(set(result_img_name))
 
             def __copyDictOrEmpty(self,d):
                 """
