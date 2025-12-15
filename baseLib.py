@@ -9,6 +9,7 @@ import subprocess
 import multiprocessing as mp
 from multiprocessing import Pool, cpu_count
 import threading
+import _thread
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 import json
 import math
@@ -1581,7 +1582,7 @@ class _FileStore:
         encoding:str=None,
         bundle_filename:str=DEFAULT_BUNDLE_JSON_PATH,
         zip_mode:str=DEFAULT_ZIP_MODE,
-        zip_args:dict={},
+        zip_args:dict=None,
         fs_hash_prefix_len:int|None=None,
     ):
         """
@@ -1618,6 +1619,12 @@ class _FileStore:
             json_cls=IOLib.JSONLib.ExtendedJSONEncoder
         if(encoding is None):
             encoding=IOLib.DEFAULT_ENCODING
+        
+        if(zip_args is None):
+            zip_args={}
+        else:
+            zip_args=pyExLib.safety_deepcopy(zip_args)
+
         with tempfile.TemporaryDirectory() as tmpdir:
             bundle_json_path=os.path.join(tmpdir, bundle_filename)
             _FileStore.dumpBundle(
@@ -1675,7 +1682,7 @@ class _FileStore:
         encoding:str=None,
         bundle_filename:str=DEFAULT_BUNDLE_JSON_PATH,
         zip_mode:str=DEFAULT_ZIP_MODE,
-        zip_args:dict={},
+        zip_args:dict=None,
     ):
         """
         Loads an object from a zipped JSON bundle file, internalizing pandas DataFrames and numpy ndarrays.
@@ -1703,6 +1710,11 @@ class _FileStore:
             json_cls=json.JSONDecoder
         if(encoding is None):
             encoding=IOLib.DEFAULT_ENCODING
+            
+        if(zip_args is None):
+            zip_args={}
+        else:
+            zip_args=pyExLib.safety_deepcopy(zip_args)
 
         def _safe_extractall(zf:zipfile.ZipFile,dst:str):
             base=os.path.abspath(dst)
@@ -1857,7 +1869,7 @@ class pyExLib:
         return obj
 
     @staticmethod
-    def funcObjRun(obj:callable,args_list:list=[],args_dict:dict={}):
+    def funcObjRun(obj:callable,args_list:list=None,args_dict:dict=None):
         """
         Runs a callable object with given arguments.
 
@@ -1869,10 +1881,20 @@ class pyExLib:
         Returns:
             Any: Result of the callable object.
         """
+        if(args_list is None):
+            args_list=[]
+        else:
+            args_list=pyExLib.safety_deepcopy(args_list)
+
+        if(args_dict is None):
+            args_dict={}
+        else:
+            args_dict=pyExLib.safety_deepcopy(args_dict)
+
         return obj(*args_list,**args_dict)
 
     @staticmethod
-    def funcStringRun(name:str,args_list:list=[],args_dict:dict={},stack_index:int=-1):
+    def funcStringRun(name:str,args_list:list=None,args_dict:dict=None,stack_index:int=-1):
         """
         Runs a function specified by a string with given arguments.
 
@@ -1885,6 +1907,16 @@ class pyExLib:
         Returns:
             Any: Result of the function.
         """
+        if(args_list is None):
+            args_list=[]
+        else:
+            args_list=pyExLib.safety_deepcopy(args_list)
+
+        if(args_dict is None):
+            args_dict={}
+        else:
+            args_dict=pyExLib.safety_deepcopy(args_dict)
+
         return pyExLib.funcObjRun(pyExLib.funcString2Obj(name,stack_index=stack_index),args_list=args_list,args_dict=args_dict)
 
     @staticmethod
@@ -1921,10 +1953,10 @@ class pyExLib:
                 tmp_parameter_args=[multi_args[parameter_key]]
 
             for parameter_arg in tmp_parameter_args:
-                new_constance_args=copy.deepcopy(constance_args)
+                new_constance_args=pyExLib.safety_deepcopy(constance_args)
                 new_constance_args[parameter_key]=parameter_arg
 
-                new_multi_args=copy.deepcopy(multi_args)
+                new_multi_args=pyExLib.safety_deepcopy(multi_args)
                 new_multi_args.pop(parameter_key)
 
                 results_list=pyExLib.allParameterRun(func,new_multi_args,new_constance_args,results_list=results_list)
@@ -1933,8 +1965,8 @@ class pyExLib:
             r=func(**constance_args)
             results_list.append(
                 {
-                    "args_data":copy.deepcopy(constance_args),
-                    "result":copy.deepcopy(r)
+                    "args_data":pyExLib.safety_deepcopy(constance_args),
+                    "result":pyExLib.safety_deepcopy(r)
                 }
             )
         return results_list
@@ -2309,6 +2341,126 @@ class pyExLib:
                 server.ehlo()
             server.login(from_mail_user,from_mail_app_pass)
             server.send_message(msg)
+
+    DEFAULT_SAFETY_DEEPCOPY_KEEP_TYPES=[
+        type(threading.Lock()),
+    ]
+
+    @staticmethod
+    def safety_deepcopy(
+        obj:Any,
+        *,
+        keep_types:tuple[type, ...]=None,
+        keep_predicate:Callable[[Any],bool]|None=None,
+        memo:dict[int,Any]|None=None,
+        max_depth:int|None=None,
+    )->Any:
+        """
+        Performs a deep copy of an object while keeping certain types or objects unchanged.
+
+        Args:
+            obj (Any): Object to deep copy.
+            keep_types (tuple[type, ...] or None): Tuple of types to keep unchanged during deep copy.
+            keep_predicate (Callable[[Any], bool] or None): Predicate function to determine if an object should be kept unchanged.
+            memo (dict[int, Any] or None): Memoization dictionary for deep copy.
+            max_depth (int or None): Maximum depth to traverse during deep copy.
+
+        Returns:
+            Any: Deep copied object with specified types or objects kept unchanged.
+        """
+        if(keep_types is None):
+            keep_types=tuple(pyExLib.DEFAULT_SAFETY_DEEPCOPY_KEEP_TYPES)
+        elif(isinstance(keep_types,(list,set,tuple))):
+            keep_types=tuple(keep_types)
+        else:
+            raise ValueError("keep_types must be tuple, list, or set of types")
+
+        if(memo is None):
+            memo={}
+        seen=set()
+
+        atomic=(
+            str,
+            bytes,
+            bytearray,
+            memoryview,
+            int,
+            float,
+            complex,
+            bool,
+            type(None),
+            range
+        )
+
+        def should_keep(x:Any)->bool:
+            if(keep_predicate is not None):
+                try:
+                    if(keep_predicate(x)):
+                        return True
+                except Exception:
+                    pass
+            if(keep_types):
+                for keep_type in keep_types:
+                    try:
+                        if(isinstance(x,keep_type)):
+                            return True
+                    except Exception:
+                        pass
+            return False
+
+        def mark_keep(x:Any)->None:
+            memo[id(x)]=x
+
+        def walk(x:Any,depth:int)->None:
+            xid=id(x)
+            if(xid in seen):
+                return
+            seen.add(xid)
+
+            if(max_depth is not None and depth>max_depth):
+                return
+
+            if(isinstance(x,atomic)):
+                return
+
+            if(should_keep(x)):
+                mark_keep(x)
+                return
+            
+            # dict / list / tuple / set / frozenset
+            if(isinstance(x,dict)):
+                for k,v in x.items():
+                    walk(k,depth+1)
+                    walk(v,depth+1)
+                return
+            
+            if(isinstance(x,(list,tuple,set,frozenset))):
+                for e in x:
+                    walk(e,depth+1)
+                return
+
+            # General object 
+            d=getattr(x,"__dict__",None)
+            if(isinstance(d,dict)):
+                for v in d.values():
+                    walk(v,depth+1)
+
+            slots=getattr(type(x),"__slots__",None)
+            if(slots):
+                if(isinstance(slots,str)):
+                    slots=(slots,)
+                for s in slots:
+                    if(s.startswith("__") and s.endswith("__")):
+                        continue
+                    try:
+                        v=getattr(x,s)
+                    except Exception:
+                        continue
+                    walk(v,depth+1)
+
+        walk(obj,0)
+
+        return copy.deepcopy(obj,memo)
 
     class ClassDataCoreLib:
         """
@@ -2825,7 +2977,9 @@ class pyExLib:
             Returns:
                 list: List of unique classes.
             """
-            return self.__include_classes
+            if(not isinstance(self.__include_classes,list)):
+                raise ValueError("Internal error: include_classes is not a list")
+            return pyExLib.safety_deepcopy(self.__include_classes)
 
         @property
         def info_dict(self):
@@ -2835,7 +2989,9 @@ class pyExLib:
             Returns:
                 dict: Information dictionary.
             """
-            return self.__info_dict
+            if(not isinstance(self.__info_dict,dict)):
+                raise ValueError("Internal error: info_dict is not a dict")
+            return pyExLib.safety_deepcopy(self.__info_dict)
 
         @property
         def raw_obj_type(self):
@@ -2979,7 +3135,7 @@ class pyExLib:
             Returns:
                 processTime: Copied processTime instance.
             """
-            return copy.deepcopy(self)
+            return pyExLib.safety_deepcopy(self)
         
         def reset(self):
             """
@@ -3907,7 +4063,7 @@ class pyExLib:
                 """
                 return self.generator()
 
-            def saveCSV(self,save_dir:str,to_csv_args:dict={}):
+            def saveCSV(self,save_dir:str,to_csv_args:dict=None):
                 """
                 Saves each DataFrame as a CSV file named after its key.
 
@@ -3915,6 +4071,11 @@ class pyExLib:
                     save_dir (str): Directory to save the CSV files.
                     to_csv_args (dict): Additional arguments for pandas DataFrame.to_csv().
                 """
+                if(to_csv_args is None):
+                    to_csv_args={}
+                else:
+                    to_csv_args=pyExLib.safety_deepcopy(to_csv_args)
+
                 save_dir_obj=Path(save_dir)
                 save_dir_obj.mkdir(parents=True,exist_ok=True)
 
@@ -4030,7 +4191,7 @@ class pyExLib:
             def saveTablePlot(
                 self,
                 save_dir:str,
-                plot_args:dict={}
+                plot_args:dict=None
             ):
                 """
                 Saves each DataFrame as a table plot image.
@@ -4039,6 +4200,11 @@ class pyExLib:
                     save_dir (str): Directory to save the plot images.
                     plot_args (dict, optional): Arguments for the plot.
                 """
+                if(plot_args is None):
+                    plot_args={}
+                else:
+                    plot_args=pyExLib.safety_deepcopy(plot_args)
+
                 save_dir_obj=Path(save_dir)
                 save_dir_obj.mkdir(parents=True,exist_ok=True)
 
@@ -4118,7 +4284,7 @@ class pyExLib:
             return [li/s*w if s!=0 else 0 for li in l]
 
         @staticmethod
-        def extractKeysFromDict(d:dict,keys_to_extract:list=[]):
+        def extractKeysFromDict(d:dict,keys_to_extract:list=None):
             """
             Extracts specified keys from a dictionary.
 
@@ -4129,10 +4295,15 @@ class pyExLib:
             Returns:
                 dict: Dictionary with extracted keys.
             """
-            return {key:d[key] for key in keys_to_extract if key in d}
+            if(keys_to_extract is None):
+                keys_to_extract=[]
+            else:
+                keys_to_extract=pyExLib.safety_deepcopy(keys_to_extract)
+
+            return pyExLib.safety_deepcopy({key:d[key] for key in keys_to_extract if key in d})
         
         @staticmethod
-        def excludeKeysFromDict(d:dict,keys_to_exclude:list=[]):
+        def excludeKeysFromDict(d:dict,keys_to_exclude:list=None):
             """
             Excludes specified keys from a dictionary.
 
@@ -4143,7 +4314,12 @@ class pyExLib:
             Returns:
                 dict: Dictionary without excluded keys.
             """
-            return {key:value for key,value in d.items() if key not in keys_to_exclude}
+            if(keys_to_exclude is None):
+                keys_to_exclude=[]
+            else:
+                keys_to_exclude=pyExLib.safety_deepcopy(keys_to_exclude)
+
+            return pyExLib.safety_deepcopy({key:value for key,value in d.items() if key not in keys_to_exclude})
                 
         @staticmethod
         def replaceListElement(l:list,replace_list:list,copy_flag:bool=True):
@@ -4169,7 +4345,7 @@ class pyExLib:
                     tmp=after_elements[before_elements.index(li)]
                 
                 if(copy_flag):
-                    tmp=copy.deepcopy(tmp)
+                    tmp=pyExLib.safety_deepcopy(tmp)
                 
                 r.append(tmp)
             
@@ -4302,7 +4478,7 @@ class pyExLib:
             return r
         
         @staticmethod
-        def isDuplicateElementInList(l:list,exclusion_list:list=[],return_dict_flag:bool=False):
+        def isDuplicateElementInList(l:list,exclusion_list:list=None,return_dict_flag:bool=False):
             """
             Checks for duplicate elements in a list.
 
@@ -4314,6 +4490,13 @@ class pyExLib:
             Returns:
                 bool or dict: True if there are duplicate elements, False otherwise.
             """
+            l=pyExLib.safety_deepcopy(l)
+
+            if(exclusion_list is None):
+                exclusion_list=[]
+            else:
+                exclusion_list=pyExLib.safety_deepcopy(exclusion_list)
+
             r=[]
             counter_list=[]
             first_index_list=[]
@@ -4329,12 +4512,12 @@ class pyExLib:
                     duplication_flag=True
                     counter_list[r.index(li)]+=1
             if(return_dict_flag):
-                return {
+                return pyExLib.safety_deepcopy({
                     "duplication_flag":duplication_flag,
                     "unique_list":r,
                     "counter_list":counter_list,
                     "first_index_list":first_index_list
-                }
+                })
             else:
                 return duplication_flag
             
@@ -4647,7 +4830,7 @@ class pyExLib:
                 """
                 return pyExLib.IterableLib.weightList(l,[1]*len(l))
 
-            def __init__(self,name_list:list=[],weight_list:list=[]):
+            def __init__(self,name_list:list=None,weight_list:list=None):
                 """
                 Initializes a weighted list.
 
@@ -4658,6 +4841,15 @@ class pyExLib:
                 Raises:
                     TypeError: If the lengths of name_list and weight_list are not equal.
                 """
+                if(name_list is None):
+                    name_list=[]
+                else:
+                    name_list=pyExLib.safety_deepcopy(name_list)
+
+                if(weight_list is None):
+                    weight_list=[]
+                else:
+                    weight_list=pyExLib.safety_deepcopy(weight_list)
 
                 self.__name_list=[]
                 self.__weight_list=[]
@@ -4669,12 +4861,12 @@ class pyExLib:
                     raise TypeError("Length is different between name_list and weight_list!")
                 else:
                     try:
-                        name_list=copy.deepcopy(name_list)
+                        name_list=pyExLib.safety_deepcopy(name_list)
                     except:
                         name_list=name_list.copy()
 
                     try:
-                        weight_list=copy.deepcopy(weight_list)
+                        weight_list=pyExLib.safety_deepcopy(weight_list)
                     except:
                         weight_list=weight_list.copy()
 
@@ -4688,10 +4880,10 @@ class pyExLib:
                 Returns:
                     dict: A dictionary representation of the weighted list.
                 """
-                return {
+                return pyExLib.safety_deepcopy({
                     "name_list":self.__name_list,
                     "weight_list":self.__weight_list
-                }
+                })
 
             @classmethod
             def from_payload(cls,payload:dict,store:"IOLib.FileStore"):
@@ -5205,7 +5397,7 @@ class pyExLib:
             return f"OutlineVisitor(indent_str={self.__indent_str}, before_str={self.__before_str}, format_str={self.__format_str}, after_str={self.__after_str}, ln_str={self.__ln_str}, contain_node_types={self.__contain_node_types})"
 
         def getOutlineTree(self):
-            return copy.deepcopy(self.__outline_tree)
+            return pyExLib.safety_deepcopy(self.__outline_tree)
 
         def setLock(self):
             """
@@ -5632,7 +5824,7 @@ class IOLib:
         return after_dir/relative_path
 
     @staticmethod
-    def saveCSV2d(path:str,l:list,header:list=[],index:list=[]):
+    def saveCSV2d(path:str,l:list,header:list=None,index:list=None):
         """
         Saves a 2D list to a CSV file.
 
@@ -5642,6 +5834,16 @@ class IOLib:
             header (list): List of header values.
             index (list): List of index values.
         """
+        if(header is None):
+            header=[]
+        else:
+            header=pyExLib.safety_deepcopy(header)
+
+        if(index is None):
+            index=[]
+        else:
+            index=pyExLib.safety_deepcopy(index)
+
         with open(path,mode="w",encoding=IOLib.DEFAULT_ENCODING) as f:
             writer=csv.writer(f)
             writer.writerow(header)
@@ -5824,7 +6026,7 @@ class IOLib:
         recursive:bool=True,
         dir_split_str:str="/",
         is_sort:bool=False,
-        sort_args:dict={},
+        sort_args:dict=None,
         include_pathlib_obj:bool=False,
         re_str:str=""
     ):
@@ -5843,6 +6045,10 @@ class IOLib:
         Returns:
             list: List of file paths with split parts.
         """
+        if(sort_args is None):
+            sort_args={}
+        else:
+            sort_args=pyExLib.safety_deepcopy(sort_args)
 
         file_pattern_parts=file_pattern.split(dir_split_str)
 
@@ -5907,7 +6113,7 @@ class IOLib:
 
             result_list.append(result_list_append_dict)
 
-        return result_list
+        return result_list.copy()
 
     @staticmethod
     def getGlobPatternListFiles(
@@ -5915,7 +6121,7 @@ class IOLib:
         recursive:bool=True,
         dir_split_str:str="/",
         is_sort:bool=False,
-        sort_args:dict={},
+        sort_args:dict=None,
         include_pathlib_obj:bool=False,
         re_str:str=""
     ):
@@ -5934,6 +6140,11 @@ class IOLib:
         Returns:
             list: List of file paths with split parts.
         """
+        if(sort_args is None):
+            sort_args={}
+        else:
+            sort_args=pyExLib.safety_deepcopy(sort_args)
+
         result_list=[]
         for file_ptn in file_ptn_list:
             result_list+=IOLib.getGlobPatternFiles(
@@ -5945,7 +6156,7 @@ class IOLib:
                 include_pathlib_obj=include_pathlib_obj,
                 re_str=re_str
             )
-        return result_list
+        return result_list.copy()
     
     @staticmethod
     def outLogTXT(path:str,log_str:str="",include_datetime:bool=True,add_mode:bool=True,before_delete_flag:bool=False):
@@ -9432,8 +9643,8 @@ class IOLib:
             self,
             save_directory:str=None,
             meta_str:str=None,
-            dump_args:dict={},
-            load_args:dict={},
+            dump_args:dict=None,
+            load_args:dict=None,
         ):
             """
             Initializes a FileStoreVariable instance.
@@ -9447,6 +9658,16 @@ class IOLib:
             Raises:
                 TypeError: If save_directory is not str, Path, or None.
             """
+            if(dump_args is None):
+                dump_args={}
+            else:
+                dump_args=pyExLib.safety_deepcopy(dump_args)
+                
+            if(load_args is None):
+                load_args={}
+            else:
+                load_args=pyExLib.safety_deepcopy(load_args)
+
             temp_file_mode=False
             if(save_directory is None):
                 temp_file_mode=True
@@ -10824,7 +11045,7 @@ class IOLib:
             Returns:
                 list: List of file paths.
             """
-            return self.__file_list.copy()
+            return pyExLib.safety_deepcopy(self.__file_list)
 
         @property
         def file_asset_list(self):
@@ -10834,7 +11055,7 @@ class IOLib:
             Returns:
                 list: List of FileAsset instances.
             """
-            return self.__file_asset_list.copy()
+            return pyExLib.safety_deepcopy(self.__file_asset_list)
 
         @property
         def file_hash_list(self):
@@ -10844,7 +11065,7 @@ class IOLib:
             Returns:
                 list: List of file hashes.
             """
-            return self.__file_hash_list.copy()
+            return  pyExLib.safety_deepcopy(self.__file_hash_list)
 
         @property
         def total_file_size(self):
@@ -11818,7 +12039,7 @@ class IOLib:
                 payload["user_version"]=self.GetUserVersion()
             except Exception:
                 payload["user_version"]=None
-            return payload
+            return pyExLib.safety_deepcopy(payload)
 
         @classmethod
         def from_payload(cls,payload:dict,store):
@@ -12011,7 +12232,7 @@ class TuringMachine(_FileStore.FileStoreParser):
         Returns:
             dict: Machine parameters.
         """
-        return self.__machine_parameter
+        return pyExLib.safety_deepcopy(self.__machine_parameter)
     
     def getTapes(self,qFlag:bool=True):
         """
@@ -12137,7 +12358,8 @@ class TuringMachine(_FileStore.FileStoreParser):
             Args:
                 settings (dict): Settings for the transition function.
             """
-            self.__settings=settings
+            self.__settings=pyExLib.safety_deepcopy(settings)
+
             self.convDeltaList()
             self.__init_qo=settings["delta"]["qo"]
             self.__init_go=settings["delta"]["go"]
@@ -12187,7 +12409,8 @@ class TuringMachine(_FileStore.FileStoreParser):
             Args:
                 settings (dict): Settings for the Turing Machine.
             """
-            self.__settings=settings
+            self.__settings=pyExLib.safety_deepcopy(settings)
+
             if(isinstance(self.__settings,dict) and self.__checkSettings()):
                 blank=self.__settings["blank"]
                 Q=self.__settings["Q"]
@@ -12341,7 +12564,7 @@ class TuringMachine(_FileStore.FileStoreParser):
         PROGRAM_AR_MODE_QUIT_REJECT="r"
 
         @staticmethod
-        def __getNextProgramIndex(now_index:int,arg,PROGRAM_LABEL_DICT:dict={}):
+        def __getNextProgramIndex(now_index:int,arg,PROGRAM_LABEL_DICT:dict=None):
             """
             Determines the next program index based on the current index and argument.
 
@@ -12356,6 +12579,11 @@ class TuringMachine(_FileStore.FileStoreParser):
             Raises:
                 ValueError: If the argument is invalid.
             """
+            if(PROGRAM_LABEL_DICT is None):
+                PROGRAM_LABEL_DICT={}
+            else:
+                PROGRAM_LABEL_DICT=pyExLib.safety_deepcopy(PROGRAM_LABEL_DICT)
+
             if(isinstance(arg,int)):
                 return True,arg
             elif(isinstance(arg,str)):
@@ -12540,7 +12768,10 @@ class TuringMachine(_FileStore.FileStoreParser):
                 TuringMachine.TMJson.TMJsonNullError: If the memory is not defined.
             """
             if(self.__memory()!=None):
-                return self.__memory
+                if(isinstance(self.__memory,list)):
+                    return self.__memory.copy()
+                else:
+                    raise TuringMachine.TMJson.TMJsonNullError("'memory' is not list type")
             else:
                 raise TuringMachine.TMJson.TMJsonNullError("'memory' is not yet defined")
         
@@ -15200,7 +15431,7 @@ class mathLib:
             def removeConsecutiveDuplicates(polygon):
                 return [point for i,point in enumerate(polygon)if(i==0 or point!=polygon[i-1])]
 
-            polygon=copy.deepcopy(polygon)
+            polygon=pyExLib.safety_deepcopy(polygon)
 
             if(polygon[0]==polygon[-1]):
                 polygon=polygon[:-1]
@@ -15566,7 +15797,7 @@ class imgLib:
         point_color:tuple=DEFAULT_FIGURE_POINT_COLOR,
         label_flag:bool=False,
         label_list:list=None,
-        label_arg:dict={},
+        label_arg:dict=None,
         label_org_function:callable=None
     ):
         """
@@ -15590,9 +15821,13 @@ class imgLib:
         Raises:
             ValueError: If `label_flag` is True but `label_list` is None, or if the lengths of `box_coords_list` and `label_list` are not equal.
         """
-        
         if(not IMPORT_OPENCV_FLAG):
             raise RuntimeError("Error : The opencv package is not installed!")
+
+        if(label_arg is None):
+            label_arg={}
+        else:
+            label_arg=pyExLib.safety_deepcopy(label_arg)
 
         if(label_flag and label_list is None):
             raise ValueError("If `label_flag` is True, `label_list` must be provided!")
@@ -15638,7 +15873,7 @@ class imgLib:
         point_color:tuple=DEFAULT_FIGURE_POINT_COLOR,
         label_flag:bool=False,
         label_list:list=None,
-        label_arg:dict={},
+        label_arg:dict=None,
         label_org_function:callable=DEFAULT_LABEL_ORG_FUNCTION
     ):
         """
@@ -15659,10 +15894,14 @@ class imgLib:
         Returns:
             np.ndarray: Image with polygons drawn.
         """
-
         if(not IMPORT_OPENCV_FLAG):
             raise RuntimeError("Error : The opencv package is not installed!")
         
+        if(label_arg is None):
+            label_arg={}
+        else:
+            label_arg=pyExLib.safety_deepcopy(label_arg)
+
         if(label_flag and label_list is None):
             raise ValueError("If `label_flag` is True, `label_list` must be provided!")
             if(len(box_coords_list)!=len(label_list)):
@@ -15714,7 +15953,7 @@ class imgLib:
         point_color:tuple=DEFAULT_FIGURE_POINT_COLOR,
         label_flag:bool=False,
         label_list:list=None,
-        label_arg:dict={},
+        label_arg:dict=None,
         label_org_function:callable=DEFAULT_LABEL_ORG_FUNCTION
     ):
         """
@@ -15739,6 +15978,11 @@ class imgLib:
             ValueError: If the lengths of box_coords_list and box_colors are not equal or if label_flag is True but label_list is None.
             ValueError: If the lengths of box_coords_list and label_list are not equal when label_flag is True.
         """
+        if(label_arg is None):
+            label_arg={}
+        else:
+            label_arg=pyExLib.safety_deepcopy(label_arg)
+        
         if(len(box_coords_list)!=len(box_colors)):
             raise ValueError("The lengths of `box_coords_list` and `box_colors` must be equal!")
         
@@ -15775,7 +16019,7 @@ class imgLib:
         point_color:tuple=DEFAULT_FIGURE_POINT_COLOR,
         label_flag:bool=False,
         label_list:list=None,
-        label_arg:dict={},
+        label_arg:dict=None,
         label_org_function:callable=DEFAULT_LABEL_ORG_FUNCTION
     ):
         """
@@ -15799,6 +16043,11 @@ class imgLib:
         Raises:
             ValueError: If the lengths of point_coords_list and polygon_colors are not equal
         """
+        if(label_arg is None):
+            label_arg={}
+        else:
+            label_arg=pyExLib.safety_deepcopy(label_arg)
+
         if(len(point_coords_list)!=len(polygon_colors)):
             raise ValueError("The lengths of `point_coords_list` and `polygon_colors` must be equal!")
         
@@ -15832,7 +16081,7 @@ class imgLib:
         point_color:tuple=DEFAULT_FIGURE_POINT_COLOR,
         label_flag:bool=False,
         label_list:list=None,
-        label_arg:dict={},
+        label_arg:dict=None,
         label_org_function:callable=DEFAULT_LABEL_ORG_FUNCTION
     ):
         """
@@ -15857,6 +16106,10 @@ class imgLib:
         Raises:
             ValueError: If the mode is invalid.
         """
+        if(label_arg is None):
+            label_arg={}
+        else:
+            label_arg=pyExLib.safety_deepcopy(label_arg)
 
         if(shape_colors is None):
             shape_colors=pyExLib.IterableLib.createConstInitList(len(shape_list),imgLib.DEFAULT_FIGURE_FRAME_COLOR)
@@ -16491,8 +16744,8 @@ class imgLib:
         img:np.ndarray,
         func:callable=None,
         func_str:str="",
-        args_list:list=[],
-        args_dict:dict={},
+        args_list:list=None,
+        args_dict:dict=None,
         result_iterate:bool=True,
         iterate_key:int=0,
         stack_index:int=-1
@@ -16516,7 +16769,16 @@ class imgLib:
         Raises:
             ValueError: If the argument func is invalid.
         """
+        if(args_list is None):
+            args_list=[]
+        else:
+            args_list=pyExLib.safety_deepcopy(args_list)
         
+        if(args_dict is None):
+            args_dict={}
+        else:
+            args_dict=pyExLib.safety_deepcopy(args_dict)
+
         if(func_str!=""):
             func=pyExLib.funcString2Obj(func_str,stack_index=stack_index)
         
@@ -16837,7 +17099,7 @@ class imgLib:
             Returns:
                 list: List of image paths.
             """
-            return self.__paths.copy()
+            return  pyExLib.safety_deepcopy(self.__paths)
 
         @property
         def hashes(self):
@@ -16847,7 +17109,7 @@ class imgLib:
             Returns:
                 list: List of perceptual hashes.
             """
-            return self.__hashes.copy()
+            return  pyExLib.safety_deepcopy(self.__hashes)
 
         def getIndexImage(self,index:int):
             """
@@ -16871,7 +17133,7 @@ class imgLib:
             
             if(img is None):
                 raise ValueError(f"Cannot read image file: {img_path}")
-            return img_path,img
+            return tuple(img_path,img)
 
         def to_payload(self)->dict:
             """
@@ -16880,14 +17142,14 @@ class imgLib:
             Returns:
                 dict: Payload dictionary.
             """
-            return {
+            return pyExLib.safety_deepcopy({
                 "version":int(getattr(self,"__fs_version__",1)),
                 "hash_size":self.__hash_size,
                 "is_color":self.__is_color,
                 "resize_shape":self.__resize_shape,
                 "paths":[str(p) for p in self.__paths],
                 "hashes":list(self.__hashes),
-            }
+            })
 
         @classmethod
         def from_payload(cls,payload:dict,store:"IOLib.FileStore")->"ImageIndex":
@@ -17262,7 +17524,7 @@ class imgLib:
             Returns:
                 dict: Information dictionary.
             """
-            return self.__info_dict.copy()
+            return pyExLib.safety_deepcopy(self.__info_dict)
 
         @property
         def dataset_root_dir(self):
@@ -17272,6 +17534,11 @@ class imgLib:
             Returns:
                 str: Dataset root directory.
             """
+            if(not isinstance(self.__info_dict,dict)):
+                raise RuntimeError("The dataset info is not initialized properly!")
+            if(not isinstance(self.__info_dict["dataset_root_dir"],str)):
+                return str(self.__info_dict["dataset_root_dir"])
+
             return self.__info_dict["dataset_root_dir"]
         
         @property
@@ -17282,6 +17549,11 @@ class imgLib:
             Returns:
                 str: data.yaml file path.
             """
+            if(not isinstance(self.__info_dict,dict)):
+                raise RuntimeError("The dataset info is not initialized properly!")
+            if(not isinstance(self.__info_dict["data_yaml_path"],str)):
+                return str(self.__info_dict["data_yaml_path"])
+
             return self.__info_dict["data_yaml_path"]
 
         @property
@@ -17292,7 +17564,12 @@ class imgLib:
             Returns:
                 list: Class names.
             """
-            return self.__info_dict["class_names"]
+            if(not isinstance(self.__info_dict,dict)):
+                raise RuntimeError("The dataset info is not initialized properly!")
+            if(not isinstance(self.__info_dict["class_names"],list)):
+                raise RuntimeError("The class names data is not initialized properly!")
+            
+            return pyExLib.safety_deepcopy(self.__info_dict["class_names"])
 
         @property
         def data_types(self):
@@ -17302,7 +17579,12 @@ class imgLib:
             Returns:
                 set: Data types.
             """
-            return self.__info_dict["data_types"]
+            if(not isinstance(self.__info_dict,dict)):
+                raise RuntimeError("The dataset info is not initialized properly!")
+            if(not isinstance(self.__info_dict["data_types"],set)):
+                raise RuntimeError("The data types data is not initialized properly!")
+            
+            return pyExLib.safety_deepcopy(self.__info_dict["data_types"])
 
         @property
         def img_tag_keys(self):
@@ -17312,9 +17594,13 @@ class imgLib:
             Returns:
                 list: Image tag keys.
             """
-            return self.__info_dict["img_tag_keys"]
+            if(not isinstance(self.__info_dict,dict)):
+                raise RuntimeError("The dataset info is not initialized properly!")
+            if(not isinstance(self.__info_dict["img_tag_keys"],list)):
+                raise RuntimeError("The image tag keys data is not initialized properly!")
+            
+            return pyExLib.safety_deepcopy(self.__info_dict["img_tag_keys"])
 
-        
         @property
         def data_dirs(self):
             """
@@ -17323,7 +17609,12 @@ class imgLib:
             Returns:
                 dict: Data directories.
             """
-            return self.__info_dict["data_dirs"]
+            if(not isinstance(self.__info_dict,dict)):
+                raise RuntimeError("The dataset info is not initialized properly!")
+            if(not isinstance(self.__info_dict["data_dirs"],dict)):
+                raise RuntimeError("The data directories data is not initialized properly!")
+            
+            return pyExLib.safety_deepcopy(self.__info_dict["data_dirs"])
 
         @property
         def data_info(self):
@@ -17333,7 +17624,12 @@ class imgLib:
             Returns:
                 list: Data information.
             """
-            return self.__info_dict["data_info"]
+            if(not isinstance(self.__info_dict,dict)):
+                raise RuntimeError("The dataset info is not initialized properly!")
+            if(not isinstance(self.__info_dict["data_info"],list)):
+                raise RuntimeError("The data information is not initialized properly!")
+            
+            return pyExLib.safety_deepcopy(self.__info_dict["data_info"])
         
         @property
         def num_data(self):
@@ -17353,7 +17649,7 @@ class imgLib:
                 dict: Data information.
             """
             for info in self.data_info:
-                yield info
+                yield pyExLib.safety_deepcopy(info)
 
         def filteredDataInfoGenerator(
             self,
@@ -17399,7 +17695,7 @@ class imgLib:
                                 yield_flag=False
 
                 if(yield_flag):
-                    yield info
+                    yield pyExLib.safety_deepcopy(info)
 
         def filteredDataInfoAndYOLOANNGenerator(
             self,
@@ -17472,13 +17768,13 @@ class imgLib:
             r_dict={}
             for data_type in tmp_data_types:
                 for tag in tmp_tag_keys:
-                    r_dict[(data_type,tag)]=copy.deepcopy(init_data)
-                r_dict[(data_type,imgLib.YOLODatasetInfo.__EMPTY_TYPE_AND_TAG_DICT_ALL_STRING)]=copy.deepcopy(init_data)
+                    r_dict[(data_type,tag)]=pyExLib.safety_deepcopy(init_data)
+                r_dict[(data_type,imgLib.YOLODatasetInfo.__EMPTY_TYPE_AND_TAG_DICT_ALL_STRING)]=pyExLib.safety_deepcopy(init_data)
             
             for tag in tmp_tag_keys:
-                r_dict[(imgLib.YOLODatasetInfo.__EMPTY_TYPE_AND_TAG_DICT_ALL_STRING,tag)]=copy.deepcopy(init_data)
+                r_dict[(imgLib.YOLODatasetInfo.__EMPTY_TYPE_AND_TAG_DICT_ALL_STRING,tag)]=pyExLib.safety_deepcopy(init_data)
                 
-            r_dict[(imgLib.YOLODatasetInfo.__EMPTY_TYPE_AND_TAG_DICT_ALL_STRING,imgLib.YOLODatasetInfo.__EMPTY_TYPE_AND_TAG_DICT_ALL_STRING)]=copy.deepcopy(init_data)
+            r_dict[(imgLib.YOLODatasetInfo.__EMPTY_TYPE_AND_TAG_DICT_ALL_STRING,imgLib.YOLODatasetInfo.__EMPTY_TYPE_AND_TAG_DICT_ALL_STRING)]=pyExLib.safety_deepcopy(init_data)
             return r_dict
         
         def getImageNumbers(
@@ -17593,7 +17889,7 @@ class imgLib:
             Returns:
                 dict: Payload dictionary.
             """
-            return dict(self.__info_dict)
+            return pyExLib.safety_deepcopy(dict(self.__info_dict))
 
         @classmethod
         def from_payload(cls,payload:dict,store:"IOLib.FileStore"):
@@ -17904,7 +18200,7 @@ class imgLib:
                     "meta":dict(self.__meta),
                     "yolo_kwargs":dict(self.__yolo_kwargs),
                 }
-                return payload
+                return pyExLib.safety_deepcopy(payload)
 
             def to_payload(self):
                 """
@@ -17914,10 +18210,10 @@ class imgLib:
                     dict: Warning message and source path information.
                 """
                 print("Warning : The method to_payload is deprecated. Use fsToPayload instead.")
-                return {
+                return pyExLib.safety_deepcopy({
                     "warning":"fsToPayload was used for actual serialization.",
                     "has_source_path":bool(self.__source_path),
-                }
+                })
 
             @classmethod
             def from_payload(cls,payload:dict,store):
@@ -18552,7 +18848,7 @@ class imgLib:
             img_mode:str,
             ann_data_arg,
             arg,
-            img_reshape_log:list=[],
+            img_reshape_log:list=None,
             class_names_txt_path:str=None,
             ann_file_mode:str=ANN_FILE_MODE_YOLOV3,
             img_specific_key_in_coco_data=None,
@@ -18580,20 +18876,24 @@ class imgLib:
                 TypeError: If the lengths of the args `ann_data_arg["bboxes"]` and `ann_data_arg["classes"]` of YOLOANN must be the same.
                 TypeError: If the argument `ann_data_arg` of YOLOANN is not an instance of the `cocoData` class.
             """
+            if(img_reshape_log is None):
+                img_reshape_log=[]
+            else:
+                img_reshape_log=pyExLib.safety_deepcopy(img_reshape_log)
 
             if(not IMPORT_OPENCV_FLAG):
                 raise RuntimeError("Error : The opencv package is not installed!")
             
             self.__img_mode=img_mode
             self.__ann_data_path=None            
-            self.__img_reshape_log=copy.deepcopy(img_reshape_log)
+            self.__img_reshape_log=img_reshape_log
             self.__img_path=None
             self.__ann_file_mode=ann_file_mode
             self.__ann_polygon_data=None
             self.__img_specific_key_in_coco_data=None
             self.__allow_reshape_flag=allow_reshape_flag
 
-            arg=copy.deepcopy(arg)
+            arg=pyExLib.safety_deepcopy(arg)
 
             coco_obj=None
 
@@ -18667,8 +18967,8 @@ class imgLib:
                     if(isinstance(ann_data_arg,dict)):
                         if(len(ann_data_arg["bboxes"])!=len(ann_data_arg["classes"])):
                             raise TypeError("Error : The lengths of the args \"ann_data_arg[\"bboxes\"]\" and \"ann_data_arg[\"classes\"]\" of YOLOANN must be the same!")
-                        self.__ann_data=copy.deepcopy(ann_data_arg["bboxes"])
-                        self.__ann_cls_nums=copy.deepcopy(ann_data_arg["classes"])
+                        self.__ann_data=pyExLib.safety_deepcopy(ann_data_arg["bboxes"])
+                        self.__ann_cls_nums=pyExLib.safety_deepcopy(ann_data_arg["classes"])
                     else:
                         raise TypeError("Error : The argument \"ann_data_arg\" of YOLOANN must be a dictionary.")
                 elif(ann_file_mode==imgLib.YOLOANN.ANN_FILE_MODE_COCO):
@@ -18724,9 +19024,9 @@ class imgLib:
 
                 if(img_specific_key!=None):
                     tmp_dict=coco_obj.getANNInImg(img_specific_key)
-                    self.__ann_data=copy.deepcopy(tmp_dict["bbox"])
-                    self.__ann_cls_nums=copy.deepcopy(tmp_dict["category_id"])
-                    self.__ann_polygon_data=copy.deepcopy(tmp_dict["segmentation"])
+                    self.__ann_data=pyExLib.safety_deepcopy(tmp_dict["bbox"])
+                    self.__ann_cls_nums=pyExLib.safety_deepcopy(tmp_dict["category_id"])
+                    self.__ann_polygon_data=pyExLib.safety_deepcopy(tmp_dict["segmentation"])
 
                     self.__class_names_data=coco_obj.getCategoryList()
                     
@@ -18791,7 +19091,7 @@ class imgLib:
                 if(len(class_names_data)!=len(self.__class_names_data)):
                     raise ValueError("Error : The length of the argument \"class_names_data\" of setClassNamesData must be the same as the existing class names data.")
   
-            self.__class_names_data=copy.deepcopy(class_names_data) 
+            self.__class_names_data=pyExLib.safety_deepcopy(class_names_data) 
 
         def copy(self):
             """
@@ -18800,7 +19100,7 @@ class imgLib:
             Returns:
                 YOLOANN: Copy of the YOLOANN instance.
             """
-            return imgLib.YOLOANN(img_mode=imgLib.YOLOANN.__IMG_MODE_NEW_INSTANCE_COPY,ann_data_arg="",arg=self.__createObjDict(),img_reshape_log=copy.deepcopy(self.getImgReshapeLog()))
+            return imgLib.YOLOANN(img_mode=imgLib.YOLOANN.__IMG_MODE_NEW_INSTANCE_COPY,ann_data_arg="",arg=self.__createObjDict(),img_reshape_log=pyExLib.safety_deepcopy(self.getImgReshapeLog()))
 
         NEW_OBJ_MODE_REPRODUCTION_TILE="ReproductionTile"
         NEW_OBJ_MODE_CLIP="Clip"
@@ -18847,7 +19147,7 @@ class imgLib:
                 for j in range(n):
                     sy=j*small_img_wh[1]
                     new_ann_data+=imgLib.YOLOANN.resizeANN(
-                        copy.deepcopy(self.__ann_data),
+                        pyExLib.safety_deepcopy(self.__ann_data),
                         resize_n*fx,
                         resize_n*fy,
                         sx,
@@ -18855,10 +19155,10 @@ class imgLib:
                         polygon_flag=False,
                         small_img_wh=small_img_wh
                     )
-                    new_ann_cls_nums+=copy.deepcopy(self.__ann_cls_nums)
+                    new_ann_cls_nums+=pyExLib.safety_deepcopy(self.__ann_cls_nums)
                     if(self.isANNPolygonMode()):
                         q=imgLib.YOLOANN.resizeANN(
-                            copy.deepcopy(self.__ann_polygon_data),
+                            pyExLib.safety_deepcopy(self.__ann_polygon_data),
                             resize_n*fx,
                             resize_n*fy,
                             sx,
@@ -18877,13 +19177,13 @@ class imgLib:
                 "ann_data":new_ann_data,
                 "ann_cls_nums":new_ann_cls_nums,
                 "class_names_txt_path":self.__class_names_txt_path,
-                "class_names_data":copy.deepcopy(self.__class_names_data),
+                "class_names_data":pyExLib.safety_deepcopy(self.__class_names_data),
                 "ann_file_mode":self.__ann_file_mode,
                 "ann_polygon_data":new_ann_polygon_data,
                 "img_specific_key_in_coco_data":self.__img_specific_key_in_coco_data,
                 "allow_reshape_flag":self.__allow_reshape_flag
             }
-            new_img_reshape_log=copy.deepcopy(self.getImgReshapeLog())
+            new_img_reshape_log=pyExLib.safety_deepcopy(self.getImgReshapeLog())
             new_img_reshape_log.append(
                 {   
                     "mode":imgLib.YOLOANN.NEW_OBJ_MODE_REPRODUCTION_TILE,
@@ -18912,11 +19212,11 @@ class imgLib:
             clip_results=imgLib.clipImg(self.__img.copy(),clip_box,is_auto_adjust=True,return_info=True)
             new_ann_data,new_ann_cls_nums,new_ann_polygon_data=imgLib.YOLOANN.clipANN(
                 img_wh=raw_img_wh,
-                ann_data=copy.deepcopy(self.__ann_data),
-                ann_cls_nums=copy.deepcopy(self.__ann_cls_nums),
+                ann_data=pyExLib.safety_deepcopy(self.__ann_data),
+                ann_cls_nums=pyExLib.safety_deepcopy(self.__ann_cls_nums),
                 clip_box=clip_box,
                 is_auto_adjust=True,
-                ann_polygon_data=copy.deepcopy(self.__ann_polygon_data)
+                ann_polygon_data=pyExLib.safety_deepcopy(self.__ann_polygon_data)
             )
 
             new_dict={
@@ -18928,13 +19228,13 @@ class imgLib:
                 "ann_data":new_ann_data,
                 "ann_cls_nums":new_ann_cls_nums,
                 "class_names_txt_path":self.__class_names_txt_path,
-                "class_names_data":copy.deepcopy(self.__class_names_data),
+                "class_names_data":pyExLib.safety_deepcopy(self.__class_names_data),
                 "ann_file_mode":self.__ann_file_mode,
                 "ann_polygon_data":new_ann_polygon_data,
                 "img_specific_key_in_coco_data":self.__img_specific_key_in_coco_data,
                 "allow_reshape_flag":self.__allow_reshape_flag
             }
-            new_img_reshape_log=copy.deepcopy(self.getImgReshapeLog())
+            new_img_reshape_log=pyExLib.safety_deepcopy(self.getImgReshapeLog())
             new_img_reshape_log.append(
                 {   
                     "mode":imgLib.YOLOANN.NEW_OBJ_MODE_CLIP,
@@ -18993,11 +19293,11 @@ class imgLib:
             new_img_wh=imgLib.getWH(new_img)
 
             new_ann_data,new_ann_cls_nums,new_ann_polygon_data=imgLib.YOLOANN.warpPerspectiveANN(
-                copy.deepcopy(self.__ann_data),
-                copy.deepcopy(self.__ann_cls_nums),
+                pyExLib.safety_deepcopy(self.__ann_data),
+                pyExLib.safety_deepcopy(self.__ann_cls_nums),
                 M=M,
                 dsize=dsize,
-                ann_polygon_data=copy.deepcopy(self.__ann_polygon_data)
+                ann_polygon_data=pyExLib.safety_deepcopy(self.__ann_polygon_data)
             )
 
             new_dict={
@@ -19009,13 +19309,13 @@ class imgLib:
                 "ann_data":new_ann_data,
                 "ann_cls_nums":new_ann_cls_nums,
                 "class_names_txt_path":self.__class_names_txt_path,
-                "class_names_data":copy.deepcopy(self.__class_names_data),
+                "class_names_data":pyExLib.safety_deepcopy(self.__class_names_data),
                 "ann_file_mode":self.__ann_file_mode,
                 "ann_polygon_data":new_ann_polygon_data,
                 "img_specific_key_in_coco_data":self.__img_specific_key_in_coco_data,
                 "allow_reshape_flag":self.__allow_reshape_flag
             }
-            new_img_reshape_log=copy.deepcopy(self.getImgReshapeLog())
+            new_img_reshape_log=pyExLib.safety_deepcopy(self.getImgReshapeLog())
             new_img_reshape_log.append(
                 {   
                     "mode":imgLib.YOLOANN.NEW_OBJ_MODE_WRAP_PERSPECTIVE,
@@ -19030,7 +19330,7 @@ class imgLib:
             )
             return imgLib.YOLOANN(img_mode=imgLib.YOLOANN.__IMG_MODE_NEW_INSTANCE_RESHAPE,ann_data_arg="",arg=new_dict,img_reshape_log=new_img_reshape_log)
 
-        def newImgTransFuncRun(self,func_str:str,args_list:list=[],args_dict:dict={},result_iterate:bool=True,iterate_key=0,stack_index:int=-1):
+        def newImgTransFuncRun(self,func_str:str,args_list:list=None,args_dict:dict=None,result_iterate:bool=True,iterate_key=0,stack_index:int=-1):
             """
             Creates a pixel-transformed image whose coordinates are not transformed and generates the corresponding YOLOANN object.
 
@@ -19048,6 +19348,16 @@ class imgLib:
             Raises:
                 ValueError: If the argument func is invalid.
             """
+            if(args_list is None):
+                args_list=[]
+            else:
+                args_list=pyExLib.safety_deepcopy(args_list)
+
+            if(args_dict is None):
+                args_dict=[]
+            else:
+                args_dict=pyExLib.safety_deepcopy(args_dict)
+
             new_img=imgLib.imgTransFuncRun(
                 img=self.__img.copy(),
                 func_str=func_str,
@@ -19064,16 +19374,16 @@ class imgLib:
                 "img":new_img,
                 "img_path":self.__img_path,
                 "wh":self.__wh,
-                "ann_data":copy.deepcopy(self.__ann_data),
-                "ann_cls_nums":copy.deepcopy(self.__ann_cls_nums),
+                "ann_data":pyExLib.safety_deepcopy(self.__ann_data),
+                "ann_cls_nums":pyExLib.safety_deepcopy(self.__ann_cls_nums),
                 "class_names_txt_path":self.__class_names_txt_path,
-                "class_names_data":copy.deepcopy(self.__class_names_data),
+                "class_names_data":pyExLib.safety_deepcopy(self.__class_names_data),
                 "ann_file_mode":self.__ann_file_mode,
-                "ann_polygon_data":copy.deepcopy(self.__ann_polygon_data),
+                "ann_polygon_data":pyExLib.safety_deepcopy(self.__ann_polygon_data),
                 "img_specific_key_in_coco_data":self.__img_specific_key_in_coco_data,
                 "allow_reshape_flag":self.__allow_reshape_flag
             }
-            new_img_reshape_log=copy.deepcopy(self.getImgReshapeLog())
+            new_img_reshape_log=pyExLib.safety_deepcopy(self.getImgReshapeLog())
             new_img_reshape_log.append(
                 {   
                     "mode":imgLib.YOLOANN.NEW_OBJ_MODE_IMG_TRANS_FUNC_RUN,
@@ -19134,9 +19444,9 @@ class imgLib:
             for index,item in enumerate(yolo_ann_objs):
                 if(isinstance(item,imgLib.YOLOANN)):
                     if(item.__createObjDict()["img_mode"]==imgLib.YOLOANN.IMG_MODE_FILE):
-                        imgs.append(copy.deepcopy(item.getImg()))
+                        imgs.append(pyExLib.safety_deepcopy(item.getImg()))
                         ann_data_list.append(item.getANNData())
-                        ann_cls_nums_list.append(copy.deepcopy(item.getANNClsNums()))
+                        ann_cls_nums_list.append(pyExLib.safety_deepcopy(item.getANNClsNums()))
 
                         item_dict=item.__createObjDict()
                         yolo_ann_img_path_list.append(item_dict["img_path"])
@@ -19189,9 +19499,9 @@ class imgLib:
                 "ann_data_path":None,
                 "ann_cls_nums":new_ann_cls_nums,
                 "class_names_txt_path":class_names_data_dict0["path"],
-                "class_names_data":copy.deepcopy(class_names_data_dict0["data"]),
+                "class_names_data":pyExLib.safety_deepcopy(class_names_data_dict0["data"]),
                 "ann_file_mode":None,
-                "ann_polygon_data":copy.deepcopy(new_ann_polygon_data_list),
+                "ann_polygon_data":pyExLib.safety_deepcopy(new_ann_polygon_data_list),
                 "img_specific_key_in_coco_data":None,
                 "allow_reshape_flag":True
             }
@@ -19271,20 +19581,20 @@ class imgLib:
             new_dict={
                 "img_mode":self.__img_mode,
                 "ann_data_path":self.__ann_data_path,
-                "img":copy.deepcopy(self.__img),
+                "img":pyExLib.safety_deepcopy(self.__img),
                 "img_path":self.__img_path,
                 "wh":self.__wh,
-                "ann_data":copy.deepcopy(self.__ann_data),
+                "ann_data":pyExLib.safety_deepcopy(self.__ann_data),
                 "ann_cls_nums":new_ann_cls_nums,
                 "class_names_txt_path":self.__class_names_txt_path,
                 "class_names_data":new_class_names_data,
                 "ann_file_mode":self.__ann_file_mode,
-                "ann_polygon_data":copy.deepcopy(self.__ann_polygon_data),
+                "ann_polygon_data":pyExLib.safety_deepcopy(self.__ann_polygon_data),
                 "img_specific_key_in_coco_data":self.__img_specific_key_in_coco_data,
                 "allow_reshape_flag":self.__allow_reshape_flag
             }
             
-            new_img_reshape_log=copy.deepcopy(self.getImgReshapeLog())
+            new_img_reshape_log=pyExLib.safety_deepcopy(self.getImgReshapeLog())
             new_img_reshape_log.append(
                 {   
                     "mode":imgLib.YOLOANN.NEW_OBJ_MODE_CHANGE_ANN_CLS_NUMS,
@@ -19326,7 +19636,7 @@ class imgLib:
                 new_dict={
                     "img_mode":self.__img_mode,
                     "ann_data_path":self.__ann_data_path,
-                    "img":copy.deepcopy(self.__img),
+                    "img":pyExLib.safety_deepcopy(self.__img),
                     "img_path":self.__img_path,
                     "wh":self.__wh,
                     "ann_data":self.__ann_data,
@@ -19339,7 +19649,7 @@ class imgLib:
                     "allow_reshape_flag":self.__allow_reshape_flag
                 }
                 
-                new_img_reshape_log=copy.deepcopy(self.getImgReshapeLog())
+                new_img_reshape_log=pyExLib.safety_deepcopy(self.getImgReshapeLog())
                 new_img_reshape_log.append(
                     {   
                         "mode":imgLib.YOLOANN.NEW_OBJ_MODE_APPEND_ANN_CLS_NUMS,
@@ -19410,7 +19720,7 @@ class imgLib:
             new_dict={
                 "img_mode":self.__img_mode,
                 "ann_data_path":self.__ann_data_path,
-                "img":copy.deepcopy(self.__img),
+                "img":pyExLib.safety_deepcopy(self.__img),
                 "img_path":self.__img_path,
                 "wh":self.__wh,
                 "ann_data":new_ann_data,
@@ -19423,7 +19733,7 @@ class imgLib:
                 "allow_reshape_flag":self.__allow_reshape_flag
             }
             
-            new_img_reshape_log=copy.deepcopy(self.getImgReshapeLog())
+            new_img_reshape_log=pyExLib.safety_deepcopy(self.getImgReshapeLog())
             new_img_reshape_log.append(
                 {   
                     "mode":imgLib.YOLOANN.NEW_OBJ_MODE_DELETE_ANN_CLS_NUMS,
@@ -19604,7 +19914,7 @@ class imgLib:
             new_dict={
                 "img_mode":self.__img_mode,
                 "ann_data_path":self.__ann_data_path,
-                "img":copy.deepcopy(self.__img),
+                "img":pyExLib.safety_deepcopy(self.__img),
                 "img_path":self.__img_path,
                 "wh":self.__wh,
                 "ann_data":new_ann_data,
@@ -19617,7 +19927,7 @@ class imgLib:
                 "allow_reshape_flag":self.__allow_reshape_flag
             }
 
-            new_img_reshape_log=copy.deepcopy(self.getImgReshapeLog())
+            new_img_reshape_log=pyExLib.safety_deepcopy(self.getImgReshapeLog())
             new_img_reshape_log.append(
                 {
                     "mode":imgLib.YOLOANN.NEW_OBJ_MODE_FILTERED_AREA,
@@ -19667,8 +19977,8 @@ class imgLib:
                 dict: Dictionary representation of the YOLOANN instance.
             """
             return {
-                "data_dict":copy.deepcopy(self.__createObjDict()),
-                "img_reshape_log":copy.deepcopy(self.__img_reshape_log)
+                "data_dict":pyExLib.safety_deepcopy(self.__createObjDict()),
+                "img_reshape_log":pyExLib.safety_deepcopy(self.__img_reshape_log)
             }
 
         def getObjDict(self):
@@ -19920,9 +20230,9 @@ class imgLib:
                 self,
                 draw_shape_flag:bool=False,
                 is_polygon_mode:bool=False,
-                draw_shape_args:dict={},
+                draw_shape_args:dict=None,
                 label_flag:bool=False,
-                label_args:dict={},
+                label_args:dict=None,
                 label_org_function:callable=None
             ):
             """
@@ -19942,6 +20252,15 @@ class imgLib:
             Raises:
                 TypeError: If the polygon data is not defined.
             """
+            if(draw_shape_args is None):
+                draw_shape_args={}
+            else:
+                draw_shape_args=pyExLib.safety_deepcopy(draw_shape_args)
+
+            if(label_args is None):
+                label_args={}
+            else:
+                label_args=pyExLib.safety_deepcopy(label_args)
 
             tmp_img=None
             if(draw_shape_flag):
@@ -19955,11 +20274,11 @@ class imgLib:
                     mode_str=imgLib.MODE_DRAW_SHAPE_LINE_POLYGON
                     for i,polygon_i in enumerate(self.__ann_polygon_data):
                         for polygon in polygon_i:
-                            tmp_list.append(copy.deepcopy(polygon))
+                            tmp_list.append(pyExLib.safety_deepcopy(polygon))
                             color_list.append(tmp_color_list[i])
                 else:
                     mode_str=imgLib.MODE_DRAW_SHAPE_LINE_RECT
-                    tmp_list=copy.deepcopy(self.__ann_data)
+                    tmp_list=pyExLib.safety_deepcopy(self.__ann_data)
                     color_list=tmp_color_list
 
                 label_list=None
@@ -19988,9 +20307,9 @@ class imgLib:
                 file_path:str,
                 is_polygon_mode:bool=False,
                 draw_shape_flag:bool=False,
-                draw_shape_args:dict={},
+                draw_shape_args:dict=None,
                 label_flag:bool=False,
-                label_args:dict={},
+                label_args:dict=None,
                 label_org_function:callable=None
             ):
             """
@@ -20008,6 +20327,16 @@ class imgLib:
             Returns:
                 np.ndarray: Image with optional drawing.
             """
+            if(draw_shape_args is None):
+                draw_shape_args={}
+            else:
+                draw_shape_args=pyExLib.safety_deepcopy(draw_shape_args)
+
+            if(label_args is None):
+                label_args={}
+            else:
+                label_args=pyExLib.safety_deepcopy(label_args)
+
             if(not IMPORT_OPENCV_FLAG):
                 raise RuntimeError("Error : The opencv package is not installed!")
                 
@@ -20060,9 +20389,9 @@ class imgLib:
             ann_txt_file_path:str,
             img_is_polygon_mode:bool=False,
             img_draw_shape_flag:bool=False,
-            img_draw_shape_args:dict={},
+            img_draw_shape_args:dict=None,
             img_label_flag:bool=False,
-            img_label_args:dict={},
+            img_label_args:dict=None,
             ann_round_num:int=6
         ):
             """
@@ -20078,6 +20407,15 @@ class imgLib:
                 img_label_args (dict): Arguments for adding the label to the image.
                 ann_round_num (int): Number of decimal places to round the annotation data.
             """
+            if(img_draw_shape_args is None):
+                img_draw_shape_args={}
+            else:
+                img_draw_shape_args=pyExLib.safety_deepcopy(img_draw_shape_args)
+
+            if(img_label_args is None):
+                img_label_args={}
+            else:
+                img_label_args=pyExLib.safety_deepcopy(img_label_args)
             
             self.saveImg(
                 file_path=img_file_path,
@@ -20243,12 +20581,14 @@ class imgLib:
                 num_type=self.numberOfTypeInANNClsNums()
                 tmp_cls_names_data=[f"{i}" for i in range(num_type)]
 
+            result_data=None
             if(is_return_dict):
-                return {"path":self.__class_names_txt_path,"data":self.__class_names_data}
+                result_data={"path":self.__class_names_txt_path,"data":self.__class_names_data}
             else:
-                return self.__class_names_data
+                result_data=self.__class_names_data
+            return pyExLib.safety_deepcopy(result_data)
             
-        def setANNClsNames(self,class_names_txt_path:str=None,class_names_data:list=[],exist_ok:bool=False):
+        def setANNClsNames(self,class_names_txt_path:str=None,class_names_data:list=None,exist_ok:bool=False):
             """
             Sets the class names of the annotations.
 
@@ -20261,6 +20601,11 @@ class imgLib:
                 TypeError: If class_names_data is already defined and exist_ok is False.
                 TypeError: If both class_names_data and class_names_txt_path are not specified.
             """
+            if(class_names_data is None):
+                class_names_data=[]
+            else:
+                class_names_data=pyExLib.safety_deepcopy(class_names_data)
+
             if(self.__class_names_data!=None and (not exist_ok)):
                 raise TypeError("Error : class_names_data is already defined!")
 
@@ -20303,7 +20648,7 @@ class imgLib:
             with open(file_path,mode="w",encoding=IOLib.DEFAULT_ENCODING) as f:
                 f.writelines([f"{li if li!=None else ''}\n" for li in self.__class_names_data])
         
-        def getBBimgJsonObj(self,correct_ann_mode:bool=False,final_ann:dict=None,additional_dict:dict={},yolo_ann_additional_info_flag:bool=True):
+        def getBBimgJsonObj(self,correct_ann_mode:bool=False,final_ann:dict=None,additional_dict:dict=None,yolo_ann_additional_info_flag:bool=True):
             """
             Gets a BBimgJson object for the YOLOANN instance.
 
@@ -20319,6 +20664,11 @@ class imgLib:
             Raises:
                 TypeError: If the image path information is not defined.
             """
+            if(additional_dict is None):
+                additional_dict={}
+            else:
+                additional_dict=pyExLib.safety_deepcopy(additional_dict)
+
             if(self.__img_path==None and self.__img_mode!=imgLib.YOLOANN.__IMG_MODE_NEW_INSTANCE_MIXUP):
                 raise TypeError("Image path information is not defined!")
             
@@ -20341,7 +20691,7 @@ class imgLib:
                 d["YOLOANN_obj_additional_info"]={
                     "ann_data_path":self.__ann_data_path,
                     "class_names_txt_path":self.__class_names_txt_path,
-                    "class_names_data":copy.deepcopy(self.__class_names_data),
+                    "class_names_data":pyExLib.safety_deepcopy(self.__class_names_data),
                     "ann_file_mode":self.__ann_file_mode,
                     "wh":self.__wh,
                     "ann":self.__ann_data,
@@ -20350,7 +20700,7 @@ class imgLib:
                     "img_specific_key_in_coco_data":self.__img_specific_key_in_coco_data
                 }
             
-            return imgLib.BBimgJson({**additional_dict,**d})
+            return imgLib.BBimgJson(pyExLib.safety_deepcopy({**additional_dict,**d}))
 
         def getImgSpecificKeyInCOCOData(self):
             """
@@ -20361,7 +20711,7 @@ class imgLib:
             """
             return self.__img_specific_key_in_coco_data
 
-        def IoUProcOneCls(self,cls_num:int,other_boxes:list,other_cls_nums:list,iou_func:callable=None,iou_args:dict={}):
+        def IoUProcOneCls(self,cls_num:int,other_boxes:list,other_cls_nums:list,iou_func:callable=None,iou_args:dict=None):
             """
             Calculates the IoU for a specific class.
 
@@ -20378,6 +20728,11 @@ class imgLib:
             Raises:
                 TypeError: If the lengths of other_boxes and other_cls_nums are not the same.
             """
+            if(iou_args is None):
+                iou_args={}
+            else:
+                iou_args=pyExLib.safety_deepcopy(iou_args)
+
             if(len(other_boxes)!=len(other_cls_nums)):
                 raise TypeError("Error : The lengths of the args \"other_boxes\" and \"other_cls_nums\" of IoUProcOneCls must be the same!")
             
@@ -20388,7 +20743,7 @@ class imgLib:
             other_data=imgLib.YOLOANN.extractBoxesInClass(cls_num,other_boxes,other_cls_nums)
             return iou_func(self_data,other_data,**iou_args)
         
-        def IoUProc(self,other_boxes:list,other_cls_nums:list,iou_func:callable=None,enable_cls_list:list=None,iou_args:dict={}):
+        def IoUProc(self,other_boxes:list,other_cls_nums:list,iou_func:callable=None,enable_cls_list:list=None,iou_args:dict=None):
             """
             Calculates the IoU for all classes.
 
@@ -20402,13 +20757,18 @@ class imgLib:
             Returns:
                 dict: Dictionary of IoU values for each class.
             """
+            if(iou_args is None):
+                iou_args={}
+            else:
+                iou_args=pyExLib.safety_deepcopy(iou_args)
+
             r={}
             for c in set(other_cls_nums):
                 if(enable_cls_list==None or c in enable_cls_list):
                     r[str(c)]=self.IoUProcOneCls(c,other_boxes,other_cls_nums,iou_func=iou_func,iou_args=iou_args)
             return r
 
-        def YOLOResults2IoUProc(self,results,iou_func:callable=None,enable_cls_list:list=None,iou_args:dict={}):
+        def YOLOResults2IoUProc(self,results,iou_func:callable=None,enable_cls_list:list=None,iou_args:dict=None):
             """
             Calculates the IoU for YOLO results.
 
@@ -20421,6 +20781,11 @@ class imgLib:
             Returns:
                 list: List of IoU values for each class.
             """
+            if(iou_args is None):
+                iou_args={}
+            else:
+                iou_args=pyExLib.safety_deepcopy(iou_args)
+
             tmp=[]
             tmp_results=imgLib.YOLOANN.getANNInClsInYOLOResult(results,enable_cls_list=enable_cls_list)
             for result in tmp_results:
@@ -20429,7 +20794,7 @@ class imgLib:
                 tmp.append(self.IoUProc(r_boxes,r_cls,iou_func=iou_func,iou_args=iou_args))
             return tmp
 
-        def otherYOLOANNObj2IoUProc(self,other_ann,iou_func:callable=None,enable_cls_list:list=None,iou_args:dict={}):
+        def otherYOLOANNObj2IoUProc(self,other_ann,iou_func:callable=None,enable_cls_list:list=None,iou_args:dict=None):
             """
             Calculates the IoU for another YOLOANN object.
 
@@ -20445,6 +20810,11 @@ class imgLib:
             Raises:
                 TypeError: If the argument other_ann is not an instance of YOLOANN.
             """
+            if(iou_args is None):
+                iou_args={}
+            else:
+                iou_args=pyExLib.safety_deepcopy(iou_args)
+
             if(not isinstance(other_ann,imgLib.YOLOANN)):
                 raise TypeError("Error : The argument other_ann must be an instance of YOLOANN!")
             
@@ -20457,8 +20827,8 @@ class imgLib:
                 iou_threshold:float=None,
                 multi_class_mode:str=None,
                 gpu_flag:bool=True,
-                ensemble_args:dict={},
-                yolo_args:dict={},
+                ensemble_args:dict=None,
+                yolo_args:dict=None,
                 check_model_names_flag:bool=True
             ):
             """
@@ -20478,6 +20848,15 @@ class imgLib:
             Returns:
                 dict: Dictionary of YOLO results.
             """
+            if(ensemble_args is None):
+                ensemble_args={}
+            else:
+                ensemble_args=pyExLib.safety_deepcopy(ensemble_args)
+            
+            if(yolo_args is None):
+                yolo_args={}
+            else:
+                yolo_args=pyExLib.safety_deepcopy(yolo_args)
 
             img=self.getImg(draw_shape_flag=False,label_flag=False)
             if(iou_threshold==None):
@@ -20486,7 +20865,7 @@ class imgLib:
             r=imgLib.ensembleModel.procYOLOPredict(
                 models,
                 mode,
-                copy.deepcopy(img),
+                pyExLib.safety_deepcopy(img),
                 iou_threshold=iou_threshold,
                 multi_class_mode=multi_class_mode,
                 gpu_flag=gpu_flag,
@@ -20495,7 +20874,7 @@ class imgLib:
                 check_model_names_flag=check_model_names_flag
             )
 
-            return [imgLib.YOLOANNResult(self,ri) for ri in r]
+            return pyExLib.safety_deepcopy([imgLib.YOLOANNResult(self,ri) for ri in r])
 
     @_protectedClass.fileStoreMyLibRegister
     class wrapperYOLOANN(_FileStore.FileStoreParser):
@@ -20524,7 +20903,7 @@ class imgLib:
             img_name:str=None,
             is_auto_img_name:bool=False,
             auto_img_name_function:callable=DEFAULT_AUTO_IMG_NAME_FUNCTION,
-            img_reshape_log:list=[],
+            img_reshape_log:list=None,
             class_names_txt_path:str=None,
             ann_file_mode:str=None,
             img_specific_key_in_coco_data=None,
@@ -20549,6 +20928,11 @@ class imgLib:
                 FileNotFoundError: If the image_path or label_path does not exist.
                 TypeError: If img_name is not specified when is_auto_img_name is False.
             """
+            if(img_reshape_log is None):
+                img_reshape_log=[]
+            else:
+                img_reshape_log=img_reshape_log.copy()
+
             image_path=Path(image_path)
             if(not image_path.exists()):
                 raise FileNotFoundError(f"Error : The image_path \"{str(image_path)}\" does not exist!")
@@ -20650,12 +21034,12 @@ class imgLib:
             super().__init__(
                 img_mode=imgLib.YOLOANN.IMG_MODE_IMG,
                 ann_data_arg=tmp_result_data,
-                arg=copy.deepcopy(raw_img),
+                arg=pyExLib.safety_deepcopy(raw_img),
                 ann_file_mode=imgLib.YOLOANN.ANN_FILE_MODE_YOLOV3_DATA_DICT,
                 allow_reshape_flag=False
             )
 
-            self.__raw_yolo_ann=copy.deepcopy(raw_yolo_ann)
+            self.__raw_yolo_ann=pyExLib.safety_deepcopy(raw_yolo_ann)
             if(len(self.getANNData())!=len(result_data["scores"])):
                 raise ValueError("Error : The lengths of the args \"ann_data\" and \"scores\" of YOLOANNResult must be the same!")    
             self.__result_scores=result_data["scores"]
@@ -20701,9 +21085,9 @@ class imgLib:
                 raise TypeError("Error : The type of the raw_yolo_ann is invalid!")
 
             tmp_result_data={
-                "bboxes":copy.deepcopy(d["ann_data"]),
-                "scores":copy.deepcopy(d["result_scores"]),
-                "classes":copy.deepcopy(d["ann_cls_nums"])
+                "bboxes":pyExLib.safety_deepcopy(d["ann_data"]),
+                "scores":pyExLib.safety_deepcopy(d["result_scores"]),
+                "classes":pyExLib.safety_deepcopy(d["ann_cls_nums"])
             }
 
             return imgLib.YOLOANNResult(
@@ -20751,7 +21135,7 @@ class imgLib:
             """
             return self.__result_scores
 
-        def getResultIoU(self,iou_func:callable=None,enable_cls_list:list=None,iou_args:dict={}):
+        def getResultIoU(self,iou_func:callable=None,enable_cls_list:list=None,iou_args:dict=None):
             """
             Calculates the IoU for the result.
 
@@ -20763,6 +21147,11 @@ class imgLib:
             Returns:
                 dict: Dictionary of IoU values for each class.
             """
+            if(iou_args is None):
+                iou_args={}
+            else:
+                iou_args=pyExLib.safety_deepcopy(iou_args)
+
             return self.otherYOLOANNObj2IoUProc(self.getRawYOLOANN(),iou_func=iou_func,enable_cls_list=enable_cls_list,iou_args=iou_args)
 
         META_YOLOANN_RESULT="YOLOANNResult"
@@ -20840,7 +21229,7 @@ class imgLib:
             "classes":[]
         }
 
-        def __init__(self,d:dict={}):
+        def __init__(self,d:dict=None):
             """
             Initializes the BBimgJson instance.
 
@@ -20850,6 +21239,11 @@ class imgLib:
             Raises:
                 TypeError: If the dictionary does not contain "raw_img_path".
             """
+            if(d is None):
+                d={}
+            else:
+                d=pyExLib.safety_deepcopy(d)
+
             if("raw_img_path" not in d):
                 raise TypeError("BBimgJson argument dict requires \"raw_img_path\"!")
 
@@ -20886,7 +21280,7 @@ class imgLib:
             Returns:
                 dict: The dictionary representation of the instance.
             """
-            return self.__d
+            return pyExLib.safety_deepcopy(self.__d)
 
         def to_payload(self):
             """
@@ -20895,7 +21289,7 @@ class imgLib:
             Returns:
                 dict: Payload dictionary.
             """
-            return self.__dict__()
+            return pyExLib.safety_deepcopy(self.__dict__())
 
         @classmethod
         def from_payload(cls,payload:dict,store:"IOLib.FileStore"):
@@ -20918,7 +21312,7 @@ class imgLib:
             Returns:
                 BBimgJson: Copy of the BBimgJson instance.
             """
-            return imgLib.BBimgJson(copy.deepcopy(self.__d))
+            return imgLib.BBimgJson(pyExLib.safety_deepcopy(self.__d))
 
         def DEFAULT_AUTO_IMG_NAME_FUNCTION(d:dict):
             """
@@ -21022,9 +21416,9 @@ class imgLib:
         def getImg(
                 self,
                 draw_rect_flag:bool=True,
-                draw_rect_args:dict={},
+                draw_rect_args:dict=None,
                 label_flag:bool=False,
-                label_args:dict={},
+                label_args:dict=None,
                 label_org_function:callable=None,
                 label_str_format:str=DEFAULT_LABEL_STR_FORMAT,
             ):
@@ -21042,6 +21436,15 @@ class imgLib:
             Returns:
                 np.ndarray: Image with optional drawing.
             """
+            if(draw_rect_args is None):
+                draw_rect_args={}
+            else:
+                draw_rect_args=pyExLib.safety_deepcopy(draw_rect_args)
+            if(label_args is None):
+                label_args={}
+            else:
+                label_args=pyExLib.safety_deepcopy(label_args)
+
             if(not isinstance(self.__img,np.ndarray)):
                 self.__img=imgLib.YOLOANN.reshapeImg(self.getRawImg(),self.getImgReshapeLog())
                 
@@ -21080,9 +21483,9 @@ class imgLib:
                 self,
                 save_path:str,
                 draw_rect_flag:bool=True,
-                draw_rect_args:dict={},
+                draw_rect_args:dict=None,
                 label_flag:bool=False,
-                label_args:dict={},
+                label_args:dict=None,
                 label_org_function:callable=None,
                 label_str_format:str=DEFAULT_LABEL_STR_FORMAT
             ):
@@ -21099,6 +21502,15 @@ class imgLib:
                 label_org_function (callable): Function to get the label origin.
                 label_str_format (str): Format string for labels.
             """
+            if(draw_rect_args is None):
+                draw_rect_args={}
+            else:
+                draw_rect_args=pyExLib.safety_deepcopy(draw_rect_args)
+            if(label_args is None):
+                label_args={}
+            else:
+                label_args=pyExLib.safety_deepcopy(label_args)
+
             if(not IMPORT_OPENCV_FLAG):
                 raise RuntimeError("Error : The opencv package is not installed!")
 
@@ -21190,7 +21602,7 @@ class imgLib:
             Returns:
                 dict: Dictionary representation of the BBimgJson instance.
             """
-            return self.__d
+            return pyExLib.safety_deepcopy(self.__d)
 
         def getClsNames(self):
             """
@@ -21799,10 +22211,10 @@ class imgLib:
                 if(not("img_re_str" in new_instance_args)):
                     raise TypeError("Error : The new_instance_args must contain \"img_re_str\"!")
 
-                self.__ann_ptn_list=copy.deepcopy(new_instance_args["ann_ptn_list"])
-                self.__img_ptn_list=copy.deepcopy(new_instance_args["img_ptn_list"])
-                self.__ann_data_list=copy.deepcopy(new_instance_args["ann_data_list"])
-                self.__filename_list=copy.deepcopy(new_instance_args["filename_list"])
+                self.__ann_ptn_list=pyExLib.safety_deepcopy(new_instance_args["ann_ptn_list"])
+                self.__img_ptn_list=pyExLib.safety_deepcopy(new_instance_args["img_ptn_list"])
+                self.__ann_data_list=pyExLib.safety_deepcopy(new_instance_args["ann_data_list"])
+                self.__filename_list=pyExLib.safety_deepcopy(new_instance_args["filename_list"])
             else:
                 raise TypeError("Error : The mode must be either \"file\" or \"new_instance\"!")
 
@@ -21991,12 +22403,12 @@ class imgLib:
                 img_ptn_list=None,
                 mode=imgLib.YOLOANNDataset.NEW_MODE_NEW_INSTANCE,
                 new_instance_args={
-                    "ann_ptn_list":copy.deepcopy(self.__ann_ptn_list),
-                    "img_ptn_list":copy.deepcopy(self.__img_ptn_list),
-                    "ann_data_list":copy.deepcopy(self.__ann_data_list),
-                    "filename_list":copy.deepcopy(self.__filename_list),
-                    "ann_re_str":copy.deepcopy(self.__ann_re_str),
-                    "img_re_str":copy.deepcopy(self.__img_re_str)
+                    "ann_ptn_list":pyExLib.safety_deepcopy(self.__ann_ptn_list),
+                    "img_ptn_list":pyExLib.safety_deepcopy(self.__img_ptn_list),
+                    "ann_data_list":pyExLib.safety_deepcopy(self.__ann_data_list),
+                    "filename_list":pyExLib.safety_deepcopy(self.__filename_list),
+                    "ann_re_str":pyExLib.safety_deepcopy(self.__ann_re_str),
+                    "img_re_str":pyExLib.safety_deepcopy(self.__img_re_str)
                 }
             )
 
@@ -22140,8 +22552,8 @@ class imgLib:
                 new_instance_args={
                     "ann_ptn_list":None,
                     "img_ptn_list":None,
-                    "ann_data_list":copy.deepcopy(tmp_yolo_ann_data),
-                    "filename_list":copy.deepcopy(tmp_name_list),
+                    "ann_data_list":pyExLib.safety_deepcopy(tmp_yolo_ann_data),
+                    "filename_list":pyExLib.safety_deepcopy(tmp_name_list),
                     "ann_re_str":None,
                     "img_re_str":None
                 }
@@ -22192,7 +22604,7 @@ class imgLib:
             Returns:
                 list: List of annotation data.
             """
-            return copy.deepcopy(self.__ann_data_list)
+            return pyExLib.safety_deepcopy(self.__ann_data_list)
 
         def getYOLOANN(self,index:int):
             """
@@ -22211,7 +22623,7 @@ class imgLib:
             if(index<0 or index>=len(self.__ann_data_list)):
                 raise TypeError("Error : The index must be in the range of the YOLOANNDataset!")
             
-            tmp_data=copy.deepcopy(self.__ann_data_list[index])
+            tmp_data=pyExLib.safety_deepcopy(self.__ann_data_list[index])
             if(not isinstance(tmp_data,imgLib.YOLOANN)):
                 raise TypeError("Error : The element in the YOLOANNDataset must be an instance of YOLOANN!")
             return tmp_data
@@ -22223,7 +22635,7 @@ class imgLib:
             Returns:
                 list: List of filenames.
             """
-            return copy.deepcopy(self.__filename_list)
+            return pyExLib.safety_deepcopy(self.__filename_list)
         
         def getAllDataGenerator(self):
             """
@@ -22257,12 +22669,12 @@ class imgLib:
                     raise TypeError("Error : The element in the YOLOANNDataset must be an instance of YOLOANN!")
                 yolo_data_list_json.append(yolo_ann.createJsonDict())
             return {
-                "ann_ptn_list":copy.deepcopy(self.__ann_ptn_list),
-                "img_ptn_list":copy.deepcopy(self.__img_ptn_list),
+                "ann_ptn_list":pyExLib.safety_deepcopy(self.__ann_ptn_list),
+                "img_ptn_list":pyExLib.safety_deepcopy(self.__img_ptn_list),
                 "ann_data_list":yolo_data_list_json,
-                "filename_list":copy.deepcopy(self.__filename_list),
-                "ann_re_str":copy.deepcopy(self.__ann_re_str),
-                "img_re_str":copy.deepcopy(self.__img_re_str)
+                "filename_list":pyExLib.safety_deepcopy(self.__filename_list),
+                "ann_re_str":pyExLib.safety_deepcopy(self.__ann_re_str),
+                "img_re_str":pyExLib.safety_deepcopy(self.__img_re_str)
             }
 
         def toJson(self,path:str,indent:int=IOLib.JSONLib.DEFAULT_INDENT,minimalize_flag:bool=False):
@@ -22348,7 +22760,7 @@ class imgLib:
         RUN_YOLOANN_FUNC_MAP_RETURN_MODE_YOLOANN_LIST="YOLOANN_LIST"
         RUN_YOLOANN_FUNC_MAP_RETURN_MODE_YOLOANNDATASET="YOLOANNDATASET"
 
-        def runYOLOANNFuncMap(self,func:callable,args_list:list=[],args_dict:dict={},return_mode:str=RUN_YOLOANN_FUNC_MAP_RETURN_MODE_NORMAL_LIST):
+        def runYOLOANNFuncMap(self,func:callable,args_list:list=None,args_dict:dict=None,return_mode:str=RUN_YOLOANN_FUNC_MAP_RETURN_MODE_NORMAL_LIST):
             """
             Runs a function on each YOLOANN object in the dataset.
             Args:
@@ -22367,12 +22779,21 @@ class imgLib:
                 TypeError: If the elements in the YOLOANNDataset are not instances of YOLOANN.
                 TypeError: If the return value of the function is not an instance of YOLOANN when return_mode is RUN_YOLOANN_FUNC_MAP_RETURN_MODE_YOLOANNDATASET.
             """
+            if(args_list is None):
+                args_list=[]
+            else:
+                args_list=pyExLib.safety_deepcopy(args_list)
+            
+            if(args_dict is None):
+                args_dict={}
+            else:
+                args_dict=pyExLib.safety_deepcopy(args_dict)
 
             result_list=[]
             for yolo_ann in self.__ann_data_list:
                 if(not isinstance(yolo_ann,imgLib.YOLOANN)):
                     raise TypeError("Error : The element in the YOLOANNDataset must be an instance of YOLOANN!")
-                tmp_yolo_ann=copy.deepcopy(yolo_ann)
+                tmp_yolo_ann=pyExLib.safety_deepcopy(yolo_ann)
                 tmp_data=pyExLib.funcObjRun(
                     func,
                     args_list=[tmp_yolo_ann]+args_list,
@@ -22496,8 +22917,8 @@ class imgLib:
             if(len(d["result_data_list"])!=len(d["raw_yolo_ann_dataset"])):
                 raise TypeError("Error : The length of the result_data_list must be the same as the length of the raw_yolo_ann_dataset!")
             
-            self.__raw_yolo_ann_dataset=copy.deepcopy(d["raw_yolo_ann_dataset"])
-            self.__result_data_list=copy.deepcopy(d["result_data_list"])
+            self.__raw_yolo_ann_dataset=pyExLib.safety_deepcopy(d["raw_yolo_ann_dataset"])
+            self.__result_data_list=pyExLib.safety_deepcopy(d["result_data_list"])
 
             self.__bb_img_json_obj_list=[]
             if("bb_img_json_obj_list" in d):
@@ -22505,7 +22926,7 @@ class imgLib:
                     raise TypeError("Error : The type of the bb_img_json_obj_list is invalid!")
                 if(len(d["bb_img_json_obj_list"])!=len(self.__result_data_list)):
                     raise TypeError("Error : The length of the bb_img_json_obj_list must be the same as the length of the result_data_list!")
-                self.__bb_img_json_obj_list=copy.deepcopy(d["bb_img_json_obj_list"])
+                self.__bb_img_json_obj_list=pyExLib.safety_deepcopy(d["bb_img_json_obj_list"])
             elif(bb_img_json_obj_args_dict=={}):
                 self.__bb_img_json_obj_list=self.__init_to_bbimg_json_obj(bb_img_json_obj_args_dict=bb_img_json_obj_args_dict)
 
@@ -22554,7 +22975,7 @@ class imgLib:
             return imgLib.YOLODatasetPredictResult(
                 d={
                     "raw_yolo_ann_dataset":self.__raw_yolo_ann_dataset.copy(),
-                    "result_data_list":copy.deepcopy(self.__result_data_list),
+                    "result_data_list":pyExLib.safety_deepcopy(self.__result_data_list),
                     "bb_img_json_obj_list":[bbimg.copy() for bbimg in self.__bb_img_json_obj_list]
                 },
                 bb_img_json_obj_args_dict={}
@@ -22576,7 +22997,7 @@ class imgLib:
             Returns:
                 list: List of result data.
             """
-            return copy.deepcopy(self.__result_data_list)
+            return pyExLib.safety_deepcopy(self.__result_data_list)
         
         def getBBImgJsonObjList(self):
             """
@@ -22753,7 +23174,7 @@ class imgLib:
             Returns:
                 dict: Payload dictionary representation of the cocoData instance.
             """
-            return self.__dict__
+            return pyExLib.safety_deepcopy(self.__dict__)
 
         @classmethod
         def from_payload(cls,payload:dict,store:"IOLib.FileStore"):
@@ -22780,7 +23201,7 @@ class imgLib:
             """
             return imgLib.cocoData(
                 data_path=self.__data_path,
-                data=copy.deepcopy(self.__data)
+                data=pyExLib.safety_deepcopy(self.__data)
             )
         
         def getFilePath(self):
@@ -22953,7 +23374,7 @@ class imgLib:
             Returns:
                 dict: Payload dictionary representation of the cocoDatasetLib instance.
             """
-            return self.__dict__
+            return pyExLib.safety_deepcopy(self.__dict__)
 
         @classmethod
         def from_payload(cls,payload:dict,store:"IOLib.FileStore"):
@@ -22979,7 +23400,7 @@ class imgLib:
                 cocoDatasetLib: Copy of the cocoDatasetLib instance.
             """
             obj=imgLib.cocoDatasetLib.__new__(imgLib.cocoDatasetLib)
-            obj.__dict__.update(copy.deepcopy(self.__dict__))
+            obj.__dict__.update(pyExLib.safety_deepcopy(self.__dict__))
             return obj
         
         def __initSetData(self):
@@ -23284,9 +23705,9 @@ class imgLib:
             is_create_test_data:bool=False,
             train_rate:float=1,
             split_rate_list:list=DEFAULT_SPLIT_RATE_LIST,
-            default_img_reshape_log:list=[],
+            default_img_reshape_log:list=None,
             is_data_expanding:bool=False,
-            data_expanding_img_reshape_log_list:list=[],
+            data_expanding_img_reshape_log_list:list=None,
             is_shuffle:bool=False,
             init_img_num_list:list=None,
             is_img_counter_mode:bool=False,
@@ -23319,13 +23740,22 @@ class imgLib:
                 ValueError: If the train rate is not between 0 and 1.
                 ValueError: If the split rate list is not valid.
             """
+            if(default_img_reshape_log is None):
+                default_img_reshape_log=[]
+            else:
+                default_img_reshape_log=pyExLib.safety_deepcopy(default_img_reshape_log)
+
+            if (data_expanding_img_reshape_log_list is None):
+                data_expanding_img_reshape_log_list=[]
+            else:
+                data_expanding_img_reshape_log_list=pyExLib.safety_deepcopy(data_expanding_img_reshape_log_list)
 
             def getDataExpandingPathString(p:int):
                 q=str(0 if p==0 else math.ceil(math.log10(p)))
                 return"_{index:0"+q+"}"
 
             def maxANNClsNames(ann_obj_cls_names:list,other_ann_obj:imgLib.YOLOANN):
-                other_ann_obj_cls_names=copy.deepcopy(other_ann_obj.getANNClsNames(is_return_dict=False))
+                other_ann_obj_cls_names=pyExLib.safety_deepcopy(other_ann_obj.getANNClsNames(is_return_dict=False))
                 if(len(other_ann_obj_cls_names)>len(ann_obj_cls_names)):
                     return other_ann_obj_cls_names
                 return ann_obj_cls_names
@@ -23501,7 +23931,7 @@ class imgLib:
                 if(is_shuffle):
                     img_num_list=random.sample(img_num_list,img_num)
             else:
-                img_num_list=copy.deepcopy(init_img_num_list)
+                img_num_list=pyExLib.safety_deepcopy(init_img_num_list)
 
             img_counter_list=[]
             img_counter_max_num=img_num*(data_expanding_img_reshape_log_list_len+1)
@@ -23518,7 +23948,7 @@ class imgLib:
                 if(is_shuffle_img_counter_list):
                     img_counter_list=random.sample(img_counter_list,img_counter_max_num)
             else:
-                img_counter_list=copy.deepcopy(init_img_counter_list)
+                img_counter_list=pyExLib.safety_deepcopy(init_img_counter_list)
 
             for i,img_index in enumerate(img_num_list):
                 ann_obj_raw=self.__enable_ann_data_objs[img_index]
@@ -23604,7 +24034,7 @@ class imgLib:
             if(not self.__empty_mode):
                 coco_obj_dict={
                     "file_path":self.__coco_obj.getFilePath(),
-                    "data":copy.deepcopy(self.__coco_obj.getData())
+                    "data":pyExLib.safety_deepcopy(self.__coco_obj.getData())
                 }
             else:
                 coco_obj_dict={
@@ -23650,17 +24080,17 @@ class imgLib:
                 },
                 "is_create_test_data":is_create_test_data,
                 "train_rate":train_rate,
-                "split_rate_list":copy.deepcopy(split_rate_list),
-                "default_img_reshape_log":copy.deepcopy(default_img_reshape_log),
+                "split_rate_list":pyExLib.safety_deepcopy(split_rate_list),
+                "default_img_reshape_log":pyExLib.safety_deepcopy(default_img_reshape_log),
                 "is_data_expanding":is_data_expanding,
-                "data_expanding_img_reshape_log_list":copy.deepcopy(data_expanding_img_reshape_log_list),
+                "data_expanding_img_reshape_log_list":pyExLib.safety_deepcopy(data_expanding_img_reshape_log_list),
                 "is_shuffle":is_shuffle,
-                "init_img_num_list":copy.deepcopy(init_img_num_list),
-                "init_img_counter_list":copy.deepcopy(init_img_counter_list),
+                "init_img_num_list":pyExLib.safety_deepcopy(init_img_num_list),
+                "init_img_counter_list":pyExLib.safety_deepcopy(init_img_counter_list),
                 "is_shuffle_img_counter_list":is_shuffle_img_counter_list,
                 "before_delete_output_dir":before_delete_output_dir,
-                "img_num_list":copy.deepcopy(img_num_list),
-                "img_counter_list":copy.deepcopy(img_counter_list),
+                "img_num_list":pyExLib.safety_deepcopy(img_num_list),
+                "img_counter_list":pyExLib.safety_deepcopy(img_counter_list),
                 "empty_mode":self.__empty_mode,
             }
 
@@ -23835,7 +24265,7 @@ class imgLib:
                 Returns:
                     dict: Payload dictionary representation of the datasetInfo instance.
                 """
-                return self.__dict__
+                return pyExLib.safety_deepcopy(self.__dict__)
 
             @classmethod
             def from_payload(cls,payload:dict,store:"IOLib.FileStore"):
@@ -23860,7 +24290,7 @@ class imgLib:
                 Returns:
                     datasetInfo: Copy of the datasetInfo instance.
                 """
-                return imgLib.cocoDatasetLib.datasetInfo(info_dict=copy.deepcopy(self.__info_dict),light_mode=self.__light_mode,combined_mode=self.__combined_mode)
+                return imgLib.cocoDatasetLib.datasetInfo(info_dict=pyExLib.safety_deepcopy(self.__info_dict),light_mode=self.__light_mode,combined_mode=self.__combined_mode)
 
             def saveInfoJson(self,save_path:str,indent:int=IOLib.JSONLib.DEFAULT_INDENT,minimalize_flag:bool=False):
                 """
@@ -24046,7 +24476,7 @@ class imgLib:
                     raise ValueError("Error : The paths value is not a dictionary!")
                 
                 if(not include_data_yaml):
-                    path_dict=copy.deepcopy(path_dict)
+                    path_dict=pyExLib.safety_deepcopy(path_dict)
                     if("data_yaml" in path_dict):
                         path_dict.pop("data_yaml")
 
@@ -24389,7 +24819,7 @@ class imgLib:
                     Returns:
                         dict: Payload dictionary representation of the combineDatasetInfo instance.
                     """
-                    return self.__dict__
+                    return pyExLib.safety_deepcopy(self.__dict__)
 
                 @classmethod
                 def from_payload(cls,payload:dict,store:"IOLib.FileStore"):
@@ -24755,7 +25185,7 @@ class imgLib:
                     """
                     if(not self.__compatible_mode):
                         raise Exception("Error : The to_payload method is only supported in compatible mode!")
-                    return self.__dict__
+                    return pyExLib.safety_deepcopy(self.__dict__)
 
                 @classmethod
                 def from_payload(cls,payload:dict,store:"IOLib.FileStore"):
@@ -26498,7 +26928,7 @@ class imgLib:
                 Returns:
                     dict: The payload dictionary.
                 """
-                return self.__dict__
+                return pyExLib.safety_deepcopy(self.__dict__)
 
             @classmethod
             def from_payload(cls,payload:dict,store:"IOLib.FileStore"):
@@ -26595,7 +27025,7 @@ class imgLib:
                 Returns:
                     dict: The evaluation data.
                 """
-                return copy.deepcopy(self.__data_dict["results_val_evaluation_json_data"])
+                return pyExLib.safety_deepcopy(self.__data_dict["results_val_evaluation_json_data"])
 
         @_protectedClass.fileStoreMyLibRegister
         class readYOLOModelList(_FileStore.FileStoreParser):
@@ -26677,7 +27107,7 @@ class imgLib:
                 Returns:
                     dict: The payload dictionary.
                 """
-                return self.__dict__
+                return pyExLib.safety_deepcopy(self.__dict__)
 
             @classmethod
             def from_payload(cls,payload:dict,store:"IOLib.FileStore"):
@@ -27081,7 +27511,7 @@ class imgLib:
                 Returns:
                     dict: The payload dictionary.
                 """
-                return self.__dict__
+                return pyExLib.safety_deepcopy(self.__dict__)
 
             @classmethod
             def from_payload(cls,payload:dict,store:"IOLib.FileStore"):
@@ -27351,7 +27781,7 @@ class imgLib:
                             if(not isinstance(config,dict)):
                                 raise TypeError("Each item in 'config_for_each_combination' must be a dictionary.")
                             
-                            tmp_config=copy.deepcopy(config)
+                            tmp_config=pyExLib.safety_deepcopy(config)
                             if(force_bb_img_json_mode):
                                 tmp_config["bb_img_json_mode"]=True
 
@@ -27537,7 +27967,7 @@ class imgLib:
                 Returns:
                     dict: The payload dictionary.
                 """
-                return self.__dict__
+                return pyExLib.safety_deepcopy(self.__dict__)
 
             @classmethod
             def from_payload(cls,payload:dict,store:"IOLib.FileStore"):
@@ -27909,7 +28339,7 @@ class imgLib:
 
                     append_data=None
                     if(conv_class_name):
-                        append_data=copy.deepcopy(template_class_name_dict)
+                        append_data=pyExLib.safety_deepcopy(template_class_name_dict)
                         for key,value in tmp_iou_data.items():
                             cls_name=None
                             try:
@@ -28085,7 +28515,7 @@ class imgLib:
                 Returns:
                     dict: The payload dictionary.
                 """
-                return self.__dict__
+                return pyExLib.safety_deepcopy(self.__dict__)
 
             @classmethod
             def from_payload(cls,payload:dict,store:"IOLib.FileStore"):
@@ -28109,8 +28539,7 @@ class imgLib:
                 Returns:
                     int: The number of images with results.
                 """
-
-                return len(self.__results)
+                return pyExLib.safety_deepcopy(len(self.__results))
 
             def _getTmpClassNames(self):
                 """
@@ -28340,7 +28769,7 @@ class imgLib:
                 if(self.__tmp_yolo_model_config is None):
                     raise ValueError("No results available.")
 
-                result_yolo_model_config=copy.deepcopy(self.__tmp_yolo_model_config)
+                result_yolo_model_config=pyExLib.safety_deepcopy(self.__tmp_yolo_model_config)
                 if(exclude_class_names):
                     for _,ri in result_yolo_model_config.items():
                         if(not isinstance(ri,dict)):
@@ -28485,7 +28914,7 @@ class imgLib:
                     if(self.__all_iou_df is None):
                         self.__all_iou_df={}
                     self.__all_iou_df[tuple(args_list)]=all_iou_df
-                return all_iou_df
+                return all_iou_df.copy()
 
             def getFeaturesPerImagesDataFrame(self):
                 """
@@ -28598,7 +29027,7 @@ class imgLib:
                         self.__confusion_matrix_dict={}
                     self.__confusion_matrix_dict[tuple(args_list)]=d
                 
-                return d
+                return pyExLib.safety_deepcopy(d)
 
             def getConfusionMatrixDict(
                     self,
@@ -28664,7 +29093,7 @@ class imgLib:
                         self.__map_dict={}
                     self.__map_dict[tuple(args_list)]=d
 
-                return d
+                return pyExLib.safety_deepcopy(d)
 
             def getMAPDict(
                 self,
@@ -29287,7 +29716,7 @@ class imgLib:
                 directory_path:str,
                 img_name_regex_list:list=None,
                 cache_mode:bool=False,
-                skip_img_name_list:list=[],
+                skip_img_name_list:list=None,
             ):
                 """
                 Creates an AllImagesResultBBImgJsonCombinationsModel instance from a directory containing image subdirectories.
@@ -29304,6 +29733,10 @@ class imgLib:
                 Raises:
                     FileNotFoundError: If the directory is not found.
                 """
+                if(skip_img_name_list is None):
+                    skip_img_name_list=[]
+                else:
+                    skip_img_name_list=pyExLib.safety_deepcopy(skip_img_name_list)
 
                 tmp_obj=imgLib.YOLOModelLib.AllImagesResultBBImgJsonCombinationsModel(cache_mode=cache_mode)
                 img_dirs=[Path(p) for p in glob.glob(f"{directory_path}/**/",recursive=False)]
@@ -29405,7 +29838,7 @@ class imgLib:
                 Returns:
                     dict: The payload dictionary.
                 """
-                return self.__dict__
+                return pyExLib.safety_deepcopy(self.__dict__)
 
             @classmethod
             def from_payload(cls,payload:dict,store:"IOLib.FileStore"):
@@ -29582,7 +30015,7 @@ class imgLib:
                 self.__gpu_flag=gpu_flag
                 if(yolo_args is None):
                     yolo_args={}
-                self.__yolo_args=copy.deepcopy(yolo_args)
+                self.__yolo_args=pyExLib.safety_deepcopy(yolo_args)
 
                 # image setting parameters
                 self.__predict_image_data={}
@@ -29623,11 +30056,11 @@ class imgLib:
                 Returns:
                     dict: A dictionary containing the sizes of models, images, and ensemble models.
                 """
-                return {
+                return pyExLib.safety_deepcopy({
                     "model_size":len(self.__read_model_list),
                     "image_size":len(self.__predict_image_data),
                     "ensemble_model_size":len(self.getEnsembleModelNames()),
-                }
+                })
 
             def to_payload(self)->dict:
                 """
@@ -29656,7 +30089,7 @@ class imgLib:
                     "is_auto_model_name":bool(self.__is_auto_model_name),
                     "is_auto_img_name":bool(self.__is_auto_img_name),
                 }
-                return payload
+                return pyExLib.safety_deepcopy(payload)
 
             @staticmethod
             def __split_fsv_key(key:str)->tuple[str|None,str|None]:
@@ -31118,8 +31551,8 @@ class videoLib:
                 frames (list): List of frames.
                 fps (float): Frames per second.
             """
-            self.__raw_frames=frames
-            self.__frames=frames
+            self.__raw_frames=pyExLib.safety_deepcopy(frames)
+            self.__frames=pyExLib.safety_deepcopy(frames)
             self.__fps=fps
 
         def getImg(self,index:int):
