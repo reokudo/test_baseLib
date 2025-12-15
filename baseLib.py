@@ -2368,6 +2368,7 @@ class pyExLib:
         Returns:
             Any: Deep copied object with specified types or objects kept unchanged.
         """
+        raw_obj_type=type(obj)
         if(keep_types is None):
             keep_types=tuple(pyExLib.DEFAULT_SAFETY_DEEPCOPY_KEEP_TYPES)
         elif(isinstance(keep_types,(list,set,tuple))):
@@ -2460,7 +2461,11 @@ class pyExLib:
 
         walk(obj,0)
 
-        return copy.deepcopy(obj,memo)
+        deepcopy_obj=copy.deepcopy(obj,memo)
+        if(raw_obj_type==type(deepcopy_obj)):
+            return deepcopy_obj
+        else:
+            raise TypeError("safety_deepcopy resulted in different type object!")
 
     class ClassDataCoreLib:
         """
@@ -21189,7 +21194,7 @@ class imgLib:
             tmp_d=IOLib.JSONLib.readMETAJSON(path,imgLib.YOLOANNResult.META_YOLOANN_RESULT,raise_error=True)
             return imgLib.YOLOANNResult.__createDict2Obj(tmp_d)
         
-        def getResultBBimgJsonObj(self,additional_dict:dict={},raw_yolo_ann_additional_info_flag:bool=True,iou_args:dict={}):
+        def getResultBBimgJsonObj(self,additional_dict:dict=None,raw_yolo_ann_additional_info_flag:bool=True,iou_args:dict=None):
             """
             Gets a BBimgJson object for the result.
 
@@ -21201,6 +21206,19 @@ class imgLib:
             Returns:
                 BBimgJson: BBimgJson object.
             """
+            if(additional_dict is None):
+                additional_dict={}
+            else:
+                additional_dict=pyExLib.safety_deepcopy(additional_dict)
+
+            if(iou_args is None):
+                iou_args={}
+            else:
+                iou_args=pyExLib.safety_deepcopy(iou_args)
+
+            if(not isinstance(self.__raw_yolo_ann,imgLib.YOLOANN)):
+                raise TypeError("Error : The raw_yolo_ann is not an instance of YOLOANN!")
+                
             tmp_additional_dict={
                 **additional_dict,
                 **{
@@ -21311,6 +21329,15 @@ class imgLib:
 
             Returns:
                 BBimgJson: Copy of the BBimgJson instance.
+            """
+            return imgLib.BBimgJson(pyExLib.safety_deepcopy(self.__d))
+        
+        def __deepcopy__(self):
+            """
+            Creates a deep copy of the BBimgJson instance.
+
+            Returns:
+                BBimgJson: Deep copy of the BBimgJson instance.
             """
             return imgLib.BBimgJson(pyExLib.safety_deepcopy(self.__d))
 
@@ -22152,7 +22179,7 @@ class imgLib:
                 ann_ptn_list:list,
                 img_ptn_list:list,
                 mode:str=NEW_MODE_FILE,
-                new_instance_args:dict={},
+                new_instance_args:dict=None,
                 ann_re_str:str="",
                 img_re_str:str=""
             ):
@@ -22172,6 +22199,10 @@ class imgLib:
                 TypeError: If the lengths of the annotation data list and filename list are not the same.
                 TypeError: If the filename list contains duplicate file names.
             """
+            if(new_instance_args is None):
+                new_instance_args={}
+            else:
+                new_instance_args=pyExLib.safety_deepcopy(new_instance_args)
 
             if(mode==imgLib.YOLOANNDataset.NEW_MODE_FILE):
                 if(not isinstance(ann_ptn_list,list)):
@@ -22832,9 +22863,9 @@ class imgLib:
                 iou_threshold:float=None,
                 multi_class_mode:str=None,
                 gpu_flag:bool=True,
-                ensemble_args:dict={},
-                yolo_args:dict={},
-                bb_img_json_obj_args_dict:dict={}
+                ensemble_args:dict=None,
+                yolo_args:dict=None,
+                bb_img_json_obj_args_dict:dict=None,
             ):
             """
             Runs YOLO model prediction on the dataset.
@@ -22859,6 +22890,20 @@ class imgLib:
                 TypeError: If the ensemble_args or yolo_args are not dictionaries.
                 TypeError: If the bb_img_json_obj_args_dict is not a dictionary.
             """
+            if(ensemble_args is None):
+                ensemble_args={}
+            else:
+                ensemble_args=pyExLib.safety_deepcopy(ensemble_args)
+
+            if(yolo_args is None):
+                yolo_args={}
+            else:
+                yolo_args=pyExLib.safety_deepcopy(yolo_args)
+
+            if(bb_img_json_obj_args_dict is None):
+                bb_img_json_obj_args_dict={}
+            else:
+                bb_img_json_obj_args_dict=pyExLib.safety_deepcopy(bb_img_json_obj_args_dict)
 
             result_data_list=self.runYOLOANNFuncMap(
                 func=imgLib.YOLOANN.procYOLOPredict,
@@ -22887,7 +22932,7 @@ class imgLib:
         Class for YOLO dataset prediction results.
         """
 
-        def __init__(self,d:dict,bb_img_json_obj_args_dict:dict={}):
+        def __init__(self,d:dict,bb_img_json_obj_args_dict:dict=None):
             """
             Initializes the YOLODatasetPredictResult instance.
 
@@ -22903,6 +22948,10 @@ class imgLib:
                 TypeError: If the length of the result_data_list is not the same as the length of the raw_yolo_ann_dataset.
                 TypeError: If the type of the bb_img_json_obj_list is invalid.
             """
+            if(bb_img_json_obj_args_dict is None):
+                bb_img_json_obj_args_dict={}
+            else:
+                bb_img_json_obj_args_dict=pyExLib.safety_deepcopy(bb_img_json_obj_args_dict)
             
             if(not "raw_yolo_ann_dataset" in d):
                 raise TypeError("Error : The argument dict must contain \"raw_yolo_ann_dataset\"!")
@@ -22930,7 +22979,7 @@ class imgLib:
             elif(bb_img_json_obj_args_dict=={}):
                 self.__bb_img_json_obj_list=self.__init_to_bbimg_json_obj(bb_img_json_obj_args_dict=bb_img_json_obj_args_dict)
 
-        def __init_to_bbimg_json_obj(self,bb_img_json_obj_args_dict:dict={}):
+        def __init_to_bbimg_json_obj(self,bb_img_json_obj_args_dict:dict=None):
             """
             Initializes the BBimgJson objects for each YOLOANN result.
 
@@ -22944,6 +22993,10 @@ class imgLib:
                 TypeError: If the result data list is not a list.
                 TypeError: If the elements in the result data list are not instances of YOLOANNResult.
             """
+            if(bb_img_json_obj_args_dict is None):
+                bb_img_json_obj_args_dict={}
+            else:
+                bb_img_json_obj_args_dict=pyExLib.safety_deepcopy(bb_img_json_obj_args_dict)
             
             tmp_result_data_list=[]
             for img_results in self.__result_data_list:
@@ -23128,7 +23181,7 @@ class imgLib:
         def __init__(
             self,
             data_path:str,
-            data:dict={},
+            data:dict=None,
         ):
             """
             Initializes the cocoData instance.
@@ -23140,6 +23193,11 @@ class imgLib:
             Raises:
                 Exception: If both data_path and data are empty.
             """
+            if(data is None):
+                data={}
+            else:
+                data=pyExLib.safety_deepcopy(data)
+
             if(data=={} and data_path!=""):
                 with open(data_path,mode="r",encoding=IOLib.DEFAULT_ENCODING) as f:
                     data=json.load(f)
@@ -25016,7 +25074,7 @@ class imgLib:
                 DEFAULT_NEAR_ZERO=1e-16
                 
                 @staticmethod
-                def modelEvaluation4ConfusionMatrix(cm_mat:np.ndarray,names_dict:dict={},is_transpose:bool=True,NEAR_ZERO:float=DEFAULT_NEAR_ZERO):
+                def modelEvaluation4ConfusionMatrix(cm_mat:np.ndarray,names_dict:dict=None,is_transpose:bool=True,NEAR_ZERO:float=DEFAULT_NEAR_ZERO):
                     """
                     Evaluates a confusion matrix.
 
@@ -25029,6 +25087,10 @@ class imgLib:
                     Returns:
                         dict: Evaluation results.
                     """
+                    if(names_dict is None):
+                        names_dict={}
+                    else:
+                        zip_args=pyExLib.safety_deepcopy(names_dict)
 
                     tmp_cm_mat=cm_mat.copy()
                     if(is_transpose):
@@ -25600,7 +25662,7 @@ class imgLib:
                 mode:str,
                 iou_threshold:float=None,
                 multi_class_mode:str=None,
-                ensemble_args:dict={},
+                ensemble_args:dict=None,
                 class_names:list=None
             ):
                 """
@@ -25622,6 +25684,10 @@ class imgLib:
                     ValueError: If the mode is not supported.
                     RuntimeError: If the ensemble process fails.
                 """
+                if(ensemble_args is None):
+                    ensemble_args={}
+                else:
+                    ensemble_args=pyExLib.safety_deepcopy(ensemble_args)
 
                 if(iou_threshold==None):
                     iou_threshold=imgLib.ensembleModel.DEFAULT_IOU_THRESHOLD
@@ -25639,7 +25705,7 @@ class imgLib:
                         **ensemble_args
                     )
                     if(class_names!=None):
-                        ri_dict["cls_names_dict"]=class_names
+                        ri_dict["cls_names_dict"]=pyExLib.safety_deepcopy(class_names)
                     r.append(ri_dict)
                 return r
                 
@@ -25652,8 +25718,8 @@ class imgLib:
             iou_threshold:float=DEFAULT_IOU_THRESHOLD,
             multi_class_mode:str=None,
             gpu_flag:bool=True,
-            ensemble_args:dict={},
-            yolo_args:dict={},
+            ensemble_args:dict=None,
+            yolo_args:dict=None,
             check_model_names_flag:bool=True
         ):
             """
@@ -25680,6 +25746,16 @@ class imgLib:
             if(multi_class_mode==None):
                 multi_class_mode=imgLib.ensembleModel.ENSEMBLE_MULTI_CLASS_MODE_EACH_CLASS
                 
+            if(ensemble_args is None):
+                ensemble_args={}
+            else:
+                ensemble_args=pyExLib.safety_deepcopy(ensemble_args)
+        
+            if(yolo_args is None):
+                yolo_args={}
+            else:
+                yolo_args=pyExLib.safety_deepcopy(yolo_args)
+
             class_names=imgLib.ensembleModel.MultiYOLOModelModule.getClassNames(
                 models,
                 check_model_names_flag
@@ -26738,7 +26814,7 @@ class imgLib:
             max_read_num:int=None,
             
             gpu_flag:bool=True,
-            yolo_args:dict={},
+            yolo_args:dict=None,
 
             is_auto_img_name:bool=True,
             auto_img_name_function:callable=None,
@@ -26746,9 +26822,9 @@ class imgLib:
             save_bb_img_json_each_img:bool=False,
             save_bb_img_json_each_img_out_dir:str=None,
             save_bb_img_json_each_img_out_dir_format:str=None,
-            save_bb_img_json_each_img_json_args:dict={},
+            save_bb_img_json_each_img_json_args:dict=None,
             save_bb_img_json_each_img_img:bool=False,
-            save_bb_img_json_each_img_img_args:dict={},
+            save_bb_img_json_each_img_img_args:dict=None,
 
             cache_mode:bool=False
         ):
@@ -26785,7 +26861,21 @@ class imgLib:
                 TypeError: If read_yolo_model_list_obj is not an instance of imgLib.YOLOModelLib.readYOLOModelList.
                 ValueError: If the read_yolo_model_list_obj is not a list.
             """
-            
+            if(yolo_args is None):
+                yolo_args={}
+            else:
+                yolo_args=pyExLib.safety_deepcopy(yolo_args)
+
+            if(save_bb_img_json_each_img_json_args is None):
+                save_bb_img_json_each_img_json_args={}
+            else:
+                save_bb_img_json_each_img_json_args=pyExLib.safety_deepcopy(save_bb_img_json_each_img_json_args)
+
+            if(save_bb_img_json_each_img_img_args is None):
+                save_bb_img_json_each_img_img_args={}
+            else:
+                save_bb_img_json_each_img_img_args=pyExLib.safety_deepcopy(save_bb_img_json_each_img_img_args)
+
             if(not isinstance(read_yolo_model_list_obj,imgLib.YOLOModelLib.readYOLOModelList)):
                 raise TypeError("Invalid read_yolo_model_list_obj.")
 
@@ -27463,7 +27553,7 @@ class imgLib:
                     read_yolo_model_list_obj,
                     yolo_ann_obj,
                     gpu_flag:bool=False,
-                    yolo_args:dict={},
+                    yolo_args:dict=None,
                     raw_img:np.ndarray=None,
                     ns:int=None,
                     all_results:list=None,
@@ -27484,6 +27574,10 @@ class imgLib:
                     TypeError: If the input objects are of invalid types.
                     ValueError: If the read_yolo_model_list_obj is empty.
                 """
+                if(yolo_args is None):
+                    yolo_args={}
+                else:
+                    yolo_args=pyExLib.safety_deepcopy(yolo_args)
 
                 if(not isinstance(read_yolo_model_list_obj,imgLib.YOLOModelLib.readYOLOModelList)):
                     raise TypeError("Invalid read_yolo_model_list_obj.")
@@ -27585,7 +27679,7 @@ class imgLib:
                 mode:str,
                 iou_threshold:float=None,
                 multi_class_mode:str=None,
-                ensemble_args:dict={},
+                ensemble_args:dict=None,
                 bb_img_json_mode:bool=False,
                 proc_ensemble_model_name_func:callable=DEFAULT_PROC_ENSEMBLE_MODEL_NAME
             ):
@@ -27605,6 +27699,10 @@ class imgLib:
                 Raises:
                     TypeError: If the input objects are of invalid types.
                 """
+                if(ensemble_args is None):
+                    ensemble_args={}
+                else:
+                    ensemble_args=pyExLib.safety_deepcopy(ensemble_args)
 
                 if(iou_threshold is None):
                     iou_threshold=imgLib.ensembleModel.DEFAULT_IOU_THRESHOLD
@@ -28265,9 +28363,9 @@ class imgLib:
                 save_path_func:callable=DEFAULT_SAVE_IMG_PATH_FUNC,
                 exist_ok=True,
                 draw_rect_flag:bool=True,
-                draw_rect_args:dict={},
+                draw_rect_args:dict=None,
                 label_flag:bool=True,
-                label_args:dict={},
+                label_args:dict=None,
                 label_org_function:callable=None,
                 label_str_format:str=None,
             ):
@@ -28283,6 +28381,16 @@ class imgLib:
                 Raises:
                     TypeError: If any result is not an instance of imgLib.BBimgJson.
                 """
+                if(draw_rect_args is None):
+                    draw_rect_args={}
+                else:
+                    draw_rect_args=pyExLib.safety_deepcopy(draw_rect_args)
+                    
+                if(label_args is None):
+                    label_args={}
+                else:
+                    label_args=pyExLib.safety_deepcopy(label_args)
+
                 out_dir_obj=Path(out_dir)
                 out_dir_obj.mkdir(parents=True,exist_ok=True)
                 for result,model_name in self.generatorResultsAndModelNames():
@@ -28665,9 +28773,9 @@ class imgLib:
                     result_obj,
                     save_bb_img_json:bool=True,
                     output_dir:str=None,
-                    save_json_args:dict={},
+                    save_json_args:dict=None,
                     save_bb_img_json_img:bool=True,
-                    save_bb_img_json_img_args:dict={},
+                    save_bb_img_json_img_args:dict=None,
                 ):
                 """
                 Appends the result object for a specific image.
@@ -28686,6 +28794,16 @@ class imgLib:
                     ValueError: If the result for the image already exists.
                     TypeError: If the result_obj is not of the expected type.
                 """
+                if(save_json_args is None):
+                    save_json_args={}
+                else:
+                    save_json_args=pyExLib.safety_deepcopy(save_json_args)
+
+                if(save_bb_img_json_img_args is None):
+                    save_bb_img_json_img_args={}
+                else:
+                    save_bb_img_json_img_args=pyExLib.safety_deepcopy(save_bb_img_json_img_args)
+
                 if(self.__lock_append):
                     raise RuntimeError("Appending results is locked.")
 
@@ -29292,7 +29410,13 @@ class imgLib:
 
             META_ALL_IMAGES_RESULT_BB_IMG_JSON_COMBINATION_MODEL_EVALUATION="AllImagesResultBBImgJsonCombinationsModelEvaluation"
 
-            def saveEvaluationJson(self,file_path:str,indent:int=IOLib.JSONLib.DEFAULT_INDENT,minimalize_flag:bool=False,evaluation_args:dict={}):
+            def saveEvaluationJson(
+                self,
+                file_path:str,
+                indent:int=IOLib.JSONLib.DEFAULT_INDENT,
+                minimalize_flag:bool=False,
+                evaluation_args:dict=None,
+            ):
                 """
                 Saves the evaluation results to a JSON file.
                 
@@ -29302,6 +29426,11 @@ class imgLib:
                     minimalize_flag (bool, optional): Whether to minimalize the JSON output.
                     evaluation_args (dict, optional): Additional arguments for evaluation.
                 """
+                if(evaluation_args is None):
+                    evaluation_args={}
+                else:
+                    evaluation_args=pyExLib.safety_deepcopy(evaluation_args)
+
                 evaluation_args["include_confusion_matrix_df"]=False
 
                 IOLib.JSONLib.saveMETAJSON(
@@ -29312,7 +29441,11 @@ class imgLib:
                     minimalize_flag=minimalize_flag
                 )
 
-            def getEvaluateDataFrames(self,include_mean_iou:bool=False,evaluation_args:dict={}):
+            def getEvaluateDataFrames(
+                self,
+                include_mean_iou:bool=False,
+                evaluation_args:dict=None,
+            ):
                 """
                 Gets the evaluation metrics as DataFrames.
 
@@ -29323,6 +29456,10 @@ class imgLib:
                 Returns:
                     pyExLib.DataFrameExLib.DataFrameList: A list of DataFrames containing evaluation metrics.
                 """
+                if(evaluation_args is None):
+                    evaluation_args={}
+                else:
+                    evaluation_args=pyExLib.safety_deepcopy(evaluation_args)
                 
                 dfl=pyExLib.DataFrameExLib.DataFrameList()
                 
@@ -29411,7 +29548,7 @@ class imgLib:
                 self,
                 file_path:str,
                 include_mean_iou:bool=False,
-                evaluation_args:dict={},
+                evaluation_args:dict=None,
                 excel_writer_args:dict=pyExLib.DataFrameExLib.DataFrameList.DEFAULT_EXCEL_WRITER_ARGS,
                 include_index:bool=True,
                 include_title:bool=True,
@@ -29439,6 +29576,11 @@ class imgLib:
                 Raises:
                     TypeError: If the result object is not of the expected type.
                 """
+                if(evaluation_args is None):
+                    evaluation_args={}
+                else:
+                    evaluation_args=pyExLib.safety_deepcopy(evaluation_args)
+
                 dfl=self.getEvaluateDataFrames(include_mean_iou=include_mean_iou,evaluation_args=evaluation_args)
                 if(not isinstance(dfl,pyExLib.DataFrameExLib.DataFrameList)):
                     raise TypeError("Expected DataFrameList")
@@ -29467,14 +29609,14 @@ class imgLib:
                 output_dir:str,
                 save_bb_img_json:bool=True,
                 save_bb_img_json_inner_dir:str|Path=None,
-                save_json_args:dict={},
+                save_json_args:dict=None,
                 save_img:bool=False,
-                save_img_args:dict={},
+                save_img_args:dict=None,
                 save_all_iou_df:bool=True,
                 include_mean_iou:bool=False,
                 save_evaluation_json:bool=True,
                 save_evaluation_excel:bool=True,
-                evaluation_args:dict={},
+                evaluation_args:dict=None,
                 excel_writer_args:dict=pyExLib.DataFrameExLib.DataFrameList.DEFAULT_EXCEL_WRITER_ARGS,
                 include_index:bool=True,
                 include_title:bool=True,
@@ -29513,10 +29655,23 @@ class imgLib:
                 output_dir_obj=Path(output_dir)
                 output_dir_obj.mkdir(parents=True,exist_ok=True)
 
+                if(save_json_args is None):
+                    save_json_args={}
+                else:
+                    save_json_args=pyExLib.safety_deepcopy(save_json_args)
+
+                if(save_img_args is None):
+                    save_img_args={}
+                else:
+                    save_img_args=pyExLib.safety_deepcopy(save_img_args)
+
                 if(evaluation_args is None):
                     evaluation_args={}
                 elif(not isinstance(evaluation_args,dict)):
                     raise TypeError("evaluation_args should be a dict!")
+                else:
+                    evaluation_args=pyExLib.safety_deepcopy(evaluation_args)
+
 
                 if(save_bb_img_json or save_img):
                     for img_name,result_obj in self.generator():
