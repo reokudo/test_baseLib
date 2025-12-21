@@ -4816,6 +4816,22 @@ class pyExLib:
 
             return sorted_lst
 
+        @staticmethod
+        def dictHash(
+            d:dict,
+            cls=None,
+        )->str:
+            if(cls is None):
+                cls=IOLib.JSONLib.ExtendedJSONEncoder
+            s=json.dumps(
+                d,
+                sort_keys=True,
+                cls=cls,
+                separators=(",",":"),
+                ensure_ascii=False,
+            )
+            return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
         @_protectedClass.fileStoreMyLibRegister
         class weightList(list,_FileStore.FileStoreParser):
             """
@@ -20838,7 +20854,7 @@ class imgLib:
             ):
             """
             Function to predict the image of a YOLOANN object using YOLO. 
-            See `imgLib.sensembleModel.procYOLOPredict` for the arguments.
+            See `imgLib.ensembleModel.procYOLOPredict` for the arguments.
 
             Args:
                 models (list): List of models.
@@ -26605,16 +26621,12 @@ class imgLib:
                 bboxes (list): List of bounding boxes [x1,y1,x2,y2].
                 scores (list): List of scores.
                 classes (list): List of class numbers.
-                iou_threshold (float): Threshold parameter from outer API.
-                    If dist_threshold is None, this value is used as dist_threshold.
+                iou_threshold (float): Threshold parameter from outer API. If dist_threshold is None, this value is used as dist_threshold.
                 multi_class_mode (str): Multi-class mode.
                 dist_threshold (float): Normalized center distance threshold.
-                size_ratio_threshold (float): Max allowed ratio of width/height
-                    between boxes in the same cluster.
-                overlap_ratio_threshold (float): Min required 1D overlap ratio
-                    (x and y directions).
-                min_cluster_size (int): Minimum cluster size to output a detection.
-                    Clusters with fewer boxes are ignored.
+                size_ratio_threshold (float): Max allowed ratio of width/height between boxes in the same cluster.
+                overlap_ratio_threshold (float): Min required 1D overlap ratio (x and y directions).
+                min_cluster_size (int): Minimum cluster size to output a detection. Clusters with fewer boxes are ignored.
 
             Returns:
                 dict: Dictionary containing "bboxes", "scores", and "classes".
@@ -27126,15 +27138,17 @@ class imgLib:
             @staticmethod
             def createGlobReadYOLOModelList(
                 glob_dir_str_list:list,
+                duplicate_mode:str=None,
                 recursive:bool=False,
                 is_auto_name:bool=False,
-                auto_name_func:callable=None
+                auto_name_func:callable=None,
             ):
                 """
                 Creates a readYOLOModelList from a glob directory string.
 
                 Args:
                     glob_dir_str_list (list): A list of glob directory strings.
+                    duplicate_mode (str): The mode to handle duplicate models.
                     recursive (bool): Whether to search recursively.
                     is_auto_name (bool): Whether to automatically name the model.
                     auto_name_func (callable): The function to use for automatic naming.
@@ -27145,6 +27159,8 @@ class imgLib:
                 Raises:
                     TypeError: If glob_dir_str_list is not a list.
                 """
+                if(duplicate_mode is None):
+                    duplicate_mode=imgLib.YOLOModelLib.readYOLOModelList.DUPLICATE_MODE_IGNORE_APPEND
 
                 if(auto_name_func is None):
                     auto_name_func=imgLib.YOLOModelLib.readYOLOModel.DEFAULT_AUTO_NAME_FUNC
@@ -27167,20 +27183,36 @@ class imgLib:
                                     auto_name_func=auto_name_func
                                 )
                             )
-                return imgLib.YOLOModelLib.readYOLOModelList(read_yolo_model_obj_list=tmp_read_yolo_model_obj_list)
+                return imgLib.YOLOModelLib.readYOLOModelList(
+                    read_yolo_model_obj_list=tmp_read_yolo_model_obj_list,
+                    duplicate_mode=duplicate_mode
+                )
 
-            def __init__(self,read_yolo_model_obj_list:list=None):
+            DUPLICATE_MODE_IGNORE_APPEND="ignore_append"
+            DUPLICATE_MODE_ERROR="error"
+            DUPLICATE_MODE_SKIP="skip"
+            DUPLICATE_MODE_OVERWRITE="overwrite"
+
+            def __init__(
+                self,
+                read_yolo_model_obj_list:list=None,
+                duplicate_mode:str=None
+            ):
                 """
                 Initializes the readYOLOModelList with a list of readYOLOModel objects.
 
                 Args:
                     read_yolo_model_obj_list (list): A list of readYOLOModel objects.
+                    duplicate_mode (str): The mode to handle duplicate models.
 
                 Raises:
                     ValueError: If read_yolo_model_obj_list is empty.                    
                 """
+                if(duplicate_mode is None):
+                    duplicate_mode=imgLib.YOLOModelLib.readYOLOModelList.DUPLICATE_MODE_IGNORE_APPEND
                 
                 self.__read_yolo_model_obj_list=[]
+                self.__duplicate_mode=duplicate_mode
 
                 if(read_yolo_model_obj_list is None):
                     pass
@@ -27237,15 +27269,19 @@ class imgLib:
                 Raises:
                     TypeError: If other is not a readYOLOModelList instance.
                     ValueError: If class names do not match.
+                    ValueError: If duplicate modes do not match.
                 """
-
                 if(not isinstance(other,imgLib.YOLOModelLib.readYOLOModelList)):
                     raise TypeError("Can only add another readYOLOModelList instance.")
                 
                 if(self.getClassNames()!=other.getClassNames()):
                     raise ValueError("Class names do not match.")
+                if(self.getDuplicateMode()!=other.getDuplicateMode()):
+                    raise ValueError("Duplicate modes do not match.")
+
                 return imgLib.YOLOModelLib.readYOLOModelList(
-                    read_yolo_model_obj_list=self.getReadYOLOModelList()+other.getReadYOLOModelList()
+                    read_yolo_model_obj_list=self.getReadYOLOModelList()+other.getReadYOLOModelList(),
+                    duplicate_mode=self.getDuplicateMode()
                 )
 
             def copy(self):
@@ -27255,7 +27291,10 @@ class imgLib:
                 Returns:
                     readYOLOModelList: A copy of the current instance.
                 """
-                return imgLib.YOLOModelLib.readYOLOModelList(read_yolo_model_obj_list=copy.copy(self.__read_yolo_model_obj_list))
+                return imgLib.YOLOModelLib.readYOLOModelList(
+                    read_yolo_model_obj_list=copy.copy(self.__read_yolo_model_obj_list),
+                    duplicate_mode=self.__duplicate_mode
+                )
 
             def getReadYOLOModelList(self):
                 """
@@ -27277,6 +27316,15 @@ class imgLib:
                     TypeError: If read_yolo_model_obj is not an instance of readYOLOModel.
                     ValueError: If class names do not match.
                 """
+                def checkRegisteredModelName(model_name:str):
+                    registgeredmodel_names=self.getModelNames()
+                    if(model_name in registgeredmodel_names):                        
+                        return True,registgeredmodel_names.index(model_name)
+                    return False,-1
+
+                append_mode="normal"
+                overwrite_index=None
+
                 if(not isinstance(read_yolo_model_obj,imgLib.YOLOModelLib.readYOLOModel)):
                     raise TypeError("read_yolo_model_obj must be an instance of readYOLOModel.")
                 
@@ -27285,6 +27333,27 @@ class imgLib:
                 elif(read_yolo_model_obj.getClassNames()!=self.getClassNames()):
                     raise ValueError("Class names of read_yolo_model_obj do not match the class names of the list.")
 
+                model_name=read_yolo_model_obj.getModelName()
+                if(self.__duplicate_mode==imgLib.YOLOModelLib.readYOLOModelList.DUPLICATE_MODE_IGNORE_APPEND):
+                    pass
+                else:
+                    check_registered_flag,registered_index=checkRegisteredModelName(model_name)
+                    
+                    if(self.__duplicate_mode==imgLib.YOLOModelLib.readYOLOModelList.DUPLICATE_MODE_ERROR):
+                        if(check_registered_flag):
+                            raise ValueError(f"Model name {model_name} already exists in the list.")
+                    elif(self.__duplicate_mode==imgLib.YOLOModelLib.readYOLOModelList.DUPLICATE_MODE_SKIP):
+                        if(check_registered_flag):
+                            append_mode="skip"
+                    elif(self.__duplicate_mode==imgLib.YOLOModelLib.readYOLOModelList.DUPLICATE_MODE_OVERWRITE):
+                        if(check_registered_flag):
+                            append_mode="overwrite"
+                            overwrite_index=registered_index
+                    else:
+                        raise ValueError(f"Invalid duplicate mode: {self.__duplicate_mode}.")
+                    
+                return append_mode,overwrite_index
+
             def append(self,read_yolo_model_obj):
                 """
                 Appends a readYOLOModel object to the list.
@@ -27292,8 +27361,15 @@ class imgLib:
                 Args:
                     read_yolo_model_obj (readYOLOModel): The readYOLOModel object to append.
                 """
-                self.__checkAppendData(read_yolo_model_obj)
-                self.__read_yolo_model_obj_list.append(read_yolo_model_obj.copy())
+                append_mode,overwrite_index=self.__checkAppendData(read_yolo_model_obj)
+                if(append_mode=="skip"):
+                    return
+                elif(append_mode=="overwrite"):
+                    self.__read_yolo_model_obj_list[overwrite_index]=read_yolo_model_obj.copy()
+                elif(append_mode=="normal"):
+                    self.__read_yolo_model_obj_list.append(read_yolo_model_obj.copy())
+                else:
+                    raise ValueError(f"Invalid append mode: {append_mode}.")
 
             def append4modelDir(self,model_dir:str,is_auto_name:bool=False):
                 """
@@ -27317,10 +27393,19 @@ class imgLib:
                 Raises:
                     IndexError: If index is out of bounds.
                 """
-                self.__checkAppendData(read_yolo_model_obj)
-                if(index<0 or index>len(self.__read_yolo_model_obj_list)):
-                    raise IndexError("Index out of bounds.")
-                self.__read_yolo_model_obj_list.insert(index,read_yolo_model_obj.copy())
+                append_mode,overwrite_index=self.__checkAppendData(read_yolo_model_obj)
+                if(append_mode=="skip"):
+                    return
+                elif(append_mode=="overwrite"):
+                    if(index!=overwrite_index):
+                        raise ValueError("Index does not match the overwrite index.")
+                    self.__read_yolo_model_obj_list[overwrite_index]=read_yolo_model_obj.copy()
+                elif(append_mode=="normal"):
+                    if(index<0 or index>len(self.__read_yolo_model_obj_list)):
+                        raise IndexError("Index out of bounds.")
+                    self.__read_yolo_model_obj_list.insert(index,read_yolo_model_obj.copy())
+                else:
+                    raise ValueError(f"Invalid append mode: {append_mode}.")
 
             def getReadYOLOModelData(self,index:int):
                 """
@@ -27364,6 +27449,15 @@ class imgLib:
                     raise TypeError("Invalid readYOLOModel object.")
                 return self.__read_yolo_model_obj_list[0].getClassNames()
             
+            def getDuplicateMode(self):
+                """
+                Returns the duplicate mode.
+
+                Returns:
+                    str: The duplicate mode.
+                """
+                return self.__duplicate_mode
+
             def generatorYOLOModels(self):
                 """
                 Generates YOLO model objects from the list.
@@ -27390,7 +27484,10 @@ class imgLib:
                     TypeError: If any readYOLOModel object is invalid.
                 """
                 for comb in itertools.combinations(list(range(len(self.__read_yolo_model_obj_list))),r):
-                    yield comb,imgLib.YOLOModelLib.readYOLOModelList([self.__read_yolo_model_obj_list[i] for i in comb])
+                    yield comb,imgLib.YOLOModelLib.readYOLOModelList(
+                        [self.__read_yolo_model_obj_list[i] for i in comb],
+                        duplicate_mode=self.__duplicate_mode
+                    )
 
             def generatorCombinationsModel(self,r:int):
                 """
@@ -27674,6 +27771,36 @@ class imgLib:
                 """
                 return f"{mode}_{multi_class_mode}_{'_'.join(model_name_list)}"
 
+            @staticmethod
+            def DEFAULT_PROC_ENSEMBLE_MODEL_HASH_NAME(
+                mode:str,
+                model_name_list:list,
+                iou_threshold:float,
+                multi_class_mode:str,
+                ensemble_args:dict,
+            ):
+                """
+                Generates a hash name for the ensemble model. (Used to avoid long names)
+
+                Args:
+                    mode (str): The mode for processing.
+                    model_name_list (list): The list of model names.
+                    iou_threshold (float): The IOU threshold.
+                    multi_class_mode (str): The multi-class mode.
+                    ensemble_args (dict): The ensemble arguments.
+
+                Returns:
+                    str: The default ensemble model name.
+                """
+                t={
+                    "mode":mode,
+                    "model_name_list":model_name_list,
+                    "iou_threshold":iou_threshold,
+                    "multi_class_mode":multi_class_mode,
+                    "ensemble_args":ensemble_args,
+                }
+                return pyExLib.IterableLib.dictHash(t)
+
             def procEnsembleModel(
                 self,
                 mode:str,
@@ -27919,7 +28046,45 @@ class imgLib:
                 
                 ensemble_model_name=str(ensemble_model_name)
                 return ensemble_model_name
-    
+            
+            @staticmethod
+            def simulateEnsembleCombinationsModelConfigDict(
+                read_yolo_model_list_obj:"imgLib.YOLOModelLib.readYOLOModelList",
+                predict_config_list:list,
+            ):
+                """
+                Simulates the ensemble combinations model configuration dictionary based on the provided configuration list.
+
+                Args:
+                    read_yolo_model_list_obj (readYOLOModelList): The list of YOLO models to read.
+                    predict_config_list (list): List of prediction configuration dictionaries.
+                
+                Returns:
+                    dict: The ensemble combinations model configuration dictionary.
+
+                Raises:
+                    ValueError: If predict_config_list is empty.
+                """
+                ensemble_combinations_model_config_dict={}
+
+                if(len(predict_config_list)==0):
+                    raise ValueError("predict_config_list cannot be empty.")
+
+                if(not isinstance(read_yolo_model_list_obj,imgLib.YOLOModelLib.readYOLOModelList)):
+                    raise TypeError("read_yolo_model_list_obj must be an instance of readYOLOModelList.")
+                
+                for predict_config_dict in imgLib.YOLOModelLib.YOLOModelPredict._generatePredictConfigListForR(predict_config_list):
+                    for new_yolo_model_list in read_yolo_model_list_obj.generatorCombinationsModel(predict_config_dict["combinations_r"]):
+                        for config in predict_config_dict["config_for_each_combination"]:
+                            if(not isinstance(new_yolo_model_list,imgLib.YOLOModelLib.readYOLOModelList)):
+                                raise TypeError("Expected new_yolo_model_list to be an instance of readYOLOModelList.")
+
+                            ensemble_name=imgLib.YOLOModelLib.YOLOModelPredict.__checkConfigData(config,new_yolo_model_list)
+                            if(ensemble_name in ensemble_combinations_model_config_dict.keys()):
+                                raise ValueError(f"Duplicate ensemble model name found: {ensemble_name}")
+                            ensemble_combinations_model_config_dict[ensemble_name]=pyExLib.safety_deepcopy(config)
+                return ensemble_combinations_model_config_dict
+
             @staticmethod
             def simulateEnsembleCombinationsModelNameList(
                 read_yolo_model_list_obj:"imgLib.YOLOModelLib.readYOLOModelList",
@@ -27938,27 +28103,15 @@ class imgLib:
                 Raises:
                     ValueError: If predict_config_list is empty.
                 """
-                ensemble_combinations_models_name_list=[]
-
                 if(len(predict_config_list)==0):
                     raise ValueError("predict_config_list cannot be empty.")
 
-                if(not isinstance(read_yolo_model_list_obj,imgLib.YOLOModelLib.readYOLOModelList)):
-                    raise TypeError("read_yolo_model_list_obj must be an instance of readYOLOModelList.")
-                
-                for predict_config_dict in imgLib.YOLOModelLib.YOLOModelPredict._generatePredictConfigListForR(predict_config_list):
-                    for new_yolo_model_list in read_yolo_model_list_obj.generatorCombinationsModel(predict_config_dict["combinations_r"]):
-                        for config in predict_config_dict["config_for_each_combination"]:
-                            if(not isinstance(new_yolo_model_list,imgLib.YOLOModelLib.readYOLOModelList)):
-                                raise TypeError("Expected new_yolo_model_list to be an instance of readYOLOModelList.")
-
-                            ensemble_name=imgLib.YOLOModelLib.YOLOModelPredict.__checkConfigData(config,new_yolo_model_list)
-                            if(ensemble_name in ensemble_combinations_models_name_list):
-                                raise ValueError(f"Duplicate ensemble model name found: {ensemble_name}")
-
-                            ensemble_combinations_models_name_list.append(ensemble_name)
-                            
-                return ensemble_combinations_models_name_list
+                return list(
+                    imgLib.YOLOModelLib.YOLOModelPredict.simulateEnsembleCombinationsModelConfigDict(
+                        read_yolo_model_list_obj,
+                        predict_config_list
+                    ).keys()
+                )
             
             def checkEnsembleCombinationsModelNameList(
                 self,
@@ -30137,6 +30290,7 @@ class imgLib:
                 
             def __init__(
                 self,
+                model_duplicate_mode:str=None,
                 is_auto_model_name:bool=False,
                 auto_model_name_func:callable=None,
 
@@ -30150,15 +30304,21 @@ class imgLib:
                 Initializes the IncrementalYOLOEvalProject instance.
 
                 Args:
+                    model_duplicate_mode (str, optional): Mode for handling duplicate models.
                     is_auto_model_name (bool, optional): Whether to automatically name models.
                     auto_model_name_func (callable, optional): Function to automatically name models.
                     gpu_flag (bool, optional): Whether to use GPU for processing.
                     yolo_args (dict, optional): Additional arguments for YOLO processing.
                     is_auto_img_name (bool, optional): Whether to automatically name images.
-                    auto_img_name_function (callable, optional): Function to automatically name images.
                 """
                 # model setting parameters
-                self.__read_model_list=imgLib.YOLOModelLib.readYOLOModelList()
+                if(model_duplicate_mode is None):
+                    model_duplicate_mode=imgLib.YOLOModelLib.readYOLOModelList.DUPLICATE_MODE_IGNORE_APPEND
+            
+                self.__model_duplicate_mode=model_duplicate_mode
+                self.__read_model_list=imgLib.YOLOModelLib.readYOLOModelList(
+                    duplicate_mode=self.__model_duplicate_mode
+                )
                 
                 self.__is_auto_model_name=is_auto_model_name
                 if(auto_model_name_func is None):
@@ -30203,6 +30363,13 @@ class imgLib:
 
                 # other parameters
                 self.__img_tag_types=set()
+                self.__lock_append=False
+
+            def setLockAppend(self):
+                """
+                Sets the lock for appending results.
+                """
+                self.__lock_append=True
                 
             def size(self):
                 """
@@ -30228,7 +30395,9 @@ class imgLib:
                     "version":int(getattr(self,"__fs_version__",1)),
                     "gpu_flag":bool(self.__gpu_flag),
                     "yolo_args":self.__yolo_args,
+                    "lock_append":bool(self.__lock_append),
 
+                    "model_duplicate_mode":self.__model_duplicate_mode,
                     "read_model_list":self.__read_model_list,
                     "predict_config_list":self.__predict_config_list,
 
@@ -30243,6 +30412,9 @@ class imgLib:
 
                     "is_auto_model_name":bool(self.__is_auto_model_name),
                     "is_auto_img_name":bool(self.__is_auto_img_name),
+
+                    "auto_model_name_func":self.__auto_model_name_func,
+                    "auto_img_name_function":self.__auto_img_name_function,
                 }
                 return pyExLib.safety_deepcopy(payload)
 
@@ -30315,8 +30487,10 @@ class imgLib:
 
                 obj.__gpu_flag=bool(payload.get("gpu_flag",True))
                 obj.__yolo_args=payload.get("yolo_args") or {}
+                obj.__lock_append=bool(payload.get("lock_append",False))
 
-                obj.__read_model_list=payload.get("read_model_list") or imgLib.YOLOModelLib.readYOLOModelList()
+                obj.__model_duplicate_mode=payload.get("model_duplicate_mode") or imgLib.YOLOModelLib.readYOLOModelList.DUPLICATE_MODE_IGNORE_APPEND
+                obj.__read_model_list=payload.get("read_model_list") or imgLib.YOLOModelLib.readYOLOModelList(duplicate_mode=obj.__model_duplicate_mode)
                 obj.__predict_config_list=payload.get("predict_config_list") or []
 
                 obj.__predict_image_data=payload.get("predict_image_data") or {}
@@ -30337,8 +30511,8 @@ class imgLib:
                 obj.__is_auto_model_name=bool(payload.get("is_auto_model_name",False))
                 obj.__is_auto_img_name=bool(payload.get("is_auto_img_name",False))
 
-                obj.__auto_model_name_func=imgLib.YOLOModelLib.readYOLOModel.DEFAULT_AUTO_NAME_FUNC
-                obj.__auto_img_name_function=imgLib.wrapperYOLOANN.DEFAULT_AUTO_IMG_NAME_FUNCTION
+                obj.__auto_model_name_func=payload.get("auto_model_name_func") or imgLib.YOLOModelLib.readYOLOModel.DEFAULT_AUTO_NAME_FUNC
+                obj.__auto_img_name_function=payload.get("auto_img_name_function") or imgLib.wrapperYOLOANN.DEFAULT_AUTO_IMG_NAME_FUNCTION
 
                 obj.__done_one_model_predict_matrix=pd.DataFrame(False,index=[],columns=[],dtype=bool)
                 obj.__done_ensemble_model_predict_matrix=pd.DataFrame(False,index=[],columns=[],dtype=bool)
@@ -30376,11 +30550,32 @@ class imgLib:
                 elif(len(self.__predict_config_list)<=0):
                     return []
                 else:
-                    return imgLib.YOLOModelLib.YOLOModelPredict.simulateEnsembleCombinationsModelNameList(
-                        self.__read_model_list,
-                        self.__predict_config_list
-                    ).copy()
+                    return pyExLib.safety_deepcopy(
+                         imgLib.YOLOModelLib.YOLOModelPredict.simulateEnsembleCombinationsModelNameList(
+                            self.__read_model_list,
+                            self.__predict_config_list
+                        )
+                    )
 
+            def getEnsembleCombinationsModelConfigDict(self):
+                """
+                Returns the ensemble combinations model configuration dictionary.
+
+                Returns:
+                    dict: A dictionary containing ensemble combinations model configurations.
+                """
+                if(self.__predict_config_list is None):
+                    return {}
+                elif(len(self.__predict_config_list)<=0):
+                    return {}
+                else:
+                    return pyExLib.safety_deepcopy(
+                        imgLib.YOLOModelLib.YOLOModelPredict.simulateEnsembleCombinationsModelConfigDict(
+                            self.__read_model_list,
+                            self.__predict_config_list
+                        )
+                    )
+                
             def getImgTagTypes(self):
                 """
                 Returns the set of image tag types.
@@ -30417,6 +30612,9 @@ class imgLib:
                 Args:
                     model_dir (str|Path): The directory of the YOLO model to append.
                 """
+                if(self.__lock_append):
+                    raise RuntimeError("Appending is locked for this IncrementalYOLOEvalProject instance.")
+                
                 tmp_read_yolo_model_obj=imgLib.YOLOModelLib.readYOLOModel(
                     str(model_dir),
                     is_auto_name=self.__is_auto_model_name,
@@ -30435,6 +30633,9 @@ class imgLib:
                 Args:
                     append_predict_config_list (list): The list of prediction configurations to append.
                 """
+                if(self.__lock_append):
+                    raise RuntimeError("Appending is locked for this IncrementalYOLOEvalProject instance.")
+                
                 if(not isinstance(append_predict_config_list,list)):
                     raise TypeError("append_predict_config_list should be a list")
                 self.__predict_config_list+=append_predict_config_list
@@ -30447,6 +30648,7 @@ class imgLib:
                 img_name:str=None,
                 img_tags:list|set|tuple=None,
                 dont_renew_done_predict_matrix:bool=False,
+                ignore_duplicate_img_name:bool=False,
             ):
                 """
                 Appends an image and its corresponding label to the project.
@@ -30457,12 +30659,16 @@ class imgLib:
                     img_name (str, optional): The name of the image. If None and is_auto_img_name is True, the name will be generated automatically.
                     img_tags (list|set|tuple, optional): Tags associated with the image.
                     dont_renew_done_predict_matrix (bool, optional): Whether to skip renewing the done prediction matrix after appending the image.
+                    ignore_duplicate_img_name (bool, optional): Whether to ignore duplicate image names.
 
                 Raises:
                     TypeError: If the input types are invalid.
                     FileNotFoundError: If the image or label file does not exist.
                     ValueError: If the image name already exists in the project.
                 """
+                if(self.__lock_append):
+                    raise RuntimeError("Appending is locked for this IncrementalYOLOEvalProject instance.")
+                
                 if(not isinstance(image_path,(str,Path))):
                     raise TypeError("image_path should be a string or Path")
                 if(not isinstance(label_path,(str,Path))):
@@ -30493,7 +30699,10 @@ class imgLib:
                 img_name=str(img_name)
 
                 if(img_name in self.getImageNames()):
-                    raise ValueError(f"Image name {img_name} already exists")
+                    if(ignore_duplicate_img_name):
+                        return
+                    else:
+                        raise ValueError(f"Image name {img_name} already exists")
 
                 self.__predict_image_data[img_name]={
                     "img_name":img_name,
@@ -30550,6 +30759,9 @@ class imgLib:
                 Raises:
                     TypeError: If the input types are invalid.
                 """
+                if(self.__lock_append):
+                    raise RuntimeError("Appending is locked for this IncrementalYOLOEvalProject instance.")
+
                 if(not isinstance(glob_dir_str_list,list)):
                     raise TypeError("glob_dir_str_list must be a list.")
                 dir_list=[]
@@ -30568,7 +30780,8 @@ class imgLib:
                 img_ptn_list:list,
                 ann_re_str:str="",
                 img_re_str:str="",
-                img_tags:list|set|tuple=None
+                img_tags:list|set|tuple=None,
+                ignore_duplicate_img_name:bool=False,
             ):
                 """
                 Appends images and their corresponding labels to the project using glob patterns.
@@ -30579,10 +30792,14 @@ class imgLib:
                     ann_re_str (str, optional): Regular expression string for filtering annotation files.
                     img_re_str (str, optional): Regular expression string for filtering image files.
                     img_tags (list|set|tuple, optional): Tags associated with the images.
+                    ignore_duplicate_img_name (bool, optional): Whether to ignore duplicate image names.
 
                 Raises:
                     TypeError: If the input types are invalid.
                 """
+                if(self.__lock_append):
+                    raise RuntimeError("Appending is locked for this IncrementalYOLOEvalProject instance.")
+                
                 _,_,detail_file_info_list=imgLib.YOLOANNDataset._static_init_import_ann_data(
                     ann_ptn_list=ann_ptn_list,
                     img_ptn_list=img_ptn_list,
@@ -30601,6 +30818,7 @@ class imgLib:
                             img_name=img_name,
                             img_tags=img_tags,
                             dont_renew_done_predict_matrix=True,
+                            ignore_duplicate_img_name=ignore_duplicate_img_name,
                         )
                 self.__renewDonePredictMatrix()
 
@@ -30992,6 +31210,8 @@ class imgLib:
                     "is_transpose",
                     "NEAR_ZERO",
                     "include_confusion_matrix_df",
+                    "include_map",
+                    "map_args",
                 }
                 ea=self.__copyDictOrEmpty(evaluation_args)
                 return {k:ea[k] for k in ea if(k in allowed)}
@@ -31070,7 +31290,7 @@ class imgLib:
                     out[tag]=tag_model.getEvaluationDict(**ea)
 
                 return out
-            
+
             @property
             def read_model_list(self):
                 """
