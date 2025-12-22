@@ -26947,6 +26947,599 @@ class imgLib:
 
             return {"bboxes":new_bboxes,"scores":new_scores,"classes":new_classes}
 
+        class AutoPipelineSelector:
+            """
+            Automatically searches for a good ENSEMBLE_MODE_PIPELINE configuration.
+
+            Typical usage:
+                best=imgLib.ensembleModel.AutoPipelineSelector.searchBestPipelineFromBBimgJsonListList(
+                    bb_img_json_list_list=[model0_bb_list,model1_bb_list,...],
+                    search_iou_thresholds=[0.5],
+                    score_key="mAP50",
+                    max_candidates=200,
+                    max_eval_images=300
+                )
+                best_pipeline_argv=best["best_pipeline_argv"]
+            """
+
+            DEFAULT_SEARCH_IOU_THRESHOLDS=[0.5]
+            DEFAULT_SCORE_KEY="mAP50"
+            DEFAULT_MAX_CANDIDATES=200
+
+            DEFAULT_STAGE_IOU_THRESHOLD_LIST=[0.35,0.4,0.45,0.5,0.55,0.6,0.65]
+            
+            @staticmethod
+            def DEFAULT_STAGE_MULTI_CLASS_MODE_LIST():
+                return [
+                    imgLib.ensembleModel.ENSEMBLE_MULTI_CLASS_MODE_EACH_CLASS,
+                    imgLib.ensembleModel.ENSEMBLE_MULTI_CLASS_MODE_ALL_CLASS_TOGETHER,
+                ]
+
+            @staticmethod
+            def DEFAULT_STAGE_MODE_LIST():
+                return [
+                    imgLib.ensembleModel.ENSEMBLE_MODE_NMS,
+                    imgLib.ensembleModel.ENSEMBLE_MODE_SOFT_NMS,
+                    imgLib.ensembleModel.ENSEMBLE_MODE_NVO_NMS,
+                    imgLib.ensembleModel.ENSEMBLE_MODE_MAJORITY_RULE_NMS,
+                    imgLib.ensembleModel.ENSEMBLE_MODE_AND_NMS,
+                    imgLib.ensembleModel.ENSEMBLE_MODE_OR_NMS,
+                    imgLib.ensembleModel.ENSEMBLE_MODE_NMW,
+                    imgLib.ensembleModel.ENSEMBLE_MODE_WBF,
+                    imgLib.ensembleModel.ENSEMBLE_MODE_CENTER_CLUSTER,
+                ]
+
+            @staticmethod
+            def _alignBBimgJsonListList(
+                bb_img_json_list_list:list,
+                strict:bool=True
+            )->tuple[list,list]:
+                """
+                Align BBimgJson lists across models by raw_img_path.
+
+                Returns:
+                    (aligned_list_list, key_list)
+                """
+                if(not isinstance(bb_img_json_list_list,list)):
+                    raise TypeError("bb_img_json_list_list must be a list.")
+                if(len(bb_img_json_list_list)==0):
+                    raise ValueError("bb_img_json_list_list is empty.")
+                for lst in bb_img_json_list_list:
+                    if(not isinstance(lst,list)):
+                        raise TypeError("Each element of bb_img_json_list_list must be a list.")
+                    if(len(lst)==0):
+                        raise ValueError("Each BBimgJson list must be non-empty.")
+                    for bb in lst[:3]:
+                        if(not isinstance(bb,imgLib.BBimgJson)):
+                            raise TypeError("Each element must be an instance of imgLib.BBimgJson.")
+
+                maps=[]
+                key_sets=[]
+                for lst in bb_img_json_list_list:
+                    tmp={}
+                    for bb in lst:
+                        k=str(bb.getRawImgPath())
+                        tmp[k]=bb
+                    maps.append(tmp)
+                    key_sets.append(set(tmp.keys()))
+
+                common=set.intersection(*key_sets)
+                if(strict):
+                    for i,s in enumerate(key_sets):
+                        if(s!=common):
+                            miss=sorted(list(s-common))[:5]
+                            extra=sorted(list(common-s))[:5]
+                            raise ValueError(
+                                "BBimgJson lists are not aligned by raw_img_path. "
+                                f"model_index={i} missing_common_sample={extra} extra_sample={miss}"
+                            )
+
+                key_list=sorted(list(common))
+                aligned=[]
+                for mp in maps:
+                    aligned.append([mp[k] for k in key_list])
+
+                return aligned,key_list
+
+            @staticmethod
+            def _normalizeWeights(w:list)->list:
+                """
+                Normalize model weights to sum to 1.0.
+
+                Args:
+                    w (list): List of weights.
+                
+                Returns:
+                    list: Normalized weights.
+                """
+                if(w is None):
+                    return None
+                if(not isinstance(w,list)):
+                    raise TypeError("model_weights must be a list.")
+                if(len(w)==0):
+                    return w
+                s=sum([float(x) for x in w])
+                if(s==0):
+                    return [1.0 for _ in w]
+                return [float(x)/s for x in w]
+
+            @staticmethod
+            def _makeStage(
+                out_id:str,
+                inputs:list,
+                mode:str,
+                iou_threshold:float,
+                multi_class_mode:str,
+                model_weights:list=None,
+                ensemble_args:dict=None
+            )->dict:
+                """
+                Build a stage dictionary for ENSEMBLE_MODE_PIPELINE.
+
+                Args:
+                    out_id (str): Output ID of the stage.
+                    inputs (list): List of input IDs for the stage.
+                    mode (str): Ensemble mode for the stage.
+                    iou_threshold (float): IoU threshold for the stage.
+                    multi_class_mode (str): Multi-class mode for the stage.
+                    model_weights (list): Model weights for the stage.
+                    ensemble_args (dict): Additional ensemble arguments for the stage.
+
+                Returns:
+                    dict: Stage dictionary.
+                """
+                st={
+                    "out_id":out_id,
+                    "inputs":pyExLib.safety_deepcopy(inputs),
+                    "mode":mode,
+                    "iou_threshold":float(iou_threshold),
+                    "multi_class_mode":multi_class_mode,
+                    "ensemble_args":pyExLib.safety_deepcopy(ensemble_args if ensemble_args is not None else {})
+                }
+                if(model_weights is not None):
+                    st["model_weights"]=pyExLib.safety_deepcopy(model_weights)
+                return st
+
+            @staticmethod
+            def _scoreBBimgJsonList(
+                bb_img_json_list:list,
+                iou_thresholds:list,
+                score_key:str
+            )->tuple[float,dict]:
+                """
+                Calculate mAP score from a BBimgJson list.
+
+                Args:
+                    bb_img_json_list (list): List of BBimgJson objects.
+                    iou_thresholds (list): List of IoU thresholds for mAP calculation.
+                    score_key (str): Key in the mAP dictionary to return.
+
+                Returns:
+                    tuple: (score, map_dict)
+                """
+                if(iou_thresholds is None):
+                    iou_thresholds=imgLib.ensembleModel.AutoPipelineSelector.DEFAULT_SEARCH_IOU_THRESHOLDS
+                map_dict=imgLib.BBimgJson.CalcMAPFromBBimgJsonList(
+                    bb_img_json_list=bb_img_json_list,
+                    iou_thresholds=iou_thresholds
+                )
+                if(score_key not in map_dict):
+                    # fallback: take the first numeric value
+                    for k,v in map_dict.items():
+                        if(isinstance(v,(int,float))):
+                            return float(v),map_dict
+                    return 0.0,map_dict
+                return float(map_dict[score_key]),map_dict
+
+            @staticmethod
+            def _evalPipeline(
+                bb_img_json_list_list:list,
+                pipeline_argv:dict,
+                eval_index_list:list,
+                template_model_index:int=0,
+                iou_thresholds:list=None,
+                score_key:str=None
+            )->tuple[float,dict,dict]:
+                """
+                Evaluate a pipeline configuration on selected images.
+
+                Args:
+                    bb_img_json_list_list (list): List of per-model BBimgJson lists.
+                    pipeline_argv (dict): Pipeline configuration dictionary.
+                    eval_index_list (list): List of image indices to evaluate.
+                    template_model_index (int): Index of the model to use as template for non-ensemble fields.
+                    iou_thresholds (list): IoU thresholds for mAP calculation.
+                    score_key (str): Key in the mAP dictionary to return.
+
+                Returns:
+                    tuple: (score, map_dict, info_dict)
+                """
+                if(score_key is None):
+                    score_key=imgLib.ensembleModel.AutoPipelineSelector.DEFAULT_SCORE_KEY
+
+                out_bb_list=[]
+                m=len(bb_img_json_list_list)
+                for idx in eval_index_list:
+                    yolo_result_list=[
+                        bb_img_json_list_list[mi][idx].getANN()
+                        for mi in range(m)
+                    ]
+                    out_ann=imgLib.ensembleModel.EnsembleFunc4YOLOResult(
+                        mode=imgLib.ensembleModel.ENSEMBLE_MODE_PIPELINE,
+                        yolo_result_list=yolo_result_list,
+                        iou_threshold=imgLib.ensembleModel.DEFAULT_IOU_THRESHOLD,
+                        multi_class_mode=imgLib.ensembleModel.ENSEMBLE_MULTI_CLASS_MODE_EACH_CLASS,
+                        **pipeline_argv
+                    )
+                    d=bb_img_json_list_list[template_model_index][idx].getDict()
+                    d["final_ann"]=out_ann
+                    out_bb_list.append(imgLib.BBimgJson(d))
+
+                score,map_dict=imgLib.ensembleModel.AutoPipelineSelector._scoreBBimgJsonList(
+                    bb_img_json_list=out_bb_list,
+                    iou_thresholds=iou_thresholds,
+                    score_key=score_key
+                )
+                return score,map_dict,{"num_images":len(out_bb_list)}
+
+            @staticmethod
+            def _makeWeightSchemes(base_scores:list)->list:
+                """
+                Build a small set of reasonable weight schemes from base model scores.
+
+                Args:
+                    base_scores (list): List of base model scores.
+
+                Returns:
+                    list: List of weight schemes (each is a list of weights).
+                """
+                m=len(base_scores)
+                if(m==0):
+                    return [None]
+
+                eps=1e-9
+                s=[max(float(x),0.0) for x in base_scores]
+
+                # uniform
+                schemes=[[1.0 for _ in range(m)]]
+
+                # normalized by score
+                sm=sum(s)
+                if(sm>0):
+                    schemes.append([x/sm for x in s])
+
+                # softmax-ish (temperature)
+                for t in [0.5,1.0,2.0]:
+                    ex=[math.exp((x+eps)/t) for x in s]
+                    ss=sum(ex)
+                    if(ss>0):
+                        schemes.append([x/ss for x in ex])
+
+                # best model boosted
+                best_i=max(range(m),key=lambda i:s[i])
+                w=[0.2 for _ in range(m)]
+                w[best_i]=1.0
+                schemes.append(w)
+
+                # top-2 boosted
+                order=sorted(range(m),key=lambda i:s[i],reverse=True)
+                if(len(order)>=2):
+                    w=[0.2 for _ in range(m)]
+                    w[order[0]]=1.0
+                    w[order[1]]=0.8
+                    schemes.append(w)
+
+                # de-duplicate
+                uniq=[]
+                seen=set()
+                for w in schemes:
+                    key=tuple([round(float(x),6) for x in w])
+                    if(key in seen):
+                        continue
+                    seen.add(key)
+                    uniq.append(w)
+                return uniq
+
+            @staticmethod
+            def _describePipeline(pipeline_argv:dict)->str:
+                """
+                Describe a pipeline configuration.
+
+                Args:
+                    pipeline_argv (dict): Pipeline configuration dictionary.
+
+                Returns:
+                    str: Description string.
+                """
+                stages=pipeline_argv.get("stages",[])
+                parts=[]
+                for st in stages:
+                    mode=st.get("mode")
+                    iou=st.get("iou_threshold")
+                    mcm=st.get("multi_class_mode")
+                    inputs=st.get("inputs")
+                    parts.append(f"{mode}(in={inputs},iou={iou},mcm={mcm})")
+                return " -> ".join(parts)
+
+            @staticmethod
+            def searchBestPipelineFromBBimgJsonListList(
+                bb_img_json_list_list:list,
+                search_iou_thresholds:list=None,
+                score_key:str=None,
+
+                stage_mode_list:list=None,
+                stage_iou_threshold_list:list=None,
+                stage_multi_class_mode_list:list=None,
+
+                max_candidates:int=None,
+                max_eval_images:int=None,
+                random_seed:int=0,
+                strict_align:bool=True,
+                verbose:bool=True
+            )->dict:
+                """
+                Search a good pipeline config for ENSEMBLE_MODE_PIPELINE.
+
+                Args:
+                    bb_img_json_list_list (list): List of per-model BBimgJson lists (must share GT).
+                    search_iou_thresholds (list): IoU list for mAP evaluation (e.g., [0.5]).
+                    score_key (str): Key in map_dict (e.g., "mAP50", "mAP50_95").
+                    stage_mode_list (list): Allowed stage modes.
+                    stage_iou_threshold_list (list): Candidate stage IoU thresholds.
+                    stage_multi_class_mode_list (list): Candidate multi_class_mode list.
+                    max_candidates (int): Upper bound of candidate pipelines to evaluate.
+                    max_eval_images (int): If set, randomly sample images for the search evaluation.
+                    random_seed (int): Random seed for sampling.
+                    strict_align (bool): If True, require perfect alignment across models by raw_img_path.
+                    verbose (bool): Print progress.
+
+                Returns:
+                    dict: {
+                        "best_pipeline_argv":dict,
+                        "best_score":float,
+                        "best_map_dict":dict,
+                        "report_df":pd.DataFrame,
+                        "base_model_scores":list[dict],
+                    }
+                """
+                if(score_key is None):
+                    score_key=imgLib.ensembleModel.AutoPipelineSelector.DEFAULT_SCORE_KEY
+                if(max_candidates is None):
+                    max_candidates=imgLib.ensembleModel.AutoPipelineSelector.DEFAULT_MAX_CANDIDATES
+
+                aligned,_=imgLib.ensembleModel.AutoPipelineSelector._alignBBimgJsonListList(
+                    bb_img_json_list_list=bb_img_json_list_list,
+                    strict=strict_align
+                )
+                bb_img_json_list_list=aligned
+
+                m=len(bb_img_json_list_list)
+                n=len(bb_img_json_list_list[0])
+
+                index_list=list(range(n))
+                rng=random.Random(int(random_seed))
+                if(max_eval_images is not None and max_eval_images<n):
+                    index_list=rng.sample(index_list,int(max_eval_images))
+                    index_list=sorted(index_list)
+
+                if(stage_mode_list is None):
+                    stage_mode_list=imgLib.ensembleModel.AutoPipelineSelector.DEFAULT_STAGE_MODE_LIST()
+                if(stage_iou_threshold_list is None):
+                    stage_iou_threshold_list=imgLib.ensembleModel.AutoPipelineSelector.DEFAULT_STAGE_IOU_THRESHOLD_LIST
+                if(stage_multi_class_mode_list is None):
+                    stage_multi_class_mode_list=imgLib.ensembleModel.AutoPipelineSelector.DEFAULT_STAGE_MULTI_CLASS_MODE_LIST()
+
+                # 1) score base models
+                base_model_scores=[]
+                base_scores=[]
+                for mi in range(m):
+                    bb_list=[bb_img_json_list_list[mi][i] for i in index_list]
+                    score,map_dict=imgLib.ensembleModel.AutoPipelineSelector._scoreBBimgJsonList(
+                        bb_img_json_list=bb_list,
+                        iou_thresholds=search_iou_thresholds,
+                        score_key=score_key
+                    )
+                    base_scores.append(score)
+                    base_model_scores.append({
+                        "model_index":mi,
+                        "score":score,
+                        "map_dict":map_dict
+                    })
+
+                order=sorted(range(m),key=lambda i:base_scores[i],reverse=True)
+                best_model_index=order[0]
+
+                weight_schemes=imgLib.ensembleModel.AutoPipelineSelector._makeWeightSchemes(base_scores)
+
+                # 2) generate candidate pipelines (small template set)
+                candidates=[]
+
+                model_ids=[f"m{i}" for i in range(m)]
+
+                def _add_candidate(pipeline_argv:dict,meta:dict):
+                    candidates.append({
+                        "pipeline_argv":pipeline_argv,
+                        "desc":imgLib.ensembleModel.AutoPipelineSelector._describePipeline(pipeline_argv),
+                        **meta
+                    })
+
+                # (A) single stage on all models
+                for mode in stage_mode_list:
+                    for iou in stage_iou_threshold_list:
+                        for mcm in stage_multi_class_mode_list:
+                            for w in weight_schemes:
+                                st=imgLib.ensembleModel.AutoPipelineSelector._makeStage(
+                                    out_id="s0",
+                                    inputs=model_ids,
+                                    mode=mode,
+                                    iou_threshold=iou,
+                                    multi_class_mode=mcm,
+                                    model_weights=w
+                                )
+                                _add_candidate(
+                                    {"stages":[st],"final_id":"s0"},
+                                    {"template":"single_stage","stage0_mode":mode}
+                                )
+
+                # (B) merge -> prune (prune works on single input too)
+                merge_modes=[
+                    imgLib.ensembleModel.ENSEMBLE_MODE_WBF,
+                    imgLib.ensembleModel.ENSEMBLE_MODE_NMW,
+                    imgLib.ensembleModel.ENSEMBLE_MODE_OR_NMS,
+                    imgLib.ensembleModel.ENSEMBLE_MODE_CENTER_CLUSTER,
+                ]
+                prune_modes=[
+                    imgLib.ensembleModel.ENSEMBLE_MODE_NMS,
+                    imgLib.ensembleModel.ENSEMBLE_MODE_SOFT_NMS,
+                ]
+
+                for merge_mode in merge_modes:
+                    if(merge_mode not in stage_mode_list):
+                        continue
+                    for prune_mode in prune_modes:
+                        if(prune_mode not in stage_mode_list):
+                            continue
+                        for iou0 in stage_iou_threshold_list:
+                            for iou1 in stage_iou_threshold_list:
+                                for mcm in stage_multi_class_mode_list:
+                                    for w in weight_schemes:
+                                        st0=imgLib.ensembleModel.AutoPipelineSelector._makeStage(
+                                            out_id="s0",
+                                            inputs=model_ids,
+                                            mode=merge_mode,
+                                            iou_threshold=iou0,
+                                            multi_class_mode=mcm,
+                                            model_weights=w
+                                        )
+                                        st1=imgLib.ensembleModel.AutoPipelineSelector._makeStage(
+                                            out_id="s1",
+                                            inputs=["s0"],
+                                            mode=prune_mode,
+                                            iou_threshold=iou1,
+                                            multi_class_mode=mcm,
+                                            model_weights=None
+                                        )
+                                        _add_candidate(
+                                            {"stages":[st0,st1],"final_id":"s1"},
+                                            {"template":"merge_prune","stage0_mode":merge_mode,"stage1_mode":prune_mode}
+                                        )
+
+                # (C) consensus -> augment(best model) -> prune
+                consensus_modes=[
+                    imgLib.ensembleModel.ENSEMBLE_MODE_AND_NMS,
+                    imgLib.ensembleModel.ENSEMBLE_MODE_MAJORITY_RULE_NMS,
+                ]
+                for cons_mode in consensus_modes:
+                    if(cons_mode not in stage_mode_list):
+                        continue
+                    if(imgLib.ensembleModel.ENSEMBLE_MODE_OR_NMS not in stage_mode_list):
+                        continue
+                    for iou0 in stage_iou_threshold_list:
+                        for iou1 in stage_iou_threshold_list:
+                            for iou2 in stage_iou_threshold_list:
+                                for mcm in stage_multi_class_mode_list:
+                                    st0=imgLib.ensembleModel.AutoPipelineSelector._makeStage(
+                                        out_id="s0",
+                                        inputs=model_ids,
+                                        mode=cons_mode,
+                                        iou_threshold=iou0,
+                                        multi_class_mode=mcm,
+                                        model_weights=None
+                                    )
+                                    st1=imgLib.ensembleModel.AutoPipelineSelector._makeStage(
+                                        out_id="s1",
+                                        inputs=["s0",f"m{best_model_index}"],
+                                        mode=imgLib.ensembleModel.ENSEMBLE_MODE_OR_NMS,
+                                        iou_threshold=iou1,
+                                        multi_class_mode=mcm,
+                                        model_weights=[1.0,1.0]
+                                    )
+                                    st2=imgLib.ensembleModel.AutoPipelineSelector._makeStage(
+                                        out_id="s2",
+                                        inputs=["s1"],
+                                        mode=imgLib.ensembleModel.ENSEMBLE_MODE_NMS,
+                                        iou_threshold=iou2,
+                                        multi_class_mode=mcm,
+                                        model_weights=None
+                                    )
+                                    _add_candidate(
+                                        {"stages":[st0,st1,st2],"final_id":"s2"},
+                                        {"template":"consensus_augment_prune","stage0_mode":cons_mode}
+                                    )
+
+                # downsample candidates if too many
+                if(len(candidates)>max_candidates):
+                    candidates=rng.sample(candidates,int(max_candidates))
+
+                # 3) evaluate
+                best=None
+                report=[]
+                t0=time.perf_counter()
+
+                for ci,cand in enumerate(candidates):
+                    try:
+                        score,map_dict,info=imgLib.ensembleModel.AutoPipelineSelector._evalPipeline(
+                            bb_img_json_list_list=bb_img_json_list_list,
+                            pipeline_argv=cand["pipeline_argv"],
+                            eval_index_list=index_list,
+                            template_model_index=best_model_index,
+                            iou_thresholds=search_iou_thresholds,
+                            score_key=score_key
+                        )
+                        rec={
+                            "cand_index":ci,
+                            "score":score,
+                            "desc":cand["desc"],
+                            "template":cand.get("template",""),
+                            "pipeline_argv":cand["pipeline_argv"],
+                        }
+                        # include a few common keys if present
+                        for k in ["mAP50","mAP50_95"]:
+                            if(k in map_dict):
+                                rec[k]=map_dict[k]
+                        report.append(rec)
+
+                        if(best is None or score>best["best_score"]):
+                            best={
+                                "best_pipeline_argv":cand["pipeline_argv"],
+                                "best_score":score,
+                                "best_map_dict":map_dict,
+                                "best_desc":cand["desc"],
+                            }
+
+                        if(verbose and (ci%max(1,int(len(candidates)/10))==0)):
+                            dt=time.perf_counter()-t0
+                            print(f"[AutoPipelineSelector] {ci}/{len(candidates)} score={score:.6f} best={(best['best_score'] if best else 0):.6f} elapsed={dt:.1f}s")
+
+                    except Exception as e:
+                        report.append({
+                            "cand_index":ci,
+                            "score":float("nan"),
+                            "desc":cand.get("desc",""),
+                            "template":cand.get("template",""),
+                            "pipeline_argv":cand.get("pipeline_argv",None),
+                            "error":repr(e),
+                        })
+
+                df=pd.DataFrame(report)
+                if("score" in df.columns):
+                    df=df.sort_values(by="score",ascending=False,na_position="last").reset_index(drop=True)
+
+                if(best is None):
+                    best={"best_pipeline_argv":None,"best_score":float("-inf"),"best_map_dict":None,"best_desc":None}
+
+                total_time=time.perf_counter()-t0
+                return {
+                    **best,
+                    "report_df":df,
+                    "base_model_scores":base_model_scores,
+                    "eval_num_images":len(index_list),
+                    "num_candidates":len(candidates),
+                    "total_time_sec":total_time,
+                    "score_key":score_key,
+                    "search_iou_thresholds":pyExLib.safety_deepcopy(search_iou_thresholds) if search_iou_thresholds is not None else None
+                }
+            
     class YOLOModelLib:
         """
         Class for YOLO model processing.
@@ -27773,6 +28366,26 @@ class imgLib:
                 if(not isinstance(read_yolo_model_obj,imgLib.YOLOModelLib.readYOLOModel)):
                     raise TypeError("Invalid readYOLOModel object.")
                 return read_yolo_model_obj.getModel()
+
+            def extractModelList(self,model_name_list:list):
+                """
+                Extracts a readYOLOModelList containing only the specified model names.
+
+                Args:
+                    model_name_list (list): A list of model names to extract.
+
+                Returns:
+                    readYOLOModelList: A readYOLOModelList containing only the specified model names.
+                """
+                if(not isinstance(model_name_list,list)):
+                    raise TypeError("model_name_list must be a list.")
+                tmp_read_model_list=[]
+                for model_name in model_name_list:
+                    tmp_read_model_list.append(self.getReadYOLOModelDataByName(model_name))
+                return imgLib.YOLOModelLib.readYOLOModelList(
+                    read_yolo_model_obj_list=tmp_read_model_list,
+                    duplicate_mode=self.__duplicate_mode
+                )
         
         @_protectedClass.fileStoreMyLibRegister
         class YOLOModelPredict(_FileStore.FileStoreParser):
@@ -31575,11 +32188,60 @@ class imgLib:
                 """
                 return self.__img_tag_types.copy()
 
+            def getOneModelBBimgJson(
+                self,
+                one_model_name:str,
+                img_name:str,
+            ):
+                """
+                Retrieves the BBimgJson result for a specific one model and image.
+
+                Args:
+                    one_model_name (str): The name of the one model.
+                    img_name (str): The name of the image.
+
+                Returns:
+                    imgLib.BBimgJson: The BBimgJson result for the specified one model and image.
+                """
+                tmp_all_results=self.__getOneModelResult(one_model_name,img_name)
+                if(not isinstance(tmp_all_results,list)):
+                    raise TypeError("tmp_all_results should be a list")
+                if(len(tmp_all_results)!=1):
+                    raise ValueError("tmp_all_results should contain one result")
+                if(not isinstance(tmp_all_results[0],list)):
+                    raise TypeError("Element in tmp_all_results should be a list")
+                
+                tmp_read_model_list=self.__read_model_list.extractModelList([one_model_name])
+
+                tmp_yolo_ann=self.__getYOLOANN(img_name)
+                tmp_yolo_model_predict=imgLib.YOLOModelLib.YOLOModelPredict(
+                    tmp_read_model_list,
+                    tmp_yolo_ann,
+                    gpu_flag=self.__gpu_flag,
+                    yolo_args=self.__yolo_args,
+                    raw_img=tmp_yolo_ann.getImg(draw_shape_flag=False,label_flag=False),
+                    ns=self.__ns,
+                    all_results=tmp_all_results,
+                )
+
+                r=tmp_yolo_model_predict.procEnsembleModel(
+                    mode=imgLib.ensembleModel.ENSEMBLE_MODE_ONE_MODEL,
+                    bb_img_json_mode=True,
+                )
+                if(len(r)!=1):
+                    raise ValueError("Expected exactly one result from procEnsembleModel.")
+                if(not isinstance(r[0],imgLib.BBimgJson)):
+                    raise TypeError("Expected result to be an instance of imgLib.BBimgJson.")
+                result_bb_img_json=r[0]
+                result_bb_img_json.setImgName(img_name=img_name)
+
+                return result_bb_img_json
+
             def getEnsembleBBimgJson(
                 self,
                 ensemble_model_name:str,
                 img_name:str,
-                strict:bool=True
+                strict:bool=True,
             ):
                 """
                 Retrieves the BBimgJson result for a specific ensemble model and image.
@@ -31616,7 +32278,7 @@ class imgLib:
                     raise TypeError(f"tmp_bb should be a BBimgJson instance, got {type(tmp_bb)}")
                 return tmp_bb.copy()
 
-            def generateEnsembleBBBimgJson(
+            def generateEnsembleBBimgJson(
                 self,
                 ensemble_model_name_list:list=None,
                 img_name_list:list=None,
@@ -31649,6 +32311,135 @@ class imgLib:
                             img_name=img_name,
                             strict=strict
                         )
+            
+            def getOneModelBBimgJsonListList(
+                self,
+                one_model_name_list:list=None,
+                img_name_list:list=None,
+            ):
+                """
+                Retrieves BBimgJson results for specified one models and images.
+
+                Args:
+                    one_model_name_list (list, optional): The list of one model names to include. If None, all one model names will be used.
+                    img_name_list (list, optional): The list of image names to include. If None, all image names will be used.
+
+                Returns:
+                    list: A list of lists containing BBimgJson results for each one model and image.
+                """
+                if(one_model_name_list is None):
+                    one_model_name_list=self.getModelNames()
+                if(img_name_list is None):
+                    img_name_list=self.getImageNames()
+                
+                out=[]
+                for one_model_name in one_model_name_list:
+                    model_bb_list=[]
+                    for img_name in img_name_list:
+                        tmp_bb_img_json=self.getOneModelBBimgJson(one_model_name,img_name)
+
+                        model_bb_list.append(tmp_bb_img_json)
+                    out.append(model_bb_list)
+                return out
+
+            def searchBestPipeline(
+                self,
+                one_model_name_list:list=None,
+                img_name_list:list=None,
+                before_calc_one_model:bool=True,
+                include_one_model_read_model_list_obj:bool=True,
+                include_best_func:bool=True,
+
+                search_iou_thresholds:list=None,
+                score_key:str=None,
+
+                stage_mode_list:list=None,
+                stage_iou_threshold_list:list=None,
+                stage_multi_class_mode_list:list=None,
+
+                max_candidates:int=None,
+                max_eval_images:int=None,
+                random_seed:int=0,
+                strict_align:bool=True,
+                verbose:bool=True,
+            )->dict:
+                """
+                Searches for the best ensemble pipeline configuration based on BBimgJson results.
+
+                Args:
+                    one_model_name_list (list, optional): The list of one model names to include. If None, all one model names will be used.
+                    img_name_list (list, optional): The list of image names to include. If None, all image names will be used.
+                    before_calc_one_model (bool, optional): Whether to calculate one model predictions before searching.
+                    include_one_model_read_model_list_obj (bool, optional): Whether to include the read model list object for one models in the result.
+                    include_best_func (bool, optional): Whether to include the best function in the result.
+                    search_iou_thresholds (list, optional): List of IoU thresholds to search.
+                    score_key (str, optional): The score key to use for evaluation.
+                    stage_mode_list (list, optional): List of stage modes for the ensemble pipeline.
+                    stage_iou_threshold_list (list, optional): List of IoU thresholds for each stage.
+                    stage_multi_class_mode_list (list, optional): List of multi-class modes for each stage.
+                    max_candidates (int, optional): Maximum number of candidate pipelines to evaluate.
+                    max_eval_images (int, optional): Maximum number of images to use for evaluation.
+                    random_seed (int, optional): Random seed for reproducibility.
+                    strict_align (bool, optional): Whether to enforce strict alignment of models and images.
+                    verbose (bool, optional): Whether to enable verbose output.
+                
+                Returns:
+                    dict: A dictionary containing the best pipeline configuration and evaluation results.
+                """
+                if(one_model_name_list is None):
+                    one_model_name_list=self.getModelNames()
+                if(img_name_list is None):
+                    img_name_list=self.getImageNames()
+
+                if(before_calc_one_model):
+                    self.calcOneModel()
+
+                bb_img_json_list_list=self.getOneModelBBimgJsonListList(
+                    one_model_name_list=one_model_name_list,
+                    img_name_list=img_name_list
+                )
+
+                r_dict=imgLib.ensembleModel.AutoPipelineSelector.searchBestPipelineFromBBimgJsonListList(
+                    bb_img_json_list_list=bb_img_json_list_list,
+
+                    search_iou_thresholds=search_iou_thresholds,
+                    score_key=score_key,
+
+                    stage_mode_list=stage_mode_list,
+                    stage_iou_threshold_list=stage_iou_threshold_list,
+                    stage_multi_class_mode_list=stage_multi_class_mode_list,
+
+                    max_candidates=max_candidates,
+                    max_eval_images=max_eval_images,
+                    random_seed=random_seed,
+                    strict_align=strict_align,
+                    verbose=verbose,
+                )
+                
+                r_dict["one_model_name_list"]=one_model_name_list
+                one_model_read_model_list_obj=self.read_model_list.extractModelList(one_model_name_list)
+                if(include_one_model_read_model_list_obj):
+                    r_dict["one_model_read_model_list_obj"]=one_model_read_model_list_obj
+                    
+                r_dict["img_name_list"]=img_name_list
+
+                if(include_best_func):
+                    def best_func(
+                        predict_data,
+                        gpu_flag:bool=True,
+                        check_model_names_flag:bool=True,
+                    ):
+                        return imgLib.ensembleModel.procYOLOPredict(
+                            models=one_model_read_model_list_obj.getYOLOModels(),
+                            mode=imgLib.ensembleModel.ENSEMBLE_MODE_PIPELINE,
+                            predict_data=predict_data,
+                            gpu_flag=gpu_flag,
+                            ensemble_args=r_dict["best_pipeline_argv"],
+                            yolo_args=self.__yolo_args,
+                            check_model_names_flag=check_model_names_flag,
+                        )
+                    r_dict["best_func"]=best_func
+                return r_dict
 
     class asciiArtLib:
         """
