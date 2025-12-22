@@ -25957,14 +25957,38 @@ class imgLib:
                     else:
                         w=model_weights[i]
 
-                    tmp_conf_list=yri["boxes"]["conf"]
+                    tmp_xyxy=None
+                    tmp_conf=None
+                    tmp_cls=None
+                    if("boxes" in yri):
+                        tmp_boxes_data=yri["boxes"]
+                        if(
+                            ("xyxy" in tmp_boxes_data) and
+                            ("conf" in tmp_boxes_data) and
+                            ("cls" in tmp_boxes_data)
+                        ):
+                            tmp_xyxy=tmp_boxes_data["xyxy"]
+                            tmp_conf=tmp_boxes_data["conf"]
+                            tmp_cls=tmp_boxes_data["cls"]
+                        else:
+                            raise ValueError("Error : yolo_result_list must be a list of ultralytics.engine.results.Results or dict with 'boxes' key containing 'xyxy', 'conf', and 'cls' keys!")
+                    elif(
+                        ("bboxes" in yri) and
+                        ("scores" in yri) and
+                        ("classes" in yri)
+                    ):
+                        tmp_xyxy=yri["bboxes"]
+                        tmp_conf=yri["scores"]
+                        tmp_cls=yri["classes"]
+                    else:
+                        raise ValueError("Error : yolo_result_list must be a list of ultralytics.engine.results.Results or dict with 'boxes' key containing 'xyxy', 'conf', and 'cls' keys!")
+
                     if(w!=1.0):
-                        tmp_conf_list=[float(c)*w for c in tmp_conf_list]
+                        tmp_conf=[float(c)*w for c in tmp_conf]
 
-                    bboxes.extend(yri["boxes"]["xyxy"])
-                    scores.extend(tmp_conf_list)
-                    classes.extend(yri["boxes"]["cls"])
-
+                    bboxes.extend(tmp_xyxy)
+                    scores.extend(tmp_conf)
+                    classes.extend(tmp_cls)
             else:
                 raise ValueError("Error : yolo_result_list must be a list of ultralytics.engine.results.Results!")
 
@@ -26960,12 +26984,12 @@ class imgLib:
             DEFAULT_AUTO_NAME_FUNC=lambda model_dir_obj:model_dir_obj.name
 
             def __init__(
-                    self,
-                    model_dir:str=None,
-                    is_auto_name:bool=False,
-                    auto_name_func:callable=DEFAULT_AUTO_NAME_FUNC,
-                    data_dict:dict=None
-                ):
+                self,
+                model_dir:str=None,
+                is_auto_name:bool=False,
+                auto_name_func:callable=DEFAULT_AUTO_NAME_FUNC,
+                data_dict:dict=None
+            ):
                 """
                 Initializes the readYOLOModel instance.
 
@@ -26986,7 +27010,7 @@ class imgLib:
                     raise ValueError("Either model_dir or data_dict must be provided.")
                 elif(model_dir is not None and data_dict is not None):
                     raise ValueError("Only one of model_dir or data_dict can be provided.")
-                elif(isinstance(model_dir,str)):
+                elif(isinstance(model_dir,(str,Path))):
                     self.__data_dict["model_dir"]=Path(model_dir)
                     if(not self.__data_dict["model_dir"].exists()):
                         raise FileNotFoundError(f"Model directory {model_dir} does not exist.")
@@ -27017,6 +27041,14 @@ class imgLib:
                             self.__data_dict["results_val_evaluation_json_path"],
                             imgLib.cocoDatasetLib.datasetInfo.resultYOLOTrain.META_RESULT_YOLO_TRAIN_EVALUATION
                         )
+
+                    self.__data_dict["settings_json_path"]=self.__data_dict["model_dir"]/"settings.json"
+                    self.__data_dict["is_settings_json"]=self.__data_dict["settings_json_path"].exists()
+                    if(self.__data_dict["is_settings_json"]):
+                        if(not self.__data_dict["settings_json_path"].exists()):
+                            raise FileNotFoundError(f"Settings JSON file {self.__data_dict['settings_json_path']} does not exist.")
+                        with open(self.__data_dict["settings_json_path"],mode="r",encoding="utf-8") as f:
+                            self.__data_dict["settings_json_data"]=json.load(f)
 
                 elif(isinstance(data_dict,dict)):
                     self.__data_dict=data_dict
