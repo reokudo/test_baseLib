@@ -27649,6 +27649,38 @@ class imgLib:
                 for comb,new_read_yolo_model_list in self.generatorCombinationsModelWithComb(r):
                     yield new_read_yolo_model_list
 
+            def generatorPermutationsModelWithPerm(self,r:int):
+                """
+                Generates all permutations of YOLO model objects from the list along with their permutations.
+
+                Args:
+                    r (int): The length of the permutations.
+
+                Yields:
+                    tuple: A tuple containing the permutation indices and the corresponding readYOLOModelList.
+
+                Raises:
+                    TypeError: If any readYOLOModel object is invalid.
+                """
+                for perm in itertools.permutations(list(range(len(self.__read_yolo_model_obj_list))),r):
+                    yield perm,imgLib.YOLOModelLib.readYOLOModelList(
+                        [self.__read_yolo_model_obj_list[i] for i in perm],
+                        duplicate_mode=self.__duplicate_mode
+                    )
+
+            def generatorPermutationsModel(self,r:int):
+                """
+                Generates all permutations of YOLO model objects from the list.
+
+                Args:
+                    r (int): The length of the permutations.
+
+                Yields:
+                    YOLOModel: The next YOLOModel object in the list.
+                """
+                for perm,new_read_yolo_model_list in self.generatorPermutationsModelWithPerm(r):
+                    yield new_read_yolo_model_list
+
             def getYOLOModels(self):
                 """
                 Returns a list of all YOLO model objects in the list.
@@ -28042,6 +28074,28 @@ class imgLib:
                         all_results=new_all_results
                     )
 
+            def generatorPermutationsModel(self,r:int):
+                """
+                Generates permutations of the YOLO model list.
+
+                Args:
+                    r (int): The length of the permutations.
+
+                Yields:
+                    YOLOModelPredict: The YOLO model prediction object.
+                """
+                for perm,new_yolo_model_list in self.__read_yolo_model_list_obj.generatorPermutationsModelWithPerm(r):
+                    new_all_results=[self.__all_results[i] for i in perm]
+
+                    yield imgLib.YOLOModelLib.YOLOModelPredict(
+                        read_yolo_model_list_obj=new_yolo_model_list,
+                        yolo_ann_obj=self.__yolo_ann_obj,
+
+                        raw_img=self.__raw_img,
+                        ns=self.__ns,
+                        all_results=new_all_results
+                    )
+
             @staticmethod
             def SAMPLE_GENERATOR_PREDICT_COMBINATIONS_MODEL_CONFIG():
                 """
@@ -28116,10 +28170,17 @@ class imgLib:
                     if(not isinstance(predict_config_dict,dict)):
                         raise TypeError("Each item in predict_config_list must be a dictionary.")
                     
-                    if("combinations_r" not in predict_config_dict):
-                        raise KeyError("Each dictionary in predict_config_list must contain 'combinations_r' key.")
-                    elif(not isinstance(predict_config_dict["combinations_r"],int)):
+                    has_combinations_r=("combinations_r" in predict_config_dict)
+                    has_permutation_r=("permutation_r" in predict_config_dict)
+
+                    if(has_combinations_r and has_permutation_r):
+                        raise KeyError("Each dictionary in predict_config_list must contain only one of 'combinations_r' or 'permutation_r' key.")
+                    elif((not has_combinations_r) and (not has_permutation_r)):
+                        raise KeyError("Each dictionary in predict_config_list must contain 'combinations_r' or 'permutation_r' key.")
+                    elif(has_combinations_r and (not isinstance(predict_config_dict["combinations_r"],int))):
                         raise TypeError("'combinations_r' must be an integer.")
+                    elif(has_permutation_r and (not isinstance(predict_config_dict["permutation_r"],int))):
+                        raise TypeError("'permutation_r' must be an integer.")
 
                     if("config_for_each_combination" not in predict_config_dict):
                         raise KeyError("Each dictionary in predict_config_list must contain 'config_for_each_combination' key.")
@@ -28148,7 +28209,14 @@ class imgLib:
                     KeyError: If any required key is missing from the configuration dictionaries.
                 """
                 for predict_config_dict in imgLib.YOLOModelLib.YOLOModelPredict._generatePredictConfigListForR(predict_config_list):
-                    for comb_yolo_model_predict in self.generatorCombinationsModel(predict_config_dict["combinations_r"]):
+                    if("combinations_r" in predict_config_dict):
+                        comb_gen=self.generatorCombinationsModel(predict_config_dict["combinations_r"])
+                    elif("permutation_r" in predict_config_dict):
+                        comb_gen=self.generatorPermutationsModel(predict_config_dict["permutation_r"])
+                    else:
+                        raise KeyError("predict_config_dict must contain either 'combinations_r' or 'permutation_r' key.")
+
+                    for comb_yolo_model_predict in comb_gen:
                         for config in predict_config_dict["config_for_each_combination"]:
                             if(not isinstance(config,dict)):
                                 raise TypeError("Each item in 'config_for_each_combination' must be a dictionary.")
@@ -28221,7 +28289,14 @@ class imgLib:
                     raise TypeError("read_yolo_model_list_obj must be an instance of readYOLOModelList.")
                 
                 for predict_config_dict in imgLib.YOLOModelLib.YOLOModelPredict._generatePredictConfigListForR(predict_config_list):
-                    for new_yolo_model_list in read_yolo_model_list_obj.generatorCombinationsModel(predict_config_dict["combinations_r"]):
+                    if("combinations_r" in predict_config_dict):
+                        model_list_gen=read_yolo_model_list_obj.generatorCombinationsModel(predict_config_dict["combinations_r"])
+                    elif("permutation_r" in predict_config_dict):
+                        model_list_gen=read_yolo_model_list_obj.generatorPermutationsModel(predict_config_dict["permutation_r"])
+                    else:
+                        raise KeyError("predict_config_dict must contain either 'combinations_r' or 'permutation_r' key.")
+
+                    for new_yolo_model_list in model_list_gen:
                         for config in predict_config_dict["config_for_each_combination"]:
                             if(not isinstance(new_yolo_model_list,imgLib.YOLOModelLib.readYOLOModelList)):
                                 raise TypeError("Expected new_yolo_model_list to be an instance of readYOLOModelList.")
