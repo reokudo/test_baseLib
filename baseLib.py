@@ -25865,6 +25865,7 @@ class imgLib:
         ENSEMBLE_MODE_NMW="NMW"
         ENSEMBLE_MODE_WBF="WBF"
         ENSEMBLE_MODE_CENTER_CLUSTER="CenterCluster"
+        ENSEMBLE_MODE_PIPELINE="PipeLine"
 
         ENSEMBLE_MULTI_CLASS_MODE_EACH_CLASS="EachClass"
         ENSEMBLE_MULTI_CLASS_MODE_ALL_CLASS_TOGETHER="AllClassTogether"
@@ -25908,216 +25909,330 @@ class imgLib:
 
             models_num=len(yolo_result_list) # Number of models
 
-            # model_weights
-            model_weights=yolo_ensemble_argv.pop("model_weights",None)
-            if(model_weights!=None):
-                if(not isinstance(model_weights,list)):
-                    raise ValueError("Error : \"model_weights\" must be a list!")
-                if(len(model_weights)!=models_num):
-                    raise ValueError("Error : The length of \"model_weights\" must be equal to the number of models!")
-                try:
-                    model_weights=[float(w) for w in model_weights]
-                except Exception:
-                    raise ValueError("Error : \"model_weights\" must contain numeric values!")
-
-            if(all([isinstance(yri,ultralytics.engine.results.Results) for yri in yolo_result_list])):                
-                if(not IMPORT_TORCH_FLAG):
-                    raise RuntimeError("Error : The torch package is not installed!")
-                
-                for i,yri in enumerate(yolo_result_list):
-                    if(model_weights==None):
-                        w=1.0
-                    else:
-                        w=model_weights[i]
-                    
-                    bboxes.append(yri.boxes.xyxy)
-                    if(w==1.0):
-                        scores.append(yri.boxes.conf)
-                    else:
-                        scores.append(yri.boxes.conf*w)
-                    classes.append(yri.boxes.cls)
-
-                bboxes=torch.cat(bboxes)
-                scores=torch.cat(scores)
-                classes=torch.cat(classes)
-
-                bboxes=bboxes.tolist()
-                scores=scores.tolist()
-                classes=classes.tolist()
-
-            elif(all([isinstance(yri,dict) for yri in yolo_result_list])):
-                for i,yri in enumerate(yolo_result_list):
-                    if("boxes" not in yri):
-                        raise ValueError("Error : yolo_result_list must be a list of ultralytics.engine.results.Results or dict with 'boxes' key!") 
-                    if("xyxy" not in yri["boxes"] or "conf" not in yri["boxes"] or "cls" not in yri["boxes"]):
-                        raise ValueError("Error : yolo_result_list must be a list of ultralytics.engine.results.Results or dict with 'boxes' key containing 'xyxy', 'conf', and 'cls' keys!")
-
-                    if(model_weights==None):
-                        w=1.0
-                    else:
-                        w=model_weights[i]
-
-                    tmp_xyxy=None
-                    tmp_conf=None
-                    tmp_cls=None
-                    if("boxes" in yri):
-                        tmp_boxes_data=yri["boxes"]
-                        if(
-                            ("xyxy" in tmp_boxes_data) and
-                            ("conf" in tmp_boxes_data) and
-                            ("cls" in tmp_boxes_data)
-                        ):
-                            tmp_xyxy=tmp_boxes_data["xyxy"]
-                            tmp_conf=tmp_boxes_data["conf"]
-                            tmp_cls=tmp_boxes_data["cls"]
-                        else:
-                            raise ValueError("Error : yolo_result_list must be a list of ultralytics.engine.results.Results or dict with 'boxes' key containing 'xyxy', 'conf', and 'cls' keys!")
-                    elif(
-                        ("bboxes" in yri) and
-                        ("scores" in yri) and
-                        ("classes" in yri)
-                    ):
-                        tmp_xyxy=yri["bboxes"]
-                        tmp_conf=yri["scores"]
-                        tmp_cls=yri["classes"]
-                    else:
-                        raise ValueError("Error : yolo_result_list must be a list of ultralytics.engine.results.Results or dict with 'boxes' key containing 'xyxy', 'conf', and 'cls' keys!")
-
-                    if(w!=1.0):
-                        tmp_conf=[float(c)*w for c in tmp_conf]
-
-                    bboxes.extend(tmp_xyxy)
-                    scores.extend(tmp_conf)
-                    classes.extend(tmp_cls)
-            else:
-                raise ValueError("Error : yolo_result_list must be a list of ultralytics.engine.results.Results!")
-
-            if(not(len(bboxes)==len(scores) and len(bboxes)==len(classes))):
-                raise ValueError("Error : The lengths of bboxes, scores, and classes are not aligned!") 
-
-            if(mode==None or mode==imgLib.ensembleModel.ENSEMBLE_MODE_ONE_MODEL):
-                if(models_num!=1):
-                    raise ValueError("In OneModel mode, the number of models must be 1!")
-                return imgLib.ensembleModel.OneModel(
-                    bboxes=bboxes,
-                    scores=scores,
-                    classes=classes,
-                    iou_threshold=None,
-                    multi_class_mode=multi_class_mode
-                )
-
-            elif(mode==imgLib.ensembleModel.ENSEMBLE_MODE_NMS):
-                return imgLib.ensembleModel.NMS(
-                    bboxes=bboxes,
-                    scores=scores,
-                    classes=classes,
-                    iou_threshold=iou_threshold,
-                    multi_class_mode=multi_class_mode
+            if(mode==imgLib.ensembleModel.ENSEMBLE_MODE_PIPELINE):
+                return imgLib.ensembleModel._ensemblePipeline(
+                    yolo_result_list,
+                    yolo_ensemble_argv
                 )
             
-            elif(mode==imgLib.ensembleModel.ENSEMBLE_MODE_SOFT_NMS):
-                return imgLib.ensembleModel.softNMS(
-                    bboxes=bboxes,
-                    scores=scores,
-                    classes=classes,
-                    iou_threshold=iou_threshold,
-                    multi_class_mode=multi_class_mode
-                )
+            else:
+                # model_weights
+                model_weights=yolo_ensemble_argv.pop("model_weights",None)
+                if(model_weights!=None):
+                    if(not isinstance(model_weights,list)):
+                        raise ValueError("Error : \"model_weights\" must be a list!")
+                    if(len(model_weights)!=models_num):
+                        raise ValueError("Error : The length of \"model_weights\" must be equal to the number of models!")
+                    try:
+                        model_weights=[float(w) for w in model_weights]
+                    except Exception:
+                        raise ValueError("Error : \"model_weights\" must contain numeric values!")
 
-            elif(mode==imgLib.ensembleModel.ENSEMBLE_MODE_NVO_NMS):
-                if("num_thread" in yolo_ensemble_argv):
+                if(all([isinstance(yri,ultralytics.engine.results.Results) for yri in yolo_result_list])):                
+                    if(not IMPORT_TORCH_FLAG):
+                        raise RuntimeError("Error : The torch package is not installed!")
+                    
+                    for i,yri in enumerate(yolo_result_list):
+                        if(model_weights==None):
+                            w=1.0
+                        else:
+                            w=model_weights[i]
+                        
+                        bboxes.append(yri.boxes.xyxy)
+                        if(w==1.0):
+                            scores.append(yri.boxes.conf)
+                        else:
+                            scores.append(yri.boxes.conf*w)
+                        classes.append(yri.boxes.cls)
+
+                    bboxes=torch.cat(bboxes)
+                    scores=torch.cat(scores)
+                    classes=torch.cat(classes)
+
+                    bboxes=bboxes.tolist()
+                    scores=scores.tolist()
+                    classes=classes.tolist()
+
+                elif(all([isinstance(yri,dict) for yri in yolo_result_list])):
+                    for i,yri in enumerate(yolo_result_list):
+                        if(model_weights==None):
+                            w=1.0
+                        else:
+                            w=model_weights[i]
+
+                        tmp_xyxy=None
+                        tmp_conf=None
+                        tmp_cls=None
+                        if("boxes" in yri):
+                            tmp_boxes_data=yri["boxes"]
+                            if(
+                                ("xyxy" in tmp_boxes_data) and
+                                ("conf" in tmp_boxes_data) and
+                                ("cls" in tmp_boxes_data)
+                            ):
+                                tmp_xyxy=tmp_boxes_data["xyxy"]
+                                tmp_conf=tmp_boxes_data["conf"]
+                                tmp_cls=tmp_boxes_data["cls"]
+                            else:
+                                raise ValueError("Error : yolo_result_list must be a list of ultralytics.engine.results.Results or dict with 'boxes' key containing 'xyxy', 'conf', and 'cls' keys!")
+                        elif(
+                            ("bboxes" in yri) and
+                            ("scores" in yri) and
+                            ("classes" in yri)
+                        ):
+                            tmp_xyxy=yri["bboxes"]
+                            tmp_conf=yri["scores"]
+                            tmp_cls=yri["classes"]
+                        else:
+                            raise ValueError("Error : yolo_result_list must be a list of ultralytics.engine.results.Results or dict with 'boxes' key containing 'xyxy', 'conf', and 'cls' keys!")
+
+                        if(w!=1.0):
+                            tmp_conf=[float(c)*w for c in tmp_conf]
+
+                        bboxes.extend(tmp_xyxy)
+                        scores.extend(tmp_conf)
+                        classes.extend(tmp_cls)
+                else:
+                    raise ValueError("Error : yolo_result_list must be a list of ultralytics.engine.results.Results!")
+
+                if(not(len(bboxes)==len(scores) and len(bboxes)==len(classes))):
+                    raise ValueError("Error : The lengths of bboxes, scores, and classes are not aligned!") 
+
+                if(mode==None or mode==imgLib.ensembleModel.ENSEMBLE_MODE_ONE_MODEL):
+                    if(models_num!=1):
+                        raise ValueError("In OneModel mode, the number of models must be 1!")
+                    return imgLib.ensembleModel.OneModel(
+                        bboxes=bboxes,
+                        scores=scores,
+                        classes=classes,
+                        iou_threshold=None,
+                        multi_class_mode=multi_class_mode
+                    )
+
+                elif(mode==imgLib.ensembleModel.ENSEMBLE_MODE_NMS):
+                    return imgLib.ensembleModel.NMS(
+                        bboxes=bboxes,
+                        scores=scores,
+                        classes=classes,
+                        iou_threshold=iou_threshold,
+                        multi_class_mode=multi_class_mode
+                    )
+                
+                elif(mode==imgLib.ensembleModel.ENSEMBLE_MODE_SOFT_NMS):
+                    return imgLib.ensembleModel.softNMS(
+                        bboxes=bboxes,
+                        scores=scores,
+                        classes=classes,
+                        iou_threshold=iou_threshold,
+                        multi_class_mode=multi_class_mode
+                    )
+
+                elif(mode==imgLib.ensembleModel.ENSEMBLE_MODE_NVO_NMS):
+                    if("num_thread" in yolo_ensemble_argv):
+                        return imgLib.ensembleModel.NVONMS(
+                            bboxes=bboxes,
+                            scores=scores,
+                            classes=classes,
+                            iou_threshold=iou_threshold,
+                            multi_class_mode=multi_class_mode,
+                            num_thread=yolo_ensemble_argv["num_thread"]
+                        )
+                    else:
+                        raise ValueError("In NVONMS mode, a 'num_thread' argument is required!")
+                    
+                elif(mode==imgLib.ensembleModel.ENSEMBLE_MODE_MAJORITY_RULE_NMS):
                     return imgLib.ensembleModel.NVONMS(
                         bboxes=bboxes,
                         scores=scores,
                         classes=classes,
                         iou_threshold=iou_threshold,
                         multi_class_mode=multi_class_mode,
-                        num_thread=yolo_ensemble_argv["num_thread"]
+                        num_thread=math.floor(models_num/2)
                     )
+
+                elif(mode==imgLib.ensembleModel.ENSEMBLE_MODE_AND_NMS):
+                    return imgLib.ensembleModel.NVONMS(
+                        bboxes=bboxes,
+                        scores=scores,
+                        classes=classes,
+                        iou_threshold=iou_threshold,
+                        multi_class_mode=multi_class_mode,
+                        num_thread=models_num
+                    )
+
+                elif(mode==imgLib.ensembleModel.ENSEMBLE_MODE_OR_NMS):
+                    return imgLib.ensembleModel.NVONMS(
+                        bboxes=bboxes,
+                        scores=scores,
+                        classes=classes,
+                        iou_threshold=iou_threshold,
+                        multi_class_mode=multi_class_mode,
+                        num_thread=0
+                    )
+                
+                elif(mode==imgLib.ensembleModel.ENSEMBLE_MODE_NMW):
+                    return imgLib.ensembleModel.NMW(
+                        bboxes=bboxes,
+                        scores=scores,
+                        classes=classes,
+                        iou_threshold=iou_threshold,
+                        multi_class_mode=multi_class_mode
+                    )
+
+                elif(mode==imgLib.ensembleModel.ENSEMBLE_MODE_WBF):
+                    return imgLib.ensembleModel.WBF(
+                        bboxes=bboxes,
+                        scores=scores,
+                        classes=classes,
+                        iou_threshold=iou_threshold,
+                        multi_class_mode=multi_class_mode,
+                        n=models_num
+                    )
+                    
+                elif(mode==imgLib.ensembleModel.ENSEMBLE_MODE_CENTER_CLUSTER):
+                    dist_threshold=yolo_ensemble_argv.get(
+                        "dist_threshold",
+                        imgLib.ensembleModel.CENTER_CLUSTER_DEFAULT_DIST_THRESHOLD
+                    )
+                    size_ratio_threshold=yolo_ensemble_argv.get(
+                        "size_ratio_threshold",
+                        imgLib.ensembleModel.CENTER_CLUSTER_DEFAULT_SIZE_RATIO_THRESHOLD
+                    )
+                    overlap_ratio_threshold=yolo_ensemble_argv.get(
+                        "overlap_ratio_threshold",
+                        imgLib.ensembleModel.CENTER_CLUSTER_DEFAULT_OVERLAP_RATIO_THRESHOLD
+                    )
+                    min_cluster_size=yolo_ensemble_argv.get(
+                        "min_cluster_size",
+                        imgLib.ensembleModel.CENTER_CLUSTER_DEFAULT_MIN_CLUSTER_SIZE
+                    )
+
+                    return imgLib.ensembleModel.CenterCluster(
+                        bboxes=bboxes,
+                        scores=scores,
+                        classes=classes,
+                        iou_threshold=iou_threshold,
+                        multi_class_mode=multi_class_mode,
+                        dist_threshold=dist_threshold,
+                        size_ratio_threshold=size_ratio_threshold,
+                        overlap_ratio_threshold=overlap_ratio_threshold,
+                        min_cluster_size=min_cluster_size
+                    )
+                
                 else:
-                    raise ValueError("In NVONMS mode, a 'num_thread' argument is required!")
-                
-            elif(mode==imgLib.ensembleModel.ENSEMBLE_MODE_MAJORITY_RULE_NMS):
-                return imgLib.ensembleModel.NVONMS(
-                    bboxes=bboxes,
-                    scores=scores,
-                    classes=classes,
-                    iou_threshold=iou_threshold,
-                    multi_class_mode=multi_class_mode,
-                    num_thread=math.floor(models_num/2)
-                )
+                    raise ValueError(f"Invalid \"mode\"! => \"{mode}\"")
 
-            elif(mode==imgLib.ensembleModel.ENSEMBLE_MODE_AND_NMS):
-                return imgLib.ensembleModel.NVONMS(
-                    bboxes=bboxes,
-                    scores=scores,
-                    classes=classes,
-                    iou_threshold=iou_threshold,
-                    multi_class_mode=multi_class_mode,
-                    num_thread=models_num
-                )
+        @staticmethod
+        def _ensemblePipeline(
+            yolo_result_list:list,
+            yolo_ensemble_argv:dict,
+        ):
+            """
+            Ensemble function in Pipeline mode for YOLO results.
 
-            elif(mode==imgLib.ensembleModel.ENSEMBLE_MODE_OR_NMS):
-                return imgLib.ensembleModel.NVONMS(
-                    bboxes=bboxes,
-                    scores=scores,
-                    classes=classes,
-                    iou_threshold=iou_threshold,
-                    multi_class_mode=multi_class_mode,
-                    num_thread=0
-                )
+            Args:
+                yolo_result_list (list): List of YOLO results.
+                yolo_ensemble_argv (dict): Arguments for the ensemble function.
             
-            elif(mode==imgLib.ensembleModel.ENSEMBLE_MODE_NMW):
-                return imgLib.ensembleModel.NMW(
-                    bboxes=bboxes,
-                    scores=scores,
-                    classes=classes,
-                    iou_threshold=iou_threshold,
-                    multi_class_mode=multi_class_mode
-                )
+            Returns:
+                dict: Dictionary containing bounding boxes, scores, and class numbers.
 
-            elif(mode==imgLib.ensembleModel.ENSEMBLE_MODE_WBF):
-                return imgLib.ensembleModel.WBF(
-                    bboxes=bboxes,
-                    scores=scores,
-                    classes=classes,
-                    iou_threshold=iou_threshold,
-                    multi_class_mode=multi_class_mode,
-                    n=models_num
-                )
-                
-            elif(mode==imgLib.ensembleModel.ENSEMBLE_MODE_CENTER_CLUSTER):
-                dist_threshold=yolo_ensemble_argv.get(
-                    "dist_threshold",
-                    imgLib.ensembleModel.CENTER_CLUSTER_DEFAULT_DIST_THRESHOLD
-                )
-                size_ratio_threshold=yolo_ensemble_argv.get(
-                    "size_ratio_threshold",
-                    imgLib.ensembleModel.CENTER_CLUSTER_DEFAULT_SIZE_RATIO_THRESHOLD
-                )
-                overlap_ratio_threshold=yolo_ensemble_argv.get(
-                    "overlap_ratio_threshold",
-                    imgLib.ensembleModel.CENTER_CLUSTER_DEFAULT_OVERLAP_RATIO_THRESHOLD
-                )
-                min_cluster_size=yolo_ensemble_argv.get(
-                    "min_cluster_size",
-                    imgLib.ensembleModel.CENTER_CLUSTER_DEFAULT_MIN_CLUSTER_SIZE
-                )
+            Raises:
+                ValueError: If the yolo_result_list is not a list or if its elements are not of the correct type.
+            """
+            if(not isinstance(yolo_result_list,list)):
+                raise ValueError("Error : yolo_result_list must be a list of YOLO results!")
 
-                return imgLib.ensembleModel.CenterCluster(
-                    bboxes=bboxes,
-                    scores=scores,
-                    classes=classes,
-                    iou_threshold=iou_threshold,
-                    multi_class_mode=multi_class_mode,
-                    dist_threshold=dist_threshold,
-                    size_ratio_threshold=size_ratio_threshold,
-                    overlap_ratio_threshold=overlap_ratio_threshold,
-                    min_cluster_size=min_cluster_size
-                )
+            if(not isinstance(yolo_ensemble_argv,dict)):
+                raise ValueError("Error : yolo_ensemble_argv must be a dict!")
             
-            else:
-                raise ValueError(f"Invalid \"mode\"! => \"{mode}\"")
+            if("model_weights" in yolo_ensemble_argv):
+                raise ValueError("In Pipeline mode, \"model_weights\" must be specified in each stage!")
+            
+            stages=yolo_ensemble_argv.get("stages",None)
+            if(stages is None):
+                raise ValueError("In Pipeline mode, a 'stages' argument is required!")
+            if(not isinstance(stages,list)):
+                raise ValueError("In Pipeline mode, 'stages' must be a list!")
+
+            final_id=yolo_ensemble_argv.get("final_id",None)
+
+            results_map={}
+            for i,yri in enumerate(yolo_result_list):
+                results_map[i]=yri
+                results_map[str(i)]=yri
+                results_map[f"m{i}"]=yri
+
+            def _resolve_input(in_id):
+                if(in_id in results_map):
+                    return results_map[in_id]
+                if(isinstance(in_id,str) and in_id.isdigit()):
+                    ii=int(in_id)
+                    if(ii in results_map):
+                        return results_map[ii]
+                raise ValueError(f"In Pipeline mode, input id {in_id} not found!")
+
+            last_out_id=None
+            for stage_i,st in enumerate(stages):
+                if(not isinstance(st,dict)):
+                    raise ValueError("In Pipeline mode, each stage must be a dict!")
+
+                stage_mode=st.get("mode",None)
+                if(stage_mode is None):
+                    raise ValueError("In Pipeline mode, each stage requires 'mode'!")
+                if(stage_mode==imgLib.ensembleModel.ENSEMBLE_MODE_PIPELINE):
+                    raise ValueError("Nested Pipeline mode is not supported!")
+
+                out_id=st.get("out_id",None)
+                if(out_id is None):
+                    raise ValueError("In Pipeline mode, each stage requires 'out_id'!")
+
+                inputs=st.get("inputs",None)
+                if(inputs is None):
+                    raise ValueError("In Pipeline mode, each stage requires 'inputs'!")
+                if(not isinstance(inputs,list)):
+                    raise ValueError("In Pipeline mode, 'inputs' must be a list!")
+
+                stage_iou_threshold=st.get(
+                    "iou_threshold",
+                    imgLib.ensembleModel.DEFAULT_IOU_THRESHOLD
+                )
+                stage_multi_class_mode=st.get(
+                    "multi_class_mode",
+                    imgLib.ensembleModel.ENSEMBLE_MULTI_CLASS_MODE_EACH_CLASS
+                )
+
+                stage_args=st.get("ensemble_args",None)
+                if(stage_args is None):
+                    stage_args={}
+                if(not isinstance(stage_args,dict)):
+                    raise ValueError("In Pipeline mode, 'ensemble_args' must be a dict!")
+                stage_args=pyExLib.safety_deepcopy(stage_args)
+
+                if("model_weights" in st):
+                    stage_args["model_weights"]=pyExLib.safety_deepcopy(st["model_weights"])
+
+                stage_input_list=[_resolve_input(in_id) for in_id in inputs]
+
+                out_dict=imgLib.ensembleModel.EnsembleFunc4YOLOResult(
+                    mode=stage_mode,
+                    yolo_result_list=stage_input_list,
+                    iou_threshold=stage_iou_threshold,
+                    multi_class_mode=stage_multi_class_mode,
+                    **stage_args
+                )
+
+                if(out_id in results_map):
+                    raise ValueError(f"In Pipeline mode, out_id {out_id} already exists!")
+                
+                results_map[out_id]=out_dict
+                last_out_id=out_id
+
+            if(final_id is None):
+                final_id=last_out_id
+            if(final_id not in results_map):
+                raise ValueError(f"In Pipeline mode, final_id {final_id} not found!")
+            return results_map[final_id]
 
         @staticmethod
         def multiClassesFunc(func:callable,bboxes:list,scores:list,classes:list,iou_threshold:float,multi_class_mode:str,**argv):
