@@ -31353,6 +31353,81 @@ class imgLib:
                 """
                 return self.__img_tag_types.copy()
 
+            def getEnsembleBBimgJson(
+                self,
+                ensemble_model_name:str,
+                img_name:str,
+                strict:bool=True
+            ):
+                """
+                Retrieves the BBimgJson result for a specific ensemble model and image.
+
+                Args:
+                    ensemble_model_name (str): The name of the ensemble model.
+                    img_name (str): The name of the image.
+                    strict (bool, optional): Whether to enforce strict checking for done predictions.
+
+                Returns:
+                    imgLib.BBimgJson|None: The BBimgJson result for the specified ensemble model and image, or None if not done.
+
+                Raises:
+                    ValueError: If the ensemble model name or image name is not found, or if strict is True and the prediction is not done yet.
+                """
+                if(ensemble_model_name not in self.__done_ensemble_model_predict_matrix.columns):
+                    raise ValueError(f"Ensemble model name {ensemble_model_name} not found")
+                if(img_name not in self.__done_ensemble_model_predict_matrix.index):
+                    raise ValueError(f"Image name {img_name} not found")
+
+                done=bool(self.__done_ensemble_model_predict_matrix.loc[img_name,ensemble_model_name])
+                if(strict and (not done)):
+                    raise ValueError(f"Ensemble prediction for {ensemble_model_name} and image {img_name} not done yet")
+                if(not done):
+                    return None
+
+                key=self.__ensemble_model_result_fsv_key(ensemble_model_name,img_name)
+
+                if(key not in self.__ensemble_model_result_fsv):
+                    raise KeyError(f"Ensemble result key not found in fsv: {key}")
+
+                tmp_bb=self.__ensemble_model_result_fsv.loadData(key)
+                if(not isinstance(tmp_bb,imgLib.BBimgJson)):
+                    raise TypeError(f"tmp_bb should be a BBimgJson instance, got {type(tmp_bb)}")
+                return tmp_bb.copy()
+
+            def generateEnsembleBBBimgJson(
+                self,
+                ensemble_model_name_list:list=None,
+                img_name_list:list=None,
+                strict:bool=True,
+            ):
+                """
+                Generates BBimgJson results for specified ensemble models and images.
+
+                Args:
+                    ensemble_model_name_list (list, optional): The list of ensemble model names to include. If None, all ensemble model names will be used.
+                    img_name_list (list, optional): The list of image names to include. If None, all image names will be used.
+                    strict (bool, optional): Whether to enforce strict checking for done predictions.
+
+                Yields:
+                    imgLib.BBimgJson: The BBimgJson result for each specified ensemble model and image.
+                """
+                if(ensemble_model_name_list is None):
+                    ensemble_model_name_list=self.getEnsembleModelNames()
+                if(img_name_list is None):
+                    img_name_list=self.getImageNames()
+                
+                for emn in ensemble_model_name_list:
+                    if(emn not in self.__done_ensemble_model_predict_matrix.columns):
+                        raise ValueError(f"Ensemble model name {emn} not found")
+                    for img_name in img_name_list:
+                        if(img_name not in self.__done_ensemble_model_predict_matrix.index):
+                            raise ValueError(f"Image name {img_name} not found")
+                        yield self.getEnsembleBBimgJson(
+                            ensemble_model_name=emn,
+                            img_name=img_name,
+                            strict=strict
+                        )
+
     class asciiArtLib:
         """
         ASCII art generation library.
