@@ -27132,13 +27132,446 @@ class imgLib:
                 return float(map_dict[score_key]),map_dict
 
             @staticmethod
+            def _getMetricByKeyPath(d:dict,key_path:str,default=None):
+                """
+                Safely get nested dict value by dot-separated key path.
+
+                Args:
+                    d (dict): Input dictionary.
+                    key_path (str): Dot-separated key path.
+                    default: Default value if key path not found.
+
+                Returns:
+                    Value at the specified key path or default.
+                """
+                if(d is None or key_path is None):
+                    return default
+                if(not isinstance(key_path,str)):
+                    return default
+                cur=d
+                for k in key_path.split("."):
+                    if(isinstance(cur,dict) and k in cur):
+                        cur=cur[k]
+                    else:
+                        return default
+                return cur
+
+            @staticmethod
+            def CalcDetMetricsFromBBimgJsonList(
+                bb_img_json_list:list,
+                iou_threshold:float=0.5,
+                score_threshold:float=None,
+                bbox_key:str="bboxes",
+                cls_key:str="classes",
+                score_key:str="scores",
+                gt_block_key:str="YOLOANN_obj_additional_info",
+                gt_bbox_key:str="ann",
+                gt_cls_key:str="ann_cls_nums",
+                eps:float=1e-12
+            )->dict:
+                """
+                Calculates simple detection stats (precision/recall/F1 etc.) from BBimgJson list.
+
+                Notes:
+                    - Matching policy: greedy by descending prediction score, one-to-one matching.
+                    - A matched pair is counted as TP only if (IoU>=iou_threshold) and (class matches).
+                      If IoU matches but class differs, it is treated as FP for predicted class and FN for GT class.
+
+                Returns:
+                    dict: {
+                        "iou_threshold": float,
+                        "score_threshold": float|None,
+                        "overall": {"tp","fp","fn","precision","recall","f1","det_accuracy","matched_pairs","match_accuracy"},
+                        "per_class": {class_name: {...}, ...},
+                        "confusion": {gt_class_name: {pred_class_name: count, ...}, ...}
+                    }
+                """
+                # Build class-id to name map (best-effort, same policy as CalcMAPFromBBimgJsonList)
+                class_id_to_name={}
+                for bb in bb_img_json_list:
+                    if(not isinstance(bb,imgLib.BBimgJson)):
+                        raise TypeError("bb_img_json_list must be a list of BBimgJson objects.")
+                    try:
+                        names=bb.getClsNames()
+                        if(isinstance(names,list)):
+                            for i,v in enumerate(names):
+                                class_id_to_name.setdefault(int(i),str(v))
+                        d=bb.getDict()
+                        if(isinstance(d,dict)):
+                            gt_block=d.get(gt_block_key,{}) or {}
+                            gt_names=gt_block.get("class_names_data",None)
+                            if(isinstance(gt_names,list)):
+                                for i,v in enumerate(gt_names):
+                                    class_id_to_name.setdefault(int(i),str(v))
+                    except Exception:
+                        pass
+
+                if(len(class_id_to_name)==0):
+                    class_id_to_name={0:"class_0"}
+
+                def _clsname(cid:int)->str:
+                    return class_id_to_name.get(int(cid),f"class_{int(cid)}")
+
+                # counters
+                per_class={}
+                confusion={}
+                matched_pairs=0
+                correct_pairs=0
+
+                for bb in bb_img_json_list:
+                    ann=bb.getANN() or {}
+                    pred_boxes=ann.get(bbox_key,[]) or []
+                    pred_classes=ann.get(cls_key,[]) or []
+                    pred_scores=ann.get(score_key,[]) or []
+
+                    n_pred=min(len(pred_boxes),len(pred_classes))
+                    if(len(pred_scores)<n_pred):
+                        pred_scores=list(pred_scores)+[1.0]*(n_pred-len(pred_scores))
+                    n_pred=min(n_pred,len(pred_scores))
+
+                    # build pred list
+                    preds=[]
+                    for i in range(n_pred):
+                        try:
+                            sc=float(pred_scores[i])
+                        except Exception:
+                            sc=0.0
+                        if(score_threshold is not None and sc<float(score_threshold)):
+                            continue
+                        try:
+                            cid=int(pred_classes[i])
+                        except Exception:
+                            continue
+                        preds.append((sc,cid,pred_boxes[i]))
+                    preds=sorted(preds,key=lambda x:x[0],reverse=True)
+
+                    d=bb.getDict() or {}
+                    gt_block=d.get(gt_block_key,{}) or {}
+                    gt_boxes=gt_block.get(gt_bbox_key,[]) or []
+                    gt_classes=gt_block.get(gt_cls_key,[]) or []
+                    n_gt=min(len(gt_boxes),len(gt_classes))
+                    gt_matched=[False]*n_gt
+
+                    # ensure entries exist
+                    for i in range(n_gt):
+                        try:
+                            tcid=int(gt_classes[i])
+                        except Exception:
+                            continue
+                        per_class.setdefault(_clsname(tcid),{"tp":0,"fp":0,"fn":0,"support":0})
+                        per_class[_clsname(tcid)]["support"]+=1
+
+                    for sc,pcid,pbox in preds:
+                        # find best unmatched GT (any class) by IoU
+                        best_iou=-1.0
+                        best_j=-1
+                        for j in range(n_gt):
+                            if(gt_matched[j]):
+                                continue
+                            try:
+                                iou_val=imgLib.IoULib.IoU(gt_boxes[j],pbox)
+                            except Exception:
+                                iou_val=0.0
+                            if(iou_val>best_iou):
+                                best_iou=iou_val
+                                best_j=j
+
+                        pcn=_clsname(pcid)
+                        per_class.setdefault(pcn,{"tp":0,"fp":0,"fn":0,"support":0})
+
+                        if(best_iou>=float(iou_threshold) and best_j>=0):
+                            gt_matched[best_j]=True
+                            matched_pairs+=1
+                            try:
+                                tcid=int(gt_classes[best_j])
+                            except Exception:
+                                tcid=None
+                            tcn=_clsname(tcid) if tcid is not None else "class_unknown"
+
+                            confusion.setdefault(tcn,{})
+                            confusion[tcn][pcn]=confusion[tcn].get(pcn,0)+1
+
+                            if(tcid is not None and int(pcid)==int(tcid)):
+                                per_class[tcn]["tp"]+=1
+                                correct_pairs+=1
+                            else:
+                                # mis-classified match: FP for predicted class, FN for true class
+                                per_class[pcn]["fp"]+=1
+                                if(tcid is not None):
+                                    per_class.setdefault(tcn,{"tp":0,"fp":0,"fn":0,"support":0})
+                                    per_class[tcn]["fn"]+=1
+                        else:
+                            # unmatched prediction -> FP
+                            per_class[pcn]["fp"]+=1
+
+                    # remaining GT -> FN
+                    for j in range(n_gt):
+                        if(gt_matched[j]):
+                            continue
+                        try:
+                            tcid=int(gt_classes[j])
+                        except Exception:
+                            continue
+                        tcn=_clsname(tcid)
+                        per_class.setdefault(tcn,{"tp":0,"fp":0,"fn":0,"support":0})
+                        per_class[tcn]["fn"]+=1
+
+                # compute metrics
+                overall_tp=sum(v.get("tp",0) for v in per_class.values())
+                overall_fp=sum(v.get("fp",0) for v in per_class.values())
+                overall_fn=sum(v.get("fn",0) for v in per_class.values())
+
+                def _safe_div(a,b):
+                    return float(a)/(float(b)+eps)
+
+                overall_precision=_safe_div(overall_tp,overall_tp+overall_fp)
+                overall_recall=_safe_div(overall_tp,overall_tp+overall_fn)
+                overall_f1=_safe_div(2*overall_tp,2*overall_tp+overall_fp+overall_fn)
+                det_accuracy=_safe_div(overall_tp,overall_tp+overall_fp+overall_fn)
+                match_accuracy=_safe_div(correct_pairs,matched_pairs) if matched_pairs>0 else None
+
+                # per-class derived
+                for k,v in per_class.items():
+                    tp=v.get("tp",0); fp=v.get("fp",0); fn=v.get("fn",0)
+                    v["precision"]=_safe_div(tp,tp+fp) if (tp+fp)>0 else None
+                    v["recall"]=_safe_div(tp,tp+fn) if (tp+fn)>0 else None
+                    v["f1"]=_safe_div(2*tp,2*tp+fp+fn) if (2*tp+fp+fn)>0 else None
+
+                # macro averages (ignore None)
+                def _mean(vals):
+                    vv=[x for x in vals if isinstance(x,(int,float))]
+                    return float(sum(vv))/float(len(vv)) if len(vv)>0 else None
+
+                macro_precision=_mean([v.get("precision") for v in per_class.values()])
+                macro_recall=_mean([v.get("recall") for v in per_class.values()])
+                macro_f1=_mean([v.get("f1") for v in per_class.values()])
+
+                return {
+                    "iou_threshold":float(iou_threshold),
+                    "score_threshold":float(score_threshold) if score_threshold is not None else None,
+                    "overall":{
+                        "tp":int(overall_tp),
+                        "fp":int(overall_fp),
+                        "fn":int(overall_fn),
+                        "precision":overall_precision,
+                        "recall":overall_recall,
+                        "f1":overall_f1,
+                        "det_accuracy":det_accuracy,
+                        "matched_pairs":int(matched_pairs),
+                        "match_accuracy":match_accuracy,
+                        "macro_precision":macro_precision,
+                        "macro_recall":macro_recall,
+                        "macro_f1":macro_f1
+                    },
+                    "per_class":per_class,
+                    "confusion":confusion
+                }
+
+            @staticmethod
+            def _calcScoreFromRecipe(score_recipe:dict,score_pack:dict,default_score:float=0.0)->tuple[float,dict]:
+                """
+                Calculate score based on a recipe dictionary.
+
+                score_recipe example:
+                ```python
+                    {
+                        "type":"weighted_sum",
+                        "terms":[
+                            {"key":"map.mAP50","w":0.5},
+                            {"key":"det.overall.f1","w":0.5}
+                        ]
+                    }
+                ```
+
+                Args:
+                    score_recipe (dict): Recipe dictionary.
+                    score_pack (dict): Score pack containing "map_dict" and "det_metrics".
+                    default_score (float): Default score if calculation fails.
+
+                Returns:
+                    tuple: (score, detail_dict)
+                """
+                if(not isinstance(score_recipe,dict)):
+                    return float(default_score),{"type":None,"detail":None}
+                r_type=str(score_recipe.get("type","weighted_sum"))
+                detail={"type":r_type,"terms":[]}
+                if(r_type!="weighted_sum"):
+                    raise ValueError(f"Unsupported score_recipe.type: {r_type}")
+                terms=score_recipe.get("terms",[]) or []
+                score=0.0
+                wsum=0.0
+                for t in terms:
+                    if(not isinstance(t,dict)):
+                        continue
+                    key=t.get("key",None)
+                    w=t.get("w",1.0)
+                    try:
+                        w=float(w)
+                    except Exception:
+                        w=1.0
+                    val=imgLib.ensembleModel.AutoPipelineSelector._calcScoreFromScoreKey(
+                        score_key=str(key) if key is not None else None,
+                        score_pack=score_pack,
+                        default=None
+                    )
+                    detail["terms"].append({"key":key,"w":w,"value":val})
+                    if(isinstance(val,(int,float))):
+                        score+=w*float(val)
+                        wsum+=abs(w)
+                if(wsum==0.0):
+                    return float(default_score),detail
+                return float(score),detail
+
+            @staticmethod
+            def _calcScoreFromScoreKey(score_key:str,score_pack:dict,default=None):
+                """
+                Calculate score based on a score_key from score_pack.
+                score_key supports: 'mAP50', 'map.mAP50', 'map.AP50_per_class.person', 'det.overall.f1', ...
+
+                Args:
+                    score_key (str): Key to look up in score_pack.
+                    score_pack (dict): Score pack containing "map_dict" and "det_metrics".
+                    default: Default value if key not found.
+
+                Returns:
+                    Value corresponding to score_key or default.
+                """
+                if(score_pack is None):
+                    score_pack={}
+                map_dict=score_pack.get("map_dict",None)
+                det_metrics=score_pack.get("det_metrics",None)
+
+                if(score_key is None):
+                    score_key=imgLib.ensembleModel.AutoPipelineSelector.DEFAULT_SCORE_KEY
+
+                if(not isinstance(score_key,str)):
+                    return default
+
+                # direct numeric in map_dict
+                if(isinstance(map_dict,dict) and score_key in map_dict and isinstance(map_dict[score_key],(int,float))):
+                    return float(map_dict[score_key])
+
+                # prefixed path
+                if(score_key.startswith("map.")):
+                    return imgLib.ensembleModel.AutoPipelineSelector._getMetricByKeyPath(map_dict,score_key[len("map."):],default)
+                if(score_key.startswith("det.")):
+                    return imgLib.ensembleModel.AutoPipelineSelector._getMetricByKeyPath(det_metrics,score_key[len("det."):],default)
+
+                # try nested in map_dict (for dict metrics like AP50_per_class.xxx)
+                if(isinstance(map_dict,dict) and "." in score_key):
+                    v=imgLib.ensembleModel.AutoPipelineSelector._getMetricByKeyPath(map_dict,score_key,default)
+                    if(isinstance(v,(int,float))):
+                        return float(v)
+
+                # fallback: maybe the key exists but is numeric convertible
+                if(isinstance(map_dict,dict) and score_key in map_dict):
+                    v=map_dict[score_key]
+                    if(isinstance(v,(int,float))):
+                        return float(v)
+
+                return default
+
+            @staticmethod
+            def _scoreBBimgJsonListEx(
+                bb_img_json_list:list,
+                iou_thresholds:list=None,
+                score_key:str=None,
+                det_metrics_args:dict=None,
+                score_func=None,
+                score_recipe:dict=None
+            )->tuple[float,dict,dict,dict]:
+                """
+                Calculate extended score from a BBimgJson list.
+                Extended scoring:
+                    - Always computes map_dict by CalcMAPFromBBimgJsonList.
+                    - Optionally computes det_metrics (precision/recall/F1...) if requested.
+                    - Supports score_key paths (map./det.) or custom score_func / score_recipe.
+
+                Args:
+                    bb_img_json_list (list): List of BBimgJson objects.
+                    iou_thresholds (list): List of IoU thresholds for mAP calculation.
+                    score_key (str): Key in the mAP/det_metrics dictionary to return.
+                    det_metrics_args (dict): Arguments for CalcDetMetricsFromBBimgJsonList.
+                    score_func (callable): Custom scoring function taking score_pack dict.
+                    score_recipe (dict): Recipe dictionary for score calculation.
+
+                Returns:
+                    tuple: (score, map_dict, det_metrics, score_detail)
+                """
+                if(iou_thresholds is None):
+                    iou_thresholds=imgLib.ensembleModel.AutoPipelineSelector.DEFAULT_SEARCH_IOU_THRESHOLDS
+                if(score_key is None):
+                    score_key=imgLib.ensembleModel.AutoPipelineSelector.DEFAULT_SCORE_KEY
+
+                map_dict=imgLib.BBimgJson.CalcMAPFromBBimgJsonList(
+                    bb_img_json_list=bb_img_json_list,
+                    iou_thresholds=iou_thresholds
+                )
+
+                need_det=False
+                if(isinstance(det_metrics_args,dict)):
+                    need_det=True
+                if(isinstance(score_key,str) and score_key.startswith("det.")):
+                    need_det=True
+                if(score_func is not None or isinstance(score_recipe,dict)):
+                    need_det=True
+
+                det_metrics=None
+                if(need_det):
+                    if(det_metrics_args is None):
+                        det_metrics_args={}
+                    if(not isinstance(det_metrics_args,dict)):
+                        raise TypeError("det_metrics_args should be a dict or None!")
+                    det_metrics=imgLib.ensembleModel.AutoPipelineSelector.CalcDetMetricsFromBBimgJsonList(
+                        bb_img_json_list=bb_img_json_list,
+                        **det_metrics_args
+                    )
+
+                score_pack={"map_dict":map_dict,"det_metrics":det_metrics}
+
+                # custom score_func has priority
+                if(score_func is not None):
+                    if(not callable(score_func)):
+                        raise TypeError("score_func must be callable when provided.")
+                    v=score_func(score_pack)
+                    if(v is None):
+                        score=0.0
+                    else:
+                        score=float(v)
+                    return score,map_dict,det_metrics,{"type":"score_func","score_key":None}
+                if(isinstance(score_recipe,dict)):
+                    score,detail=imgLib.ensembleModel.AutoPipelineSelector._calcScoreFromRecipe(
+                        score_recipe=score_recipe,
+                        score_pack=score_pack,
+                        default_score=0.0
+                    )
+                    return score,map_dict,det_metrics,detail
+
+                # score_key based (supports map./det. paths)
+                v=imgLib.ensembleModel.AutoPipelineSelector._calcScoreFromScoreKey(
+                    score_key=score_key,
+                    score_pack=score_pack,
+                    default=None
+                )
+                if(isinstance(v,(int,float))):
+                    return float(v),map_dict,det_metrics,{"type":"score_key","score_key":score_key}
+                # fallback: take the first numeric value
+                for k,val in (map_dict or {}).items():
+                    if(isinstance(val,(int,float))):
+                        return float(val),map_dict,det_metrics,{"type":"fallback_first_numeric","score_key":k}
+                return 0.0,map_dict,det_metrics,{"type":"fallback_zero","score_key":None}
+
+            @staticmethod
             def _evalPipeline(
                 bb_img_json_list_list:list,
                 pipeline_argv:dict,
                 eval_index_list:list,
                 template_model_index:int=0,
                 iou_thresholds:list=None,
-                score_key:str=None
+                score_key:str=None,
+                det_metrics_args:dict=None,
+                score_func=None,
+                score_recipe:dict=None
             )->tuple[float,dict,dict]:
                 """
                 Evaluate a pipeline configuration on selected images.
@@ -27149,7 +27582,10 @@ class imgLib:
                     eval_index_list (list): List of image indices to evaluate.
                     template_model_index (int): Index of the model to use as template for non-ensemble fields.
                     iou_thresholds (list): IoU thresholds for mAP calculation.
-                    score_key (str): Key in the mAP dictionary to return.
+                    score_key (str): Key in the mAP/det_metrics dictionary to return.
+                    det_metrics_args (dict): Arguments for CalcDetMetricsFromBBimgJsonList.
+                    score_func (callable): Custom scoring function taking score_pack dict.
+                    score_recipe (dict): Recipe dictionary for score calculation.
 
                 Returns:
                     tuple: (score, map_dict, info_dict)
@@ -27175,12 +27611,15 @@ class imgLib:
                     d["final_ann"]=out_ann
                     out_bb_list.append(imgLib.BBimgJson(d))
 
-                score,map_dict=imgLib.ensembleModel.AutoPipelineSelector._scoreBBimgJsonList(
+                score,map_dict,det_metrics,score_detail=imgLib.ensembleModel.AutoPipelineSelector._scoreBBimgJsonListEx(
                     bb_img_json_list=out_bb_list,
                     iou_thresholds=iou_thresholds,
-                    score_key=score_key
+                    score_key=score_key,
+                    det_metrics_args=det_metrics_args,
+                    score_func=score_func,
+                    score_recipe=score_recipe
                 )
-                return score,map_dict,{"num_images":len(out_bb_list)}
+                return score,map_dict,{"num_images":len(out_bb_list),"det_metrics":det_metrics,"score_detail":score_detail}
 
             @staticmethod
             def _makeWeightSchemes(base_scores:list)->list:
@@ -27266,6 +27705,9 @@ class imgLib:
                 bb_img_json_list_list:list,
                 search_iou_thresholds:list=None,
                 score_key:str=None,
+                det_metrics_args:dict=None,
+                score_func=None,
+                score_recipe:dict=None,
 
                 stage_mode_list:list=None,
                 stage_iou_threshold_list:list=None,
@@ -27283,7 +27725,10 @@ class imgLib:
                 Args:
                     bb_img_json_list_list (list): List of per-model BBimgJson lists (must share GT).
                     search_iou_thresholds (list): IoU list for mAP evaluation (e.g., [0.5]).
-                    score_key (str): Key in map_dict (e.g., "mAP50", "mAP50_95").
+                    score_key (str): Key in the mAP/det_metrics dictionary to optimize.
+                    det_metrics_args (dict): Arguments for CalcDetMetricsFromBBimgJsonList.
+                    score_func (callable): Custom scoring function taking score_pack dict.
+                    score_recipe (dict): Recipe dictionary for score calculation.
                     stage_mode_list (list): Allowed stage modes.
                     stage_iou_threshold_list (list): Candidate stage IoU thresholds.
                     stage_multi_class_mode_list (list): Candidate multi_class_mode list.
@@ -27334,16 +27779,21 @@ class imgLib:
                 base_scores=[]
                 for mi in range(m):
                     bb_list=[bb_img_json_list_list[mi][i] for i in index_list]
-                    score,map_dict=imgLib.ensembleModel.AutoPipelineSelector._scoreBBimgJsonList(
+                    score,map_dict,det_metrics,score_detail=imgLib.ensembleModel.AutoPipelineSelector._scoreBBimgJsonListEx(
                         bb_img_json_list=bb_list,
                         iou_thresholds=search_iou_thresholds,
-                        score_key=score_key
+                        score_key=score_key,
+                        det_metrics_args=det_metrics_args,
+                        score_func=score_func,
+                        score_recipe=score_recipe
                     )
                     base_scores.append(score)
                     base_model_scores.append({
                         "model_index":mi,
                         "score":score,
-                        "map_dict":map_dict
+                        "map_dict":map_dict,
+                        "det_metrics":det_metrics,
+                        "score_detail":score_detail
                     })
 
                 order=sorted(range(m),key=lambda i:base_scores[i],reverse=True)
@@ -27484,7 +27934,10 @@ class imgLib:
                             eval_index_list=index_list,
                             template_model_index=best_model_index,
                             iou_thresholds=search_iou_thresholds,
-                            score_key=score_key
+                            score_key=score_key,
+                            det_metrics_args=det_metrics_args,
+                            score_func=score_func,
+                            score_recipe=score_recipe
                         )
                         rec={
                             "cand_index":ci,
@@ -27497,6 +27950,19 @@ class imgLib:
                         for k in ["mAP50","mAP50_95"]:
                             if(k in map_dict):
                                 rec[k]=map_dict[k]
+
+                        # include a few detection stats if available
+                        detm=info.get("det_metrics",None)
+                        if(isinstance(detm,dict)):
+                            ov=detm.get("overall",{}) or {}
+                            for k in ["precision","recall","f1","det_accuracy","macro_f1","match_accuracy"]:
+                                if(k in ov):
+                                    rec["det_"+k]=ov.get(k)
+
+                        sd=info.get("score_detail",None)
+                        if(isinstance(sd,dict)):
+                            rec["score_detail"]=sd
+
                         report.append(rec)
 
                         if(best is None or score>best["best_score"]):
@@ -27504,6 +27970,8 @@ class imgLib:
                                 "best_pipeline_argv":cand["pipeline_argv"],
                                 "best_score":score,
                                 "best_map_dict":map_dict,
+                                "best_det_metrics":info.get("det_metrics",None),
+                                "best_score_detail":info.get("score_detail",None),
                                 "best_desc":cand["desc"],
                             }
 
@@ -27526,7 +27994,7 @@ class imgLib:
                     df=df.sort_values(by="score",ascending=False,na_position="last").reset_index(drop=True)
 
                 if(best is None):
-                    best={"best_pipeline_argv":None,"best_score":float("-inf"),"best_map_dict":None,"best_desc":None}
+                    best={"best_pipeline_argv":None,"best_score":float("-inf"),"best_map_dict":None,"best_det_metrics":None,"best_score_detail":None,"best_desc":None}
 
                 total_time=time.perf_counter()-t0
                 return {
@@ -27537,7 +28005,9 @@ class imgLib:
                     "num_candidates":len(candidates),
                     "total_time_sec":total_time,
                     "score_key":score_key,
-                    "search_iou_thresholds":pyExLib.safety_deepcopy(search_iou_thresholds) if search_iou_thresholds is not None else None
+                    "search_iou_thresholds":pyExLib.safety_deepcopy(search_iou_thresholds) if search_iou_thresholds is not None else None,
+                    "det_metrics_args":pyExLib.safety_deepcopy(det_metrics_args) if det_metrics_args is not None else None,
+                    "score_recipe":pyExLib.safety_deepcopy(score_recipe) if score_recipe is not None else None
                 }
             
     class YOLOModelLib:
@@ -32352,6 +32822,9 @@ class imgLib:
 
                 search_iou_thresholds:list=None,
                 score_key:str=None,
+                det_metrics_args:dict=None,
+                score_func=None,
+                score_recipe:dict=None,
 
                 stage_mode_list:list=None,
                 stage_iou_threshold_list:list=None,
@@ -32374,6 +32847,9 @@ class imgLib:
                     include_best_func (bool, optional): Whether to include the best function in the result.
                     search_iou_thresholds (list, optional): List of IoU thresholds to search.
                     score_key (str, optional): The score key to use for evaluation.
+                    det_metrics_args (dict, optional): Additional arguments for detection metrics calculation.
+                    score_func (callable, optional): Custom scoring function.
+                    score_recipe (dict, optional): Recipe for scoring.
                     stage_mode_list (list, optional): List of stage modes for the ensemble pipeline.
                     stage_iou_threshold_list (list, optional): List of IoU thresholds for each stage.
                     stage_multi_class_mode_list (list, optional): List of multi-class modes for each stage.
@@ -32404,6 +32880,9 @@ class imgLib:
 
                     search_iou_thresholds=search_iou_thresholds,
                     score_key=score_key,
+                    det_metrics_args=det_metrics_args,
+                    score_func=score_func,
+                    score_recipe=score_recipe,
 
                     stage_mode_list=stage_mode_list,
                     stage_iou_threshold_list=stage_iou_threshold_list,
