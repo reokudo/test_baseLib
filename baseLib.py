@@ -25751,7 +25751,7 @@ class imgLib:
                 models:list,
                 predict_data,
                 gpu_flag:bool,
-                yolo_args:dict
+                yolo_args
             ):
                 """
                 Predicts all YOLO models.
@@ -25760,7 +25760,9 @@ class imgLib:
                     models (list): List of YOLO models.
                     predict_data: Data to predict.
                     gpu_flag (bool): Whether to use GPU.
-                    yolo_args (dict): Arguments for the YOLO model.
+                    yolo_args: Arguments for the YOLO model.
+                        - dict: shared for all models (backward compatible)
+                        - list[dict] / tuple[dict]: per-model args (len must match len(models))
 
                 Returns:
                     int: Number of results.
@@ -25769,20 +25771,43 @@ class imgLib:
                 Raises:
                     RuntimeError: If the YOLO results lengths are not aligned.
                     RuntimeError: If the torch package is not installed.
+                    ValueError: If yolo_args type/length is invalid.
                 """
                 if(not IMPORT_TORCH_FLAG):
                     raise RuntimeError("Error : The torch package is not installed!")
 
+                if(yolo_args is None):
+                    yolo_args={}
+
+                # Normalize yolo_args into either a shared dict or per-model list[dict]
+                _shared_args=None
+                _per_model_args=None
+                if(isinstance(yolo_args,dict)):
+                    _shared_args=yolo_args
+                elif(isinstance(yolo_args,(list,tuple))):
+                    if(len(yolo_args)!=len(models)):
+                        raise ValueError("Error : when yolo_args is a list/tuple, its length must match len(models)!")
+                    _per_model_args=list(yolo_args)
+                    for _i,_a in enumerate(_per_model_args):
+                        if(_a is None):
+                            _a={}
+                        if(not isinstance(_a,dict)):
+                            raise ValueError(f"Error : yolo_args[{_i}] must be a dict or None!")
+                        _per_model_args[_i]=_a
+                else:
+                    raise ValueError("Error : yolo_args must be a dict or list[dict] or tuple[dict]!")
+
                 ns=None
                 all_results=[]
 
-                for model in models:
+                for _i,model in enumerate(models):
+                    _args=_shared_args if (_per_model_args is None) else _per_model_args[_i]
                     if(gpu_flag):
                         with torch.cuda.amp.autocast():
-                            results=model.predict(predict_data,**yolo_args)
+                            results=model.predict(predict_data,**_args)
                     else:
-                        results=model.predict(predict_data,**yolo_args)
-                    
+                        results=model.predict(predict_data,**_args)
+                
                     if(ns==None):  
                         ns=len(results)
                     elif(ns!=len(results)):
@@ -26098,7 +26123,9 @@ class imgLib:
                 multi_class_mode (str): Multi-class mode. If None, defaults to `ENSEMBLE_MULTI_CLASS_MODE_EACH_CLASS`.
                 gpu_flag (bool): Whether to run inference with CUDA autocast (requires torch + CUDA).
                 ensemble_args (dict): Mode-specific arguments for the ensemble step. See 'About ensemble_args'.
-                yolo_args (dict): Keyword args forwarded to each model's `.predict(...)`.
+                yolo_args (dict | list[dict] | tuple[dict]): Arguments forwarded into each model's `.predict(...)` call.
+                    - dict: shared for all models (backward compatible)
+                    - list[dict] / tuple[dict]: per-model args (len must match len(models))
                 check_model_names_flag (bool): If True, verifies all models expose `.names` and that they match (required when injecting class names).
 
             Returns:
@@ -26122,8 +26149,21 @@ class imgLib:
                 yolo_args={}
             else:
                 yolo_args=pyExLib.safety_deepcopy(yolo_args)
-            if(not isinstance(yolo_args,dict)):
-                raise ValueError("Error : yolo_args must be a dict!")
+            if(isinstance(yolo_args,dict)):
+                pass
+            elif(isinstance(yolo_args,(list,tuple))):
+                if(len(yolo_args)!=len(models)):
+                    raise ValueError("Error : when yolo_args is a list/tuple, its length must match len(models)!")
+                _normalized=[]
+                for _i,_a in enumerate(yolo_args):
+                    if(_a is None):
+                        _a={}
+                    if(not isinstance(_a,dict)):
+                        raise ValueError(f"Error : yolo_args[{_i}] must be a dict or None!")
+                    _normalized.append(_a)
+                yolo_args=_normalized
+            else:
+                raise ValueError("Error : yolo_args must be a dict or list[dict] or tuple[dict]!")
 
             inject_cls_names_dict=ensemble_args.get("inject_cls_names_dict",True)
             if(not isinstance(inject_cls_names_dict,bool)):
