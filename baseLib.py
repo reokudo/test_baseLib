@@ -20841,17 +20841,131 @@ class imgLib:
             
             return self.IoUProc(other_ann.getANNData(),other_ann.getANNClsNums(),iou_func=iou_func,enable_cls_list=enable_cls_list,iou_args=iou_args)
 
+        @staticmethod
+        def _beforeProcEnsembleYOLOANNResult(
+            mode:str,
+            iou_threshold:float,
+            multi_class_mode:str,
+            ensemble_args:dict,
+        ):
+            """
+            Pre-processes the arguments for ensemble YOLOANN result processing.
+
+            Args:
+                mode (str): Mode of ensemble predict processing.
+                iou_threshold (float): IoU threshold.
+                multi_class_mode (str): Multi-class mode.
+                ensemble_args (dict): Ensemble arguments.
+
+            Returns:
+                tuple: Processed mode, IoU threshold, multi-class mode, and ensemble arguments.
+            """
+            if(ensemble_args is None):
+                ensemble_args={}
+            else:
+                ensemble_args=pyExLib.safety_deepcopy(ensemble_args)
+
+            if(iou_threshold is None):
+                iou_threshold=imgLib.ensembleModel.DEFAULT_IOU_THRESHOLD
+            if(multi_class_mode is None):
+                multi_class_mode=imgLib.ensembleModel.ENSEMBLE_MULTI_CLASS_MODE_EACH_CLASS
+            
+            # In PIPELINE mode, when you request multiple outputs (return_ids/return_aliases/return_all_stages/final_ids/...),
+            # this wrapper expects the transposed layout (dict[str, list[dict]]) so it can convert each list to YOLOANNResult.
+            if(mode==imgLib.ensembleModel.ENSEMBLE_MODE_PIPELINE):
+                return_all_stages=ensemble_args.get("return_all_stages",False)
+                return_ids=ensemble_args.get("return_ids",None)
+                return_aliases=ensemble_args.get("return_aliases",None)
+                final_ids=ensemble_args.get("final_ids",None)
+                final_aliases=ensemble_args.get("final_aliases",None)
+
+                multi_output_flag=bool(return_all_stages)
+                if((not multi_output_flag) and isinstance(return_ids,(list,tuple,set)) and len(return_ids)>0):
+                    multi_output_flag=True
+                if((not multi_output_flag) and isinstance(return_aliases,(list,tuple,set)) and len(return_aliases)>0):
+                    multi_output_flag=True
+                if((not multi_output_flag) and isinstance(final_ids,(list,tuple,set)) and len(final_ids)>0):
+                    multi_output_flag=True
+                if((not multi_output_flag) and isinstance(final_aliases,(list,tuple,set)) and len(final_aliases)>0):
+                    multi_output_flag=True
+
+                pipeline_output_layout=ensemble_args.get("pipeline_output_layout",None)
+                if(multi_output_flag):
+                    if(pipeline_output_layout is None):
+                        ensemble_args["pipeline_output_layout"]="dict_of_lists"
+                    elif(pipeline_output_layout not in ("dict_of_lists","by_id")):
+                        raise ValueError("In PIPELINE mode with multiple outputs, pipeline_output_layout must be 'dict_of_lists' (or 'by_id').")
+                else:
+                    if(pipeline_output_layout in ("dict_of_lists","by_id")):
+                        raise ValueError("pipeline_output_layout='dict_of_lists'/'by_id' requires pipeline to return multiple outputs (set return_ids/return_aliases/return_all_stages).")
+                
+            return mode,iou_threshold,multi_class_mode,ensemble_args
+
+        @staticmethod
+        def _afterProcEnsembleYOLOANNResult(
+            raw_yolo_ann_obj:"imgLib.YOLOANN",
+            r:dict,
+            bb_img_json_mode:bool,
+            yolo_model_config:dict|None,
+        ):
+            """
+            Post-processes the results of ensemble YOLOANN result processing.
+            
+            Args:
+                raw_yolo_ann_obj (YOLOANN): The original YOLOANN object.
+                r (dict): The result of ensemble YOLO prediction.
+                bb_img_json_mode (bool): Whether to return BBimgJson objects.
+                yolo_model_config (dict|None): YOLO model configuration.
+
+            Returns:
+                list or dict: List or dictionary of YOLOANNResult objects or BBimgJson objects.
+            """
+            def resultElement2Obj(ri_dict:dict,bb_img_json_mode:bool,yolo_model_config:dict|None):
+                if(not isinstance(ri_dict,dict)):
+                    raise TypeError("ri_dict must be a dict.")
+
+                ri_yolo_ann_result=imgLib.YOLOANNResult(raw_yolo_ann_obj,ri_dict)
+                if(bb_img_json_mode):
+                    if(not isinstance(ri_yolo_ann_result,imgLib.YOLOANNResult)):
+                        raise TypeError("Expected instance of YOLOANNResult")
+                    if(yolo_model_config is None):
+                        return ri_yolo_ann_result.getResultBBimgJsonObj()
+                    elif(isinstance(yolo_model_config,dict)):
+                        return ri_yolo_ann_result.getResultBBimgJsonObj({"yolo_model_config":yolo_model_config})
+                    else:
+                        raise TypeError("yolo_model_config must be a dict or None.")
+                else:
+                    return ri_yolo_ann_result
+                
+            def rList2obj(r_list:list,bb_img_json_mode:bool,yolo_model_config:dict|None):
+                if(not isinstance(r_list,list)):
+                    raise TypeError("r_list must be a list.")
+                return [resultElement2Obj(ri_dict,bb_img_json_mode,yolo_model_config) for ri_dict in r_list]
+            
+            if(not isinstance(raw_yolo_ann_obj,imgLib.YOLOANN)):
+                raise TypeError("raw_yolo_ann_obj must be an instance of YOLOANN.")
+
+            if(isinstance(r,list)):
+                return rList2obj(r,bb_img_json_mode,yolo_model_config)
+            elif(isinstance(r,dict)):
+                result_dict={}
+                for k,v in r.items():
+                    result_dict[k]=rList2obj(v,bb_img_json_mode,yolo_model_config)
+                return result_dict
+            else:
+                raise TypeError("The return value of _afterProcEnsembleYOLOANNResult must be either a list or a dict.") 
+
         def procYOLOPredict(
-                self,
-                models:list,
-                mode:str,
-                iou_threshold:float=None,
-                multi_class_mode:str=None,
-                gpu_flag:bool=True,
-                ensemble_args:dict=None,
-                yolo_args:dict=None,
-                check_model_names_flag:bool=True
-            ):
+            self,
+            models:list,
+            mode:str,
+            iou_threshold:float=None,
+            multi_class_mode:str=None,
+            gpu_flag:bool=True,
+            ensemble_args:dict=None,
+            yolo_args:dict=None,
+            check_model_names_flag:bool=True
+        ):
             """
             Function to predict the image of a YOLOANN object using YOLO. 
             See `imgLib.ensembleModel.procYOLOPredict` for the arguments.
@@ -20867,21 +20981,21 @@ class imgLib:
                 check_model_names_flag (bool): Whether to check model names.
 
             Returns:
-                dict: Dictionary of YOLO results.
+                list or dict: List or dictionary of YOLOANNResult objects.
             """
-            if(ensemble_args is None):
-                ensemble_args={}
-            else:
-                ensemble_args=pyExLib.safety_deepcopy(ensemble_args)
+            img=self.getImg(draw_shape_flag=False,label_flag=False)
             
             if(yolo_args is None):
                 yolo_args={}
             else:
                 yolo_args=pyExLib.safety_deepcopy(yolo_args)
 
-            img=self.getImg(draw_shape_flag=False,label_flag=False)
-            if(iou_threshold==None):
-                iou_threshold=imgLib.ensembleModel.DEFAULT_IOU_THRESHOLD
+            mode,iou_threshold,multi_class_mode,ensemble_args=imgLib.YOLOANN._beforeProcEnsembleYOLOANNResult(
+                mode=mode,
+                iou_threshold=iou_threshold,
+                multi_class_mode=multi_class_mode,
+                ensemble_args=ensemble_args,
+            )
 
             r=imgLib.ensembleModel.procYOLOPredict(
                 models,
@@ -20894,8 +21008,13 @@ class imgLib:
                 yolo_args=yolo_args,
                 check_model_names_flag=check_model_names_flag
             )
-
-            return pyExLib.safety_deepcopy([imgLib.YOLOANNResult(self,ri) for ri in r])
+        
+            return imgLib.YOLOANN._afterProcEnsembleYOLOANNResult(
+                raw_yolo_ann_obj=self,
+                r=r,
+                bb_img_json_mode=False,
+                yolo_model_config=None,
+            )
 
     @_protectedClass.fileStoreMyLibRegister
     class wrapperYOLOANN(_FileStore.FileStoreParser):
@@ -25708,6 +25827,16 @@ class imgLib:
                 if(not isinstance(ensemble_args,dict)):
                     raise ValueError("Error : ensemble_args must be a dict!")
 
+                # Only used when mode==ENSEMBLE_MODE_PIPELINE:
+                #   - "per_image" (default): returns list[dict] like before
+                #   - "by_id"/"dict_of_lists": returns dict[str, list[dict]] (transpose)
+                pipeline_output_layout=ensemble_args.pop("pipeline_output_layout",None)
+                if(pipeline_output_layout is None):
+                    pipeline_output_layout="per_image"
+                if(mode==imgLib.ensembleModel.ENSEMBLE_MODE_PIPELINE):
+                    if(pipeline_output_layout not in ("per_image","by_id","dict_of_lists")):
+                        raise ValueError("pipeline_output_layout must be one of: 'per_image','by_id','dict_of_lists'.")
+                    
                 inject_cls_names_dict=ensemble_args.get("inject_cls_names_dict",True)
                 if(not isinstance(inject_cls_names_dict,bool)):
                     raise ValueError("Error : inject_cls_names_dict must be a bool!")
@@ -25729,9 +25858,34 @@ class imgLib:
                         multi_class_mode=multi_class_mode,
                         **ensemble_args
                     )
-                    if((class_names is not None) and ("cls_names_dict" not in ri_dict)):
-                        ri_dict["cls_names_dict"]=pyExLib.safety_deepcopy(class_names)
+                    
+                    if(class_names is not None):
+                        # single-output dict
+                        if(isinstance(ri_dict,dict) and ("bboxes" in ri_dict) and ("scores" in ri_dict) and ("classes" in ri_dict)):
+                            if("cls_names_dict" not in ri_dict):
+                                ri_dict["cls_names_dict"]=pyExLib.safety_deepcopy(class_names)
+                        # multi-output dict (e.g., {"a":{...},"b":{...}})
+                        elif(isinstance(ri_dict,dict)):
+                            for _,sub in ri_dict.items():
+                                if(isinstance(sub,dict) and ("bboxes" in sub) and ("scores" in sub) and ("classes" in sub)):
+                                    if("cls_names_dict" not in sub):
+                                        sub["cls_names_dict"]=pyExLib.safety_deepcopy(class_names)
+
                     r.append(ri_dict)
+
+                # Optional transpose for pipeline multi-output:
+                # return {"out_id":[per-image dicts], ...}
+                if(mode==imgLib.ensembleModel.ENSEMBLE_MODE_PIPELINE and pipeline_output_layout in ("by_id","dict_of_lists")):
+                    if(len(r)>0 and isinstance(r[0],dict) and ("bboxes" in r[0]) and ("scores" in r[0]) and ("classes" in r[0])):
+                        raise ValueError("pipeline_output_layout='by_id' requires pipeline to return multiple outputs (use return_ids/return_aliases/return_all_stages).")
+                    out={}
+                    for ri in r:
+                        if(not isinstance(ri,dict)):
+                            raise RuntimeError("In Pipeline mode with pipeline_output_layout='by_id', each per-image output must be a dict map.")
+                        for k,v in ri.items():
+                            out.setdefault(k,[]).append(v)
+                    return out
+                
                 return r
                 
         #Predict multiple YOLO models and output ensemble results
@@ -25762,6 +25916,18 @@ class imgLib:
             - `scores`: list[float]
             - `classes`: list[int]
             - `cls_names_dict` (optional): dict[int, str] class-id → class-name mapping.
+            
+            In `ENSEMBLE_MODE_PIPELINE`, you can optionally return multiple intermediate outputs.
+            In that case, the return value becomes:
+    
+                dict[str, list[dict]]
+
+            where each value is the per-image YOLO result list (length `ns`), same schema as the single-output case.
+            Example:
+                {
+                    "final_a": [ {"bboxes":[...], "scores":[...], "classes":[...]} , ... ],  # length ns
+                    "final_b": [ {"bboxes":[...], "scores":[...], "classes":[...]} , ... ],
+                }
 
             What you can do with this API
             -----------------------------
@@ -25836,13 +26002,16 @@ class imgLib:
 
             - NVONMS ("NVONMS"):
                 * `num_thread` (int, required): minimum votes required to keep a detection.
+
             - RateNVONMS ("RateNVONMS"):
                 * `thread_rate` (float, required): in [0.0, 1.0]. Vote threshold is `floor(num_models * thread_rate)`.
+            
             - CenterCluster ("CenterCluster"):
                 * `dist_threshold` (float|None, optional): normalized center distance threshold. If explicitly set to None, falls back to `iou_threshold`.
                 * `size_ratio_threshold` (float, optional): max allowed width/height ratio between boxes in a cluster.
                 * `overlap_ratio_threshold` (float, optional): min required 1D overlap ratio (x and y).
                 * `min_cluster_size` (int, optional): clusters smaller than this are ignored.
+            
             - Filter ("Filter") (single input only):
                 * `name_allow` (list[str], optional): allow-list by class name (requires available class names).
                 * `class_allow` (list[int], optional): allow-list by class id.
@@ -25850,13 +26019,16 @@ class imgLib:
                 * `min_score` (float, optional): drop boxes with score < min_score.
                 * `class_remap` (dict, optional): remap classes. Keys can be class ids or class names; values are new ids.
                 * `output_class_names` (dict, optional): override output `cls_names_dict`.
+            
             - IoUFilter ("IoUFilter") (requires >= 2 inputs):
                 * `src_i` (int, default 0): index of the source input to be filtered.
                 * `ref_i` (int, default 1): index of the reference input used for IoU gating.
                 * `empty_ref_policy` (str, default "keep_none"): "keep_none" (drop all) or "keep_all" (keep all) when the reference has no detections.
                 * Uses `iou_threshold` as the IoU gate: keep a src box if max IoU against any ref box >= iou_threshold.
+            
             - Concat ("Concat"):
                 * `require_disjoint_classes` (bool, default True): if True, raises when class-id sets overlap across inputs; merges `cls_names_dict` when present.
+            
             - PipeLine ("PipeLine"):
                 * `stages` (list[dict], required): stage definitions. Each stage dict must include:
                     - `out_id` (str): output key of the stage.
@@ -25873,6 +26045,19 @@ class imgLib:
                     - "m{i}" (e.g., "m0", "m1", ...)
                   and can also reference previous stage outputs by their `out_id`.
                 * `final_id` (str, optional): which intermediate ID to return (defaults to the last stage's `out_id`).
+                * Multi-output (optional; choose one style):
+                    - `return_ids` (list[str], optional):
+                        Return a dict of selected outputs by id (typically stage `out_id`).
+                    - `return_aliases` (dict[str, str], optional):
+                        Return a dict with renamed keys; maps {alias_name: id}.
+                    - `return_all_stages` (bool, default False):
+                        Return a dict of all stage outputs (keyed by each stage `out_id`).
+
+                  Notes:
+                    - When any multi-output option is used, the return type becomes `dict[str, list[dict]]`.
+                    - If you keep single-output behavior, use `final_id` (or omit it to use the last stage).
+                    - (Recommended) Make `final_id` mutually exclusive with multi-output options.
+
             - Custom ("Custom"):
                 * `custom_id` (str, required): ID of a function registered via `imgLib.ensembleModel.registerCustomEnsembleFunc(custom_id, func)`.
                 * `custom_args` (dict, optional): forwarded to the registered function as `**custom_args`.
@@ -26789,6 +26974,47 @@ class imgLib:
                 final_id=last_out_id
             if(final_id not in results_map):
                 raise ValueError(f"In Pipeline mode, final_id {final_id} not found!")
+            
+            # multi-output options (optional)
+            # - return_aliases: dict {out_key: id_in_pipeline}
+            # - return_ids: list/tuple of ids_in_pipeline
+            # - return_all_stages: bool (return all stage outputs in stage order)
+            return_aliases=yolo_ensemble_argv.get("return_aliases",None)
+            return_ids=yolo_ensemble_argv.get("return_ids",None)
+            return_all_stages=yolo_ensemble_argv.get("return_all_stages",False)
+            if(not isinstance(return_all_stages,bool)):
+                raise ValueError("In Pipeline mode, 'return_all_stages' must be a bool!")
+
+            if(return_aliases is not None):
+                if(not isinstance(return_aliases,dict)):
+                    raise ValueError("In Pipeline mode, 'return_aliases' must be a dict like {out_key: id}.")
+                out={}
+                for out_key,src_id in return_aliases.items():
+                    if(src_id not in results_map):
+                        raise ValueError(f"In Pipeline mode, return_aliases source id {src_id} not found!")
+                    out[str(out_key)]=results_map[src_id]
+                return out
+
+            if(return_ids is not None):
+                if(not isinstance(return_ids,(list,tuple))):
+                    raise ValueError("In Pipeline mode, 'return_ids' must be a list/tuple.")
+                out={}
+                for src_id in return_ids:
+                    if(src_id not in results_map):
+                        raise ValueError(f"In Pipeline mode, return_id {src_id} not found!")
+                    out[str(src_id)]=results_map[src_id]
+                return out
+
+            if(return_all_stages):
+                out={}
+                for st in stages:
+                    oid=st.get("out_id",None)
+                    if(oid is None):
+                        continue
+                    if(oid in results_map):
+                        out[str(oid)]=results_map[oid]
+                return out
+            
             return results_map[final_id]
 
         @staticmethod
@@ -29641,21 +29867,18 @@ class imgLib:
                     proc_ensemble_model_name_func (callable): Function to generate the ensemble model name. This function takes the same arguments as the DEFAULT_PROC_ENSEMBLE_MODEL_NAME function.
 
                 Returns:
-                    list: The list of YOLO annotation results.
+                    list or dict: List or dictionary of YOLOANNResult objects or bounding box image JSON objects.
 
                 Raises:
                     TypeError: If the input objects are of invalid types.
                 """
-                if(ensemble_args is None):
-                    ensemble_args={}
-                else:
-                    ensemble_args=pyExLib.safety_deepcopy(ensemble_args)
-
-                if(iou_threshold is None):
-                    iou_threshold=imgLib.ensembleModel.DEFAULT_IOU_THRESHOLD
-                if(multi_class_mode is None):
-                    multi_class_mode=imgLib.ensembleModel.ENSEMBLE_MULTI_CLASS_MODE_EACH_CLASS
-
+                mode,iou_threshold,multi_class_mode,ensemble_args=imgLib.YOLOANN._beforeProcEnsembleYOLOANNResult(
+                    mode=mode,
+                    iou_threshold=iou_threshold,
+                    multi_class_mode=multi_class_mode,
+                    ensemble_args=ensemble_args,
+                )
+                
                 r=imgLib.ensembleModel.MultiYOLOModelModule.procEnsembleFunc4YOLOResult(
                     ns=self.__ns,
                     all_results=self.__all_results,
@@ -29665,33 +29888,29 @@ class imgLib:
                     ensemble_args=ensemble_args,
                     class_names=self.getClassNames()
                 )
+            
+                yolo_model_config={
+                    "proc_ensemble_model_name":proc_ensemble_model_name_func(
+                        mode=mode,
+                        model_name_list=self.getReadYOLOModelListObj().getModelNames(),
+                        iou_threshold=iou_threshold,
+                        multi_class_mode=multi_class_mode,
+                        ensemble_args=ensemble_args
+                    ),
+                    "ensemble_mode":mode,
+                    "model_list":self.getReadYOLOModelListObj().getAllDict(light_mode=True),
+                    "class_names":self.getClassNames(),
+                    "iou_threshold":iou_threshold,
+                    "multi_class_mode":multi_class_mode,
+                    "ensemble_args":ensemble_args,
+                }
 
-                tmp_yolo_ann_result_list=[imgLib.YOLOANNResult(self.__yolo_ann_obj,ri) for ri in r]
-                if(bb_img_json_mode):
-                    yolo_model_config={
-                        "proc_ensemble_model_name":proc_ensemble_model_name_func(
-                            mode=mode,
-                            model_name_list=self.getReadYOLOModelListObj().getModelNames(),
-                            iou_threshold=iou_threshold,
-                            multi_class_mode=multi_class_mode,
-                            ensemble_args=ensemble_args
-                        ),
-                        "ensemble_mode":mode,
-                        "model_list":self.getReadYOLOModelListObj().getAllDict(light_mode=True),
-                        "class_names":self.getClassNames(),
-                        "iou_threshold":iou_threshold,
-                        "multi_class_mode":multi_class_mode,
-                        "ensemble_args":ensemble_args,
-                    }
-
-                    tmp_result_list=[]
-                    for ri in tmp_yolo_ann_result_list:
-                        if(not isinstance(ri,imgLib.YOLOANNResult)):
-                            raise TypeError("Expected instance of YOLOANNResult")
-                        tmp_result_list.append(ri.getResultBBimgJsonObj({"yolo_model_config":yolo_model_config}))
-                    return tmp_result_list
-                else:
-                    return tmp_yolo_ann_result_list
+                return imgLib.YOLOANN._afterProcEnsembleYOLOANNResult(
+                    raw_yolo_ann_obj=self.__yolo_ann_obj,
+                    r=r,
+                    bb_img_json_mode=bb_img_json_mode,
+                    yolo_model_config=yolo_model_config,
+                )
 
             def generatorCombinationsModel(self,r:int):
                 """
