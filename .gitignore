@@ -2,3 +2,4 @@ to_google_drive.bash
 from_google_drive.bash
 .*
 __pycache__/*
+yolo*.pt

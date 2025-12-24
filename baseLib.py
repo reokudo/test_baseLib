@@ -25683,6 +25683,7 @@ class imgLib:
             ):
                 """
                 Processes the ensemble function for YOLO results.
+                See also `imgLib.ensembleModel.procYOLOPredict`.
 
                 Args:
                     ns (int): Number of results.
@@ -25704,6 +25705,14 @@ class imgLib:
                     ensemble_args={}
                 else:
                     ensemble_args=pyExLib.safety_deepcopy(ensemble_args)
+                if(not isinstance(ensemble_args,dict)):
+                    raise ValueError("Error : ensemble_args must be a dict!")
+
+                inject_cls_names_dict=ensemble_args.get("inject_cls_names_dict",True)
+                if(not isinstance(inject_cls_names_dict,bool)):
+                    raise ValueError("Error : inject_cls_names_dict must be a bool!")
+                if(not inject_cls_names_dict):
+                    class_names=None
 
                 if(iou_threshold==None):
                     iou_threshold=imgLib.ensembleModel.DEFAULT_IOU_THRESHOLD
@@ -25720,7 +25729,7 @@ class imgLib:
                         multi_class_mode=multi_class_mode,
                         **ensemble_args
                     )
-                    if(class_names!=None):
+                    if((class_names is not None) and ("cls_names_dict" not in ri_dict)):
                         ri_dict["cls_names_dict"]=pyExLib.safety_deepcopy(class_names)
                     r.append(ri_dict)
                 return r
@@ -25741,23 +25750,178 @@ class imgLib:
             """
             Predicts multiple YOLO models and outputs ensemble results.
 
+            Overview
+            --------
+            This method:
+            1) runs `model.predict(predict_data, **yolo_args)` for every model in `models`,
+            2) validates that all models returned the same number of per-image results, and
+            3) ensembles (merges / filters / concatenates) detections *per image* according to `mode` and `ensemble_args`.
+
+            The output is a list of length `ns` (one element per input image). Each element is a dict with:
+            - `bboxes`: list[[x1, y1, x2, y2]] (xyxy, float)
+            - `scores`: list[float]
+            - `classes`: list[int]
+            - `cls_names_dict` (optional): dict[int, str] class-id → class-name mapping.
+
+            What you can do with this API
+            -----------------------------
+            - Simple single-model passthrough (no merge).
+            - Standard box-level post-processing on one or more model outputs (NMS / soft-NMS / vote-based NMS / clustering).
+            - Classic multi-model ensembling (WBF / NMW / NVONMS variants).
+            - Logical-style composition (AND/OR/majority behavior via vote thresholds).
+            - Pure concatenation of model outputs (useful when models cover disjoint class sets).
+            - Filtering by class id/name, score thresholding, and class remapping.
+            - IoU gating: keep detections from one input only when they overlap detections from another input (useful for 'human-confirmation' flows).
+            - Multi-stage pipelines: chain multiple ensemble ops (e.g., concat → WBF → filter).
+            - Bring-your-own algorithm via `ENSEMBLE_MODE_CUSTOM` with a strict, validated I/O contract.
+
+            Supported `mode` values
+            -----------------------
+            Use the `imgLib.ensembleModel.ENSEMBLE_MODE_*` constants (strings):
+
+            - `ENSEMBLE_MODE_ONE_MODEL` ("OneModel") or `None`:
+                No ensembling. Returns detections as-is (requires `len(models) == 1`).
+            - `ENSEMBLE_MODE_NMS` ("NMS"):
+                Standard NMS.
+            - `ENSEMBLE_MODE_SOFT_NMS` ("softNMS"):
+                Soft-NMS variant.
+            - `ENSEMBLE_MODE_NVO_NMS` ("NVONMS"):
+                Vote-based NMS. Keeps a box only if it obtains at least `num_thread` votes within its IoU cluster.
+            - `ENSEMBLE_MODE_RATE_NVO_NMS` ("RateNVONMS"):
+                Vote-based NMS where the vote threshold is computed from a rate:
+                `num_thread = floor(num_models * thread_rate)`.
+            - `ENSEMBLE_MODE_MAJORITY_RULE_NMS` ("MajorityRuleNMS"):
+                NVONMS with an automatic vote threshold `floor(num_models / 2)`.
+            - `ENSEMBLE_MODE_AND_NMS` ("ANDNMS"):
+                NVONMS with a strict vote threshold (`num_thread = num_models`).
+            - `ENSEMBLE_MODE_OR_NMS` ("ORNMS"):
+                NVONMS with a permissive vote threshold (`num_thread = 0`).
+            - `ENSEMBLE_MODE_NMW` ("NMW"):
+                Non-Maximum Weighted merging.
+            - `ENSEMBLE_MODE_WBF` ("WBF"):
+                Weighted Boxes Fusion.
+            - `ENSEMBLE_MODE_CENTER_CLUSTER` ("CenterCluster"):
+                Clusters boxes using center/size/overlap constraints and selects a representative detection.
+            - `ENSEMBLE_MODE_FILTER` ("Filter"):
+                Filters a single input (requires `len(models) == 1`).
+            - `ENSEMBLE_MODE_IOU_FILTER` ("IoUFilter"):
+                Filters detections from one input by IoU against another input (requires >= 2 inputs).
+            - `ENSEMBLE_MODE_CONCAT` ("Concat"):
+                Concatenates detections from all inputs without merging.
+            - `ENSEMBLE_MODE_PIPELINE` ("PipeLine"):
+                Runs a multi-stage ensemble pipeline (each stage is an ensemble op). (Pipeline cannot be nested.)
+            - `ENSEMBLE_MODE_CUSTOM` ("Custom"):
+                Calls a registered custom ensemble function (`imgLib.ensembleModel.registerCustomEnsembleFunc`) with normalized inputs and validates its output.
+
+            `multi_class_mode`
+            ------------------
+            Controls whether a merge op is applied per-class or across all classes:
+            - `ENSEMBLE_MULTI_CLASS_MODE_EACH_CLASS` (default): process each class independently.
+            - `ENSEMBLE_MULTI_CLASS_MODE_ALL_CLASS`: treat all classes as one pool.
+            Not every mode uses `multi_class_mode` in the same way, but NMS-family / WBF / NMW typically do.
+
+            About `ensemble_args`
+            ---------------------
+            `ensemble_args` is deep-copied and forwarded into the ensemble step(s). Unknown keys are ignored unless the selected mode consumes them.
+
+            Common keys:
+            - `inject_cls_names_dict` (bool, default True):
+                If True, reads `model.names` and injects a `cls_names_dict` into each output dict when missing.
+                When True, `check_model_names_flag` must also be True (and all models must agree on `names`).
+            - `model_weights` (list[float], optional):
+                Per-model scalar weights applied to confidence scores (multiplicative) *before* ensembling.
+                Length must match `len(models)`. (Not allowed in PipeLine mode; use stage-level `model_weights` instead.)
+
+            Mode-specific keys inside `ensemble_args`:
+
+            - NVONMS ("NVONMS"):
+                * `num_thread` (int, required): minimum votes required to keep a detection.
+            - RateNVONMS ("RateNVONMS"):
+                * `thread_rate` (float, required): in [0.0, 1.0]. Vote threshold is `floor(num_models * thread_rate)`.
+            - CenterCluster ("CenterCluster"):
+                * `dist_threshold` (float|None, optional): normalized center distance threshold. If explicitly set to None, falls back to `iou_threshold`.
+                * `size_ratio_threshold` (float, optional): max allowed width/height ratio between boxes in a cluster.
+                * `overlap_ratio_threshold` (float, optional): min required 1D overlap ratio (x and y).
+                * `min_cluster_size` (int, optional): clusters smaller than this are ignored.
+            - Filter ("Filter") (single input only):
+                * `name_allow` (list[str], optional): allow-list by class name (requires available class names).
+                * `class_allow` (list[int], optional): allow-list by class id.
+                * `invert` (bool, optional): if True, invert the allow-list selection.
+                * `min_score` (float, optional): drop boxes with score < min_score.
+                * `class_remap` (dict, optional): remap classes. Keys can be class ids or class names; values are new ids.
+                * `output_class_names` (dict, optional): override output `cls_names_dict`.
+            - IoUFilter ("IoUFilter") (requires >= 2 inputs):
+                * `src_i` (int, default 0): index of the source input to be filtered.
+                * `ref_i` (int, default 1): index of the reference input used for IoU gating.
+                * `empty_ref_policy` (str, default "keep_none"): "keep_none" (drop all) or "keep_all" (keep all) when the reference has no detections.
+                * Uses `iou_threshold` as the IoU gate: keep a src box if max IoU against any ref box >= iou_threshold.
+            - Concat ("Concat"):
+                * `require_disjoint_classes` (bool, default True): if True, raises when class-id sets overlap across inputs; merges `cls_names_dict` when present.
+            - PipeLine ("PipeLine"):
+                * `stages` (list[dict], required): stage definitions. Each stage dict must include:
+                    - `out_id` (str): output key of the stage.
+                    - `inputs` (list): input IDs for the stage.
+                    - `mode` (str): ensemble mode for this stage (PipeLine cannot be nested).
+                  Optional per stage:
+                    - `iou_threshold` (float)
+                    - `multi_class_mode` (str)
+                    - `model_weights` (list[float])
+                    - `ensemble_args` (dict): mode-specific args for that stage
+                  Input IDs can reference original model outputs by:
+                    - integer index (0, 1, ...)
+                    - string index ("0", "1", ...)
+                    - "m{i}" (e.g., "m0", "m1", ...)
+                  and can also reference previous stage outputs by their `out_id`.
+                * `final_id` (str, optional): which intermediate ID to return (defaults to the last stage's `out_id`).
+            - Custom ("Custom"):
+                * `custom_id` (str, required): ID of a function registered via `imgLib.ensembleModel.registerCustomEnsembleFunc(custom_id, func)`.
+                * `custom_args` (dict, optional): forwarded to the registered function as `**custom_args`.
+                * `strict` (bool, default True):
+                    - forbids unknown `ensemble_args` keys (only a small allow-list is accepted),
+                    - deep-copies inputs/args before calling the custom function (to prevent accidental mutation),
+                    - and enables stricter validation of numeric values.
+                * `allow_extra_keys` (bool, default False): if True, preserve extra keys returned by the custom function.
+                * `max_boxes` (int|None, optional): if set, raises if the custom output exceeds this number of boxes.
+                Notes on class names:
+                    - The custom function may return `cls_names_dict` but it is optional.
+                    - If it is omitted, a consistent `cls_names_dict` is inherited from upstream inputs when available.
+
+            Pipeline examples
+            -----------------
+            Here are common patterns you can express with `ENSEMBLE_MODE_PIPELINE`:
+            - (A) Merge specialized models: `Concat` (disjoint classes) → `WBF` (merge overlaps) → `Filter` (drop low-score / keep only target classes).
+            - (B) Human-confirmation: anomaly-model + human-model → `IoUFilter` (keep anomalies that overlap humans) → `NMS`.
+            - (C) Consensus-only detections: multi-model → `RateNVONMS` with `thread_rate=0.6` (keep boxes supported by ~60% of models).
+            - (D) High-recall then clean-up: `ORNMS` (permissive voting) → `softNMS` or `NMS`.
+            - (E) Majority-vote smoothing: multi-model → `MajorityRuleNMS`.
+            - (F) Conservative intersection: multi-model → `ANDNMS` (only keep boxes supported by all models).
+            - (G) Two-pass class remap: `WBF` → `Filter(class_remap=...)` to unify label spaces across datasets.
+            - (H) Multi-head composition: run two ensembles separately, then `Concat` their outputs (when class sets are disjoint).
+            - (I) Post-filter with external reference: `Concat` → `IoUFilter` against a 'gate' model output.
+            - (J) Custom post-processing: `WBF` → `Custom(custom_id=...)` for domain-specific score calibration or suppression rules.
+
+            Limitations / scope notes
+            -------------------------
+            This pipeline currently ensembles box-level detections (`bboxes/scores/classes`).
+            It does not merge segmentation masks, keypoints, or tracking/temporal information unless you implement it in Custom mode.
+
             Args:
-                models (list): List of YOLO models.
-                mode (str): Ensemble mode.
-                predict_data: Data to predict.
-                iou_threshold (float): IoU threshold.
-                multi_class_mode (str): Multi-class mode.
-                gpu_flag (bool): Whether to use GPU.
-                ensemble_args (dict): Arguments for the ensemble function.
-                yolo_args (dict): Arguments for the YOLO model.
-                check_model_names_flag (bool): Whether to check the model names.
+                models (list): List of YOLO models (each must implement `.predict(...)`; `model.names` is used when `inject_cls_names_dict=True`).
+                mode (str): Ensemble mode (see above).
+                predict_data: Any input accepted by `ultralytics.YOLO.predict(...)` (path/URL, list of paths, numpy array, PIL image, etc.).
+                iou_threshold (float): IoU threshold used by IoU-based modes (NMS-family, WBF/NMW, IoUFilter, etc.).
+                multi_class_mode (str): Multi-class mode. If None, defaults to `ENSEMBLE_MULTI_CLASS_MODE_EACH_CLASS`.
+                gpu_flag (bool): Whether to run inference with CUDA autocast (requires torch + CUDA).
+                ensemble_args (dict): Mode-specific arguments for the ensemble step. See 'About ensemble_args'.
+                yolo_args (dict): Keyword args forwarded to each model's `.predict(...)`.
+                check_model_names_flag (bool): If True, verifies all models expose `.names` and that they match (required when injecting class names).
 
             Returns:
-                list: List of ensemble results.
+                list[dict]: Ensemble results for each predicted image (see 'Overview').
 
             Raises:
-                ValueError: If the models are not a list or if they do not have the 'names' attribute.
-                RuntimeError: If the YOLO results lengths are not aligned.
+                ValueError: If argument types are invalid, the mode is unsupported, or required `ensemble_args` keys are missing.
+                RuntimeError: If the models produce different numbers of results, or torch is not installed when required.
             """
             if(multi_class_mode==None):
                 multi_class_mode=imgLib.ensembleModel.ENSEMBLE_MULTI_CLASS_MODE_EACH_CLASS
@@ -25766,16 +25930,31 @@ class imgLib:
                 ensemble_args={}
             else:
                 ensemble_args=pyExLib.safety_deepcopy(ensemble_args)
-        
+            if(not isinstance(ensemble_args,dict)):
+                raise ValueError("Error : ensemble_args must be a dict!")
+            
             if(yolo_args is None):
                 yolo_args={}
             else:
                 yolo_args=pyExLib.safety_deepcopy(yolo_args)
+            if(not isinstance(yolo_args,dict)):
+                raise ValueError("Error : yolo_args must be a dict!")
 
-            class_names=imgLib.ensembleModel.MultiYOLOModelModule.getClassNames(
-                models,
-                check_model_names_flag
-            )
+            inject_cls_names_dict=ensemble_args.get("inject_cls_names_dict",True)
+            if(not isinstance(inject_cls_names_dict,bool)):
+                raise ValueError("Error : inject_cls_names_dict must be a bool!")
+            if((not inject_cls_names_dict) and  check_model_names_flag):
+                raise ValueError("Error : When inject_cls_names_dict is False, check_model_names_flag must be False too!")
+            if(inject_cls_names_dict and (not check_model_names_flag)):
+                raise ValueError("Error : When inject_cls_names_dict is True, check_model_names_flag must be True!")
+            if(inject_cls_names_dict):
+                class_names=imgLib.ensembleModel.MultiYOLOModelModule.getClassNames(
+                    models,
+                    check_model_names_flag
+                )
+            else:
+                class_names=None
+
             ns,all_results=imgLib.ensembleModel.MultiYOLOModelModule.predictAllYOLOModels(
                 models=models,
                 predict_data=predict_data,
@@ -25859,6 +26038,7 @@ class imgLib:
         ENSEMBLE_MODE_NMS="NMS"
         ENSEMBLE_MODE_SOFT_NMS="softNMS"
         ENSEMBLE_MODE_NVO_NMS="NVONMS"
+        ENSEMBLE_MODE_RATE_NVO_NMS="RateNVONMS"
         ENSEMBLE_MODE_MAJORITY_RULE_NMS="MajorityRuleNMS"
         ENSEMBLE_MODE_AND_NMS="ANDNMS"
         ENSEMBLE_MODE_OR_NMS="ORNMS"
@@ -25866,6 +26046,10 @@ class imgLib:
         ENSEMBLE_MODE_WBF="WBF"
         ENSEMBLE_MODE_CENTER_CLUSTER="CenterCluster"
         ENSEMBLE_MODE_PIPELINE="PipeLine"
+        ENSEMBLE_MODE_FILTER="Filter"
+        ENSEMBLE_MODE_IOU_FILTER="IoUFilter"
+        ENSEMBLE_MODE_CONCAT="Concat"
+        ENSEMBLE_MODE_CUSTOM="Custom"
 
         ENSEMBLE_MULTI_CLASS_MODE_EACH_CLASS="EachClass"
         ENSEMBLE_MULTI_CLASS_MODE_ALL_CLASS_TOGETHER="AllClassTogether"
@@ -25874,6 +26058,169 @@ class imgLib:
         CENTER_CLUSTER_DEFAULT_SIZE_RATIO_THRESHOLD=2.0
         CENTER_CLUSTER_DEFAULT_OVERLAP_RATIO_THRESHOLD=0.2
         CENTER_CLUSTER_DEFAULT_MIN_CLUSTER_SIZE=1
+        
+        # Custom ensemble functions registry (for ENSEMBLE_MODE_CUSTOM)
+        _CUSTOM_ENSEMBLE_FUNC_REGISTRY={}
+
+        @staticmethod
+        def registerCustomEnsembleFunc(custom_id:str,func:callable,overwrite:bool=False):
+            """
+            Registers a custom ensemble function for ENSEMBLE_MODE_CUSTOM.
+
+            Contract:
+                func(yolo_inputs:list[dict], iou_threshold:float, multi_class_mode:str, **custom_args) -> dict
+
+            Where each element in yolo_inputs is a normalized dict:
+                {"bboxes": [[x1,y1,x2,y2],...], "scores": [..], "classes": [..], "cls_names_dict": {id:name}? }
+            The returned dict must contain at least: bboxes, scores, classes. (cls_names_dict is optional.)
+            """
+            if(not isinstance(custom_id,str) or len(custom_id)==0):
+                raise ValueError("Error : custom_id must be a non-empty str!")
+            if(not callable(func)):
+                raise ValueError("Error : func must be callable!")
+            if((not overwrite) and (custom_id in imgLib.ensembleModel._CUSTOM_ENSEMBLE_FUNC_REGISTRY)):
+                raise ValueError(f"Error : custom ensemble func already registered => {custom_id}")
+            imgLib.ensembleModel._CUSTOM_ENSEMBLE_FUNC_REGISTRY[custom_id]=func
+
+        @staticmethod
+        def getCustomEnsembleFunc(custom_id:str):
+            """Returns a registered custom ensemble function."""
+            if(not isinstance(custom_id,str) or len(custom_id)==0):
+                raise ValueError("Error : custom_id must be a non-empty str!")
+            if(custom_id not in imgLib.ensembleModel._CUSTOM_ENSEMBLE_FUNC_REGISTRY):
+                raise ValueError(f"Error : custom ensemble func not found => {custom_id}")
+            return imgLib.ensembleModel._CUSTOM_ENSEMBLE_FUNC_REGISTRY[custom_id]
+
+        @staticmethod
+        def __validateEnsembleOutDict(out:dict,strict:bool=True,allow_extra_keys:bool=False,max_boxes:int|None=None,fallback_cls_names_dict:dict|None=None):
+            """Validates and canonicalizes an ensemble output dict."""
+            if(not isinstance(out,dict)):
+                raise ValueError("Error : CUSTOM must return a dict!")
+            if(("bboxes" not in out) or ("scores" not in out) or ("classes" not in out)):
+                raise ValueError("Error : CUSTOM output must contain keys: 'bboxes','scores','classes'!")
+
+            b=out["bboxes"]; s=out["scores"]; c=out["classes"]
+            if(not isinstance(b,list) or not isinstance(s,list) or not isinstance(c,list)):
+                raise ValueError("Error : 'bboxes','scores','classes' must be list!")
+            if(not(len(b)==len(s) and len(b)==len(c))):
+                raise ValueError("Error : The lengths of bboxes, scores, and classes are not aligned!")
+            if((max_boxes is not None) and (len(b)>int(max_boxes))):
+                raise ValueError("Error : CUSTOM output exceeds max_boxes!")
+
+            nb=[]; ns=[]; nc=[]
+            for bb,sc,cl in zip(b,s,c):
+                if((not isinstance(bb,(list,tuple))) or (len(bb)!=4)):
+                    raise ValueError("Error : Each bbox must be a list/tuple of length 4!")
+                x1=float(bb[0]); y1=float(bb[1]); x2=float(bb[2]); y2=float(bb[3])
+                if(not (math.isfinite(x1) and math.isfinite(y1) and math.isfinite(x2) and math.isfinite(y2))):
+                    raise ValueError("Error : bbox contains non-finite values!")
+                sc=float(sc)
+                if(not math.isfinite(sc)):
+                    raise ValueError("Error : score contains non-finite values!")
+                if(strict and (sc<0.0)):
+                    raise ValueError("Error : score must be >=0 in strict mode!")
+                cl=int(cl)
+                nb.append([x1,y1,x2,y2]); ns.append(sc); nc.append(cl)
+
+            out_names=None
+            if("cls_names_dict" in out):
+                out_names=out["cls_names_dict"]
+                if(out_names is not None):
+                    if(not isinstance(out_names,dict)):
+                        raise ValueError("Error : cls_names_dict must be a dict or None!")
+                    fixed={}
+                    for k,v in out_names.items():
+                        kk=int(k) if (isinstance(k,(int,str)) and str(k).lstrip('-').isdigit()) else None
+                        if(kk is None):
+                            raise ValueError("Error : cls_names_dict keys must be int-like!")
+                        fixed[kk]=str(v)
+                    out_names=fixed
+
+            # Fallback cls_names_dict inheritance:
+            # If the CUSTOM function does not return cls_names_dict, inherit it from upstream inputs (when provided).
+            # In strict mode, conflicts between output and fallback are treated as errors.
+            if(fallback_cls_names_dict is not None):
+                if(not isinstance(fallback_cls_names_dict,dict)):
+                    raise ValueError("Error : fallback_cls_names_dict must be a dict or None!")
+                fixed_fb={}
+                for k,v in fallback_cls_names_dict.items():
+                    try:
+                        kk=int(k)
+                    except Exception:
+                        raise ValueError("Error : fallback_cls_names_dict keys must be int-like!")
+                    fixed_fb[kk]=str(v)
+                if(out_names is None):
+                    out_names=fixed_fb
+                elif(strict and (out_names!=fixed_fb)):
+                    raise ValueError("Error : cls_names_dict conflicts with fallback_cls_names_dict!")
+
+            if(allow_extra_keys):
+                out2=pyExLib.safety_deepcopy(out)
+                out2["bboxes"]=nb; out2["scores"]=ns; out2["classes"]=nc
+                if(out_names is not None):
+                    out2["cls_names_dict"]=out_names
+                return out2
+
+            out2={"bboxes":nb,"scores":ns,"classes":nc}
+            if(out_names is not None):
+                out2["cls_names_dict"]=out_names
+            return out2
+
+        def __extractXyxyConfCls(yri,w=1.0):
+            """
+            Extracts bounding boxes, confidence scores, and class numbers from YOLO results.
+
+            Args:
+                yri: YOLO result.
+                w (float): Weight for confidence scores.
+
+            Returns:
+                tuple: Tuple containing bounding boxes, confidence scores, class numbers, and class names.
+            """
+            names=None
+            if(isinstance(yri,ultralytics.engine.results.Results)):
+                if(not IMPORT_TORCH_FLAG):
+                    raise RuntimeError("Error : The torch package is not installed!")
+                b=yri.boxes.xyxy.tolist()
+                s=yri.boxes.conf.tolist()
+                c=yri.boxes.cls.tolist()
+                if(hasattr(yri,"names")):
+                    names=yri.names
+            elif(isinstance(yri,dict)):
+                if("boxes" in yri):
+                    bd=yri["boxes"]
+                    b=bd["xyxy"]; s=bd["conf"]; c=bd["cls"]
+                elif(("bboxes" in yri) and ("scores" in yri) and ("classes" in yri)):
+                    b=yri["bboxes"]; s=yri["scores"]; c=yri["classes"]
+                else:
+                    raise ValueError("Error : dict input must have 'boxes' or ('bboxes','scores','classes').")
+                if("cls_names_dict" in yri):
+                    names=yri["cls_names_dict"]
+            else:
+                raise ValueError("Error : Unsupported yolo result type!")
+            if(w!=1.0):
+                s=[float(v)*w for v in s]
+            c=[int(v) for v in c]
+            return b,s,c,names
+
+        def __namesToIds(names_dict,name_list):
+            """
+            Converts class names to class IDs.
+
+            Args:
+                names_dict (dict): Dictionary mapping class IDs to class names.
+                name_list (list): List of class names.
+
+            Returns:
+                list: List of class IDs.
+            """
+            if(names_dict is None):
+                raise ValueError("Error : name-based selection requires names.")
+            if(isinstance(names_dict,dict)):
+                inv={v:k for k,v in names_dict.items()}
+                return [int(inv[n]) for n in name_list]
+
+            raise ValueError("Error : names must be a dict like {id:name}.")
 
         @staticmethod
         def EnsembleFunc4YOLOResult(
@@ -25915,6 +26262,196 @@ class imgLib:
                     yolo_ensemble_argv
                 )
             
+            elif(mode==imgLib.ensembleModel.ENSEMBLE_MODE_FILTER):
+                if(len(yolo_result_list)!=1):
+                    raise ValueError("In Filter mode, inputs must be 1.")
+                b,s,c,names=imgLib.ensembleModel.__extractXyxyConfCls(yolo_result_list[0],1.0)
+
+                name_allow=yolo_ensemble_argv.get("name_allow",None)
+                class_allow=yolo_ensemble_argv.get("class_allow",None)
+                invert=bool(yolo_ensemble_argv.get("invert",False))
+                min_score=yolo_ensemble_argv.get("min_score",None)
+
+                allow_set=None
+                if(name_allow is not None):
+                    allow_set=set(imgLib.ensembleModel.__namesToIds(names,name_allow))
+                elif(class_allow is not None):
+                    allow_set=set([int(v) for v in class_allow])
+
+                class_remap=yolo_ensemble_argv.get("class_remap",None)
+                output_class_names=yolo_ensemble_argv.get("output_class_names",None)
+
+                nb=[]; ns=[]; nc=[]
+                for bb,sc,cl in zip(b,s,c):
+                    ok=True
+                    if(allow_set is not None):
+                        ok=(cl in allow_set)
+                    if(min_score is not None):
+                        ok=ok and (float(sc)>=float(min_score))
+                    if(invert):
+                        ok=not ok
+                    if(not ok):
+                        continue
+
+                    new_cl=cl
+                    if(class_remap is not None):
+                        if(cl in class_remap):
+                            new_cl=int(class_remap[cl])
+                        elif(names is not None and isinstance(names,dict) and names.get(cl,None) in class_remap):
+                            new_cl=int(class_remap[names[cl]])
+                        else:
+                            raise ValueError(f"Error : class_remap missing for class {cl}.")
+                    nb.append(bb)
+                    ns.append(sc)
+                    nc.append(new_cl)
+
+                out={"bboxes":nb,"scores":ns,"classes":nc}
+                if(output_class_names is not None):
+                    out["cls_names_dict"]=pyExLib.safety_deepcopy(output_class_names)
+                return out
+
+            elif(mode==imgLib.ensembleModel.ENSEMBLE_MODE_IOU_FILTER):
+                src_i=int(yolo_ensemble_argv.get("src_i",0))
+                ref_i=int(yolo_ensemble_argv.get("ref_i",1))
+                empty_ref_policy=yolo_ensemble_argv.get("empty_ref_policy","keep_none") # keep_none / keep_all
+                if(src_i==ref_i):
+                    raise ValueError("Error : src_i and ref_i must be different.")
+                if(len(yolo_result_list)<=max(src_i,ref_i)):
+                    raise ValueError("Error : not enough inputs for IoUFilter.")
+
+                sb,ss,sc,sn=imgLib.ensembleModel.__extractXyxyConfCls(yolo_result_list[src_i],1.0)
+                rb,rs,rc,rn=imgLib.ensembleModel.__extractXyxyConfCls(yolo_result_list[ref_i],1.0)
+
+                if(len(rb)==0):
+                    if(empty_ref_policy=="keep_all"):
+                        out={"bboxes":sb,"scores":ss,"classes":sc}
+                    else:
+                        out={"bboxes":[],"scores":[],"classes":[]}
+                    if(sn is not None):
+                        out["cls_names_dict"]=pyExLib.safety_deepcopy(sn)
+                    return out
+
+                nb=[]; ns=[]; nc=[]
+                for bb,scor,cl in zip(sb,ss,sc):
+                    best=0.0
+                    for rbb in rb:
+                        iou=imgLib.IoULib.IoU(bb,rbb)
+                        if(iou>best):
+                            best=iou
+                    if(best>=float(iou_threshold)):
+                        nb.append(bb); ns.append(scor); nc.append(cl)
+
+                out={"bboxes":nb,"scores":ns,"classes":nc}
+                if(sn is not None):
+                    out["cls_names_dict"]=pyExLib.safety_deepcopy(sn)
+                return out
+
+            elif(mode==imgLib.ensembleModel.ENSEMBLE_MODE_CUSTOM):
+                # Strict custom stage execution with validated I/O contract.
+                custom_id=yolo_ensemble_argv.get("custom_id",None)
+                if(custom_id is None):
+                    raise ValueError("In Custom mode, a 'custom_id' argument is required!")
+                if(not isinstance(custom_id,str)):
+                    raise ValueError("In Custom mode, 'custom_id' must be a str!")
+
+                custom_args=yolo_ensemble_argv.get("custom_args",None)
+                if(custom_args is None):
+                    custom_args={}
+                if(not isinstance(custom_args,dict)):
+                    raise ValueError("In Custom mode, 'custom_args' must be a dict!")
+
+                strict=bool(yolo_ensemble_argv.get("strict",True))
+                allow_extra_keys=bool(yolo_ensemble_argv.get("allow_extra_keys",False))
+                max_boxes=yolo_ensemble_argv.get("max_boxes",None)
+                if(max_boxes is not None):
+                    max_boxes=int(max_boxes)
+
+                # Only allow known keys in strict mode to avoid surprises.
+                if(strict):
+                    allowed_keys=set(["custom_id","custom_args","strict","allow_extra_keys","max_boxes","model_weights"])
+                    for k in yolo_ensemble_argv.keys():
+                        if(k not in allowed_keys):
+                            raise ValueError(f"In Custom mode, unknown ensemble_args key is not allowed in strict mode => {k}")
+
+                # Optional per-input weights
+                model_weights=yolo_ensemble_argv.get("model_weights",None)
+                if(model_weights is not None):
+                    if(not isinstance(model_weights,list)):
+                        raise ValueError("Error : 'model_weights' must be a list!")
+                    if(len(model_weights)!=len(yolo_result_list)):
+                        raise ValueError("Error : The length of 'model_weights' must match yolo_result_list!")
+                    model_weights=[float(w) for w in model_weights]
+
+                yolo_inputs=[]
+                for i,yri in enumerate(yolo_result_list):
+                    w=1.0 if (model_weights is None) else model_weights[i]
+                    b,s,c,n=imgLib.ensembleModel.__extractXyxyConfCls(yri,w)
+                    d={"bboxes":b,"scores":s,"classes":c}
+                    if(n is not None):
+                        d["cls_names_dict"]=n
+                    yolo_inputs.append(d)
+
+                # Determine a consistent cls_names_dict from inputs (if any), to be used as a safe fallback.
+                fallback_cls_names_dict=None
+                for d in yolo_inputs:
+                    n=d.get("cls_names_dict",None)
+                    if(n is None):
+                        continue
+                    if(fallback_cls_names_dict is None):
+                        fallback_cls_names_dict=n
+                    elif(n!=fallback_cls_names_dict):
+                        if(strict):
+                            raise ValueError("Error : cls_names_dict conflict across Custom inputs!")
+                        fallback_cls_names_dict=None
+                        break
+
+                fn=imgLib.ensembleModel.getCustomEnsembleFunc(custom_id)
+                # Pass deep-copied inputs/args in strict mode to prevent accidental mutation.
+                in_payload=pyExLib.safety_deepcopy(yolo_inputs) if strict else yolo_inputs
+                arg_payload=pyExLib.safety_deepcopy(custom_args) if strict else custom_args
+
+                out=fn(
+                    yolo_inputs=in_payload,
+                    iou_threshold=iou_threshold,
+                    multi_class_mode=multi_class_mode,
+                    **arg_payload
+                )
+                return imgLib.ensembleModel.__validateEnsembleOutDict(
+                    out=out,
+                    fallback_cls_names_dict=fallback_cls_names_dict,
+                    strict=strict,
+                    allow_extra_keys=allow_extra_keys,
+                    max_boxes=max_boxes
+                )
+
+            elif(mode==imgLib.ensembleModel.ENSEMBLE_MODE_CONCAT):
+                require_disjoint_classes=bool(yolo_ensemble_argv.get("require_disjoint_classes",True))
+
+                all_b=[]; all_s=[]; all_c=[]
+                merged_names={}
+                seen=set()
+
+                for yri in yolo_result_list:
+                    b,s,c,n=imgLib.ensembleModel.__extractXyxyConfCls(yri,1.0)
+                    if(require_disjoint_classes):
+                        cur=set(c)
+                        if(len(cur&seen)>0):
+                            raise ValueError("Error : class id collision in Concat (require_disjoint_classes=True).")
+                        seen|=cur
+                    all_b.extend(b)
+                    all_s.extend(s)
+                    all_c.extend(c)
+                    if(isinstance(n,dict)):
+                        for k,v in n.items():
+                            if(k in merged_names and merged_names[k]!=v):
+                                raise ValueError("Error : cls_names_dict collision in Concat.")
+                            merged_names[k]=v
+
+                out={"bboxes":all_b,"scores":all_s,"classes":all_c}
+                if(len(merged_names)>0):
+                    out["cls_names_dict"]=pyExLib.safety_deepcopy(merged_names)
+                return out
+
             else:
                 # model_weights
                 model_weights=yolo_ensemble_argv.pop("model_weights",None)
@@ -26039,7 +26576,27 @@ class imgLib:
                         )
                     else:
                         raise ValueError("In NVONMS mode, a 'num_thread' argument is required!")
-                    
+
+                elif(mode==imgLib.ensembleModel.ENSEMBLE_MODE_RATE_NVO_NMS):
+                    if("thread_rate" in yolo_ensemble_argv):
+                        thread_rate=yolo_ensemble_argv["thread_rate"]
+                        if(not isinstance(thread_rate,(int,float))):
+                            raise ValueError("In RateNVONMS mode, 'thread_rate' must be a numeric value!")
+                        if(not (0.0<=thread_rate<=1.0)):
+                            raise ValueError("In RateNVONMS mode, 'thread_rate' must be in [0.0,1.0]!")
+                        num_thread=math.floor(models_num*thread_rate)
+                        
+                        return imgLib.ensembleModel.NVONMS(
+                            bboxes=bboxes,
+                            scores=scores,
+                            classes=classes,
+                            iou_threshold=iou_threshold,
+                            multi_class_mode=multi_class_mode,
+                            num_thread=num_thread
+                        )
+                    else:
+                        raise ValueError("In RateNVONMS mode, a 'thread_rate' argument is required!")
+
                 elif(mode==imgLib.ensembleModel.ENSEMBLE_MODE_MAJORITY_RULE_NMS):
                     return imgLib.ensembleModel.NVONMS(
                         bboxes=bboxes,
@@ -26981,6 +27538,7 @@ class imgLib:
                     imgLib.ensembleModel.ENSEMBLE_MODE_NMS,
                     imgLib.ensembleModel.ENSEMBLE_MODE_SOFT_NMS,
                     imgLib.ensembleModel.ENSEMBLE_MODE_NVO_NMS,
+                    imgLib.ensembleModel.ENSEMBLE_MODE_RATE_NVO_NMS,
                     imgLib.ensembleModel.ENSEMBLE_MODE_MAJORITY_RULE_NMS,
                     imgLib.ensembleModel.ENSEMBLE_MODE_AND_NMS,
                     imgLib.ensembleModel.ENSEMBLE_MODE_OR_NMS,
