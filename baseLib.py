@@ -25868,6 +25868,10 @@ class imgLib:
                 if(not inject_cls_names_dict):
                     class_names=None
 
+                inject_img_wh=ensemble_args.get("inject_img_wh",True)
+                if(not isinstance(inject_img_wh,bool)):
+                    raise ValueError("Error : inject_img_wh must be a bool!")
+
                 if(iou_threshold==None):
                     iou_threshold=imgLib.ensembleModel.DEFAULT_IOU_THRESHOLD
                 if(multi_class_mode==None):
@@ -25876,6 +25880,16 @@ class imgLib:
                 r=[]
                 for i in range(ns):
                     tmp_data=[results[i] for results in all_results]
+
+                    img_wh=None
+                    if(inject_img_wh):
+                        # infer per-image size from any input (prefer the first that has it)
+                        for _yri in tmp_data:
+                            _wh=imgLib.ensembleModel._extractImgWh(_yri)
+                            if(_wh is not None):
+                                img_wh=_wh
+                                break
+
                     ri_dict=imgLib.ensembleModel.EnsembleFunc4YOLOResult(
                         mode=mode,
                         yolo_result_list=tmp_data,
@@ -25895,6 +25909,18 @@ class imgLib:
                                 if(isinstance(sub,dict) and ("bboxes" in sub) and ("scores" in sub) and ("classes" in sub)):
                                     if("cls_names_dict" not in sub):
                                         sub["cls_names_dict"]=pyExLib.safety_deepcopy(class_names)
+
+                    if(inject_img_wh and (img_wh is not None)):
+                        # single-output dict
+                        if(isinstance(ri_dict,dict) and ("bboxes" in ri_dict) and ("scores" in ri_dict) and ("classes" in ri_dict)):
+                            if("img_wh" not in ri_dict):
+                                ri_dict["img_wh"]=img_wh
+                        # multi-output dict (e.g., {"a":{...},"b":{...}})
+                        elif(isinstance(ri_dict,dict)):
+                            for _,sub in ri_dict.items():
+                                if(isinstance(sub,dict) and ("bboxes" in sub) and ("scores" in sub) and ("classes" in sub)):
+                                    if("img_wh" not in sub):
+                                        sub["img_wh"]=img_wh
 
                     r.append(ri_dict)
 
@@ -26042,6 +26068,18 @@ class imgLib:
                 * `class_allow` (list[int], optional): allow-list by class id.
                 * `invert` (bool, optional): if True, invert the allow-list selection.
                 * `min_score` (float, optional): drop boxes with score < min_score.
+                * `min_area` (float|int, optional): keep boxes with bbox area >= `min_area` (pixel^2).
+                * `max_area` (float|int, optional): keep boxes with bbox area <= `max_area` (pixel^2).
+                * `min_area_ratio` (float, optional): keep boxes with (bbox_area / image_area) >= `min_area_ratio` (0..1).
+                * `max_area_ratio` (float, optional): keep boxes with (bbox_area / image_area) <= `max_area_ratio` (0..1).
+                * `min_w` (float|int, optional): keep boxes with bbox width  >= `min_w` (pixel).
+                * `max_w` (float|int, optional): keep boxes with bbox width  <= `max_w` (pixel).
+                * `min_h` (float|int, optional): keep boxes with bbox height >= `min_h` (pixel).
+                * `max_h` (float|int, optional): keep boxes with bbox height <= `max_h` (pixel).
+                * `img_wh` (tuple|dict, optional): required when using `min_area_ratio`/`max_area_ratio`.
+                    - Format: `(w, h)` or `{"w": w, "h": h}`.
+                    - If omitted, the implementation will try to infer it from the input YOLO result (e.g., propagated `img_wh` / `orig_shape`).
+                    - If provided and it differs from the inferred value, an error is raised.
                 * `class_remap` (dict, optional): remap classes. Keys can be class ids or class names; values are new ids.
                 * `output_class_names` (dict, optional): override output `cls_names_dict`.
             
@@ -26427,6 +26465,184 @@ class imgLib:
                 s=[float(v)*w for v in s]
             c=[int(v) for v in c]
             return b,s,c,names
+        
+        @staticmethod
+        def _extractImgWh(yri):
+            """
+            Extracts image size as (w,h) from a YOLO result (Results or dict).
+            Returns None if not available.
+
+            Args:
+                yri: YOLO result.
+
+            Returns:
+                tuple | None: (w, h) or None if not found.
+            """
+            # ultralytics Results
+            if(isinstance(yri,ultralytics.engine.results.Results)):
+                if(hasattr(yri,"orig_shape") and (yri.orig_shape is not None)):
+                    try:
+                        h=int(yri.orig_shape[0]); w=int(yri.orig_shape[1])
+                        return (w,h)
+                    except Exception:
+                        pass
+                if(hasattr(yri,"boxes") and hasattr(yri.boxes,"orig_shape") and (yri.boxes.orig_shape is not None)):
+                    try:
+                        h=int(yri.boxes.orig_shape[0]); w=int(yri.boxes.orig_shape[1])
+                        return (w,h)
+                    except Exception:
+                        pass
+
+            # dict schema
+            if(isinstance(yri,dict)):
+                if("img_wh" in yri):
+                    v=yri["img_wh"]
+                    if(isinstance(v,(tuple,list)) and len(v)==2):
+                        return (int(v[0]),int(v[1]))
+                    if(isinstance(v,dict) and ("w" in v) and ("h" in v)):
+                        return (int(v["w"]),int(v["h"]))
+                if("orig_shape" in yri):
+                    v=yri["orig_shape"]
+                    if(isinstance(v,(tuple,list)) and len(v)>=2):
+                        return (int(v[1]),int(v[0]))
+                if(("boxes" in yri) and isinstance(yri["boxes"],dict) and ("orig_shape" in yri["boxes"])):
+                    v=yri["boxes"]["orig_shape"]
+                    if(isinstance(v,(tuple,list)) and len(v)>=2):
+                        return (int(v[1]),int(v[0]))
+
+            return None
+
+        @staticmethod
+        def _normalizeClsNamesDict(names_dict):
+            """
+            Normalizes a class-names mapping to {int: str}. Returns None if names_dict is None.
+            """
+            if(names_dict is None):
+                return None
+            if(not isinstance(names_dict,dict)):
+                return names_dict
+            fixed={}
+            for k,v in names_dict.items():
+                try:
+                    kk=int(k)
+                except Exception:
+                    raise ValueError("Error : cls_names_dict keys must be int-like!")
+                fixed[kk]=str(v)
+            return fixed
+
+        @staticmethod
+        def _extractClsNamesDict(yri):
+            """
+            Extracts cls_names_dict (id->name) from a YOLO result (Results or dict).
+            Returns None if not available.
+            """
+            if(isinstance(yri,ultralytics.engine.results.Results)):
+                if(hasattr(yri,"names")):
+                    try:
+                        return imgLib.ensembleModel._normalizeClsNamesDict(yri.names)
+                    except Exception:
+                        return yri.names
+                return None
+            if(isinstance(yri,dict)):
+                if("cls_names_dict" in yri):
+                    return imgLib.ensembleModel._normalizeClsNamesDict(yri.get("cls_names_dict",None))
+                if("names" in yri):
+                    return imgLib.ensembleModel._normalizeClsNamesDict(yri.get("names",None))
+            return None
+
+        @staticmethod
+        def _normalizeImgWh(img_wh):
+            """Normalizes img_wh to (w,h) tuple or None."""
+            if(img_wh is None):
+                return None
+            if(isinstance(img_wh,(tuple,list)) and len(img_wh)==2):
+                return (int(img_wh[0]),int(img_wh[1]))
+            if(isinstance(img_wh,dict) and ("w" in img_wh) and ("h" in img_wh)):
+                return (int(img_wh["w"]),int(img_wh["h"]))
+            return None
+
+        @staticmethod
+        def _unifyImgWh(yolo_inputs:list,strict:bool=True):
+            """
+            Unifies img_wh across inputs. Returns None if not found.
+            If strict=True, raises on conflicts.
+            """
+            base=None
+            for yri in yolo_inputs:
+                wh=imgLib.ensembleModel._normalizeImgWh(imgLib.ensembleModel._extractImgWh(yri))
+                if(wh is None):
+                    continue
+                if(base is None):
+                    base=wh
+                elif(wh!=base):
+                    if(strict):
+                        raise ValueError("Error : img_wh conflict across Pipeline inputs!")
+                    return None
+            return base
+
+        @staticmethod
+        def _unifyClsNamesDict(yolo_inputs:list,strict:bool=True):
+            """
+            Unifies cls_names_dict across inputs. Returns None if not found.
+            If strict=True, raises on conflicts.
+            """
+            base=None
+            for yri in yolo_inputs:
+                n=imgLib.ensembleModel._extractClsNamesDict(yri)
+                if(n is None):
+                    continue
+                if(base is None):
+                    base=n
+                elif(n!=base):
+                    if(strict):
+                        raise ValueError("Error : cls_names_dict conflict across Pipeline inputs!")
+                    return None
+            return base
+
+        @staticmethod
+        def _propagateMetaToOutDict(out_dict:dict,cls_names_dict:dict=None,img_wh:tuple=None,stage_label:str=""):
+            """
+            Propagates cls_names_dict and img_wh into out_dict when missing.
+            Raises on conflicts when out_dict already has different values.
+            """
+            if(not isinstance(out_dict,dict)):
+                return out_dict
+
+            # multi-output dict: propagate into each YOLO-like sub-dict
+            if(("bboxes" not in out_dict) or ("scores" not in out_dict) or ("classes" not in out_dict)):
+                for k,v in out_dict.items():
+                    if(isinstance(v,dict) and ("bboxes" in v) and ("scores" in v) and ("classes" in v)):
+                        out_dict[k]=imgLib.ensembleModel._propagateMetaToOutDict(
+                            v,
+                            cls_names_dict=cls_names_dict,
+                            img_wh=img_wh,
+                            stage_label=f"{stage_label}/{k}" if stage_label else str(k),
+                        )
+                return out_dict
+
+            # cls_names_dict
+            if(cls_names_dict is not None):
+                cur=out_dict.get("cls_names_dict",None)
+                if(cur is None):
+                    out_dict["cls_names_dict"]=pyExLib.safety_deepcopy(cls_names_dict)
+                else:
+                    cur_n=imgLib.ensembleModel._normalizeClsNamesDict(cur) if isinstance(cur,dict) else cur
+                    if(cur_n!=cls_names_dict):
+                        raise ValueError(f"Error : cls_names_dict conflict in Pipeline stage '{stage_label}'.")
+
+            # img_wh
+            if(img_wh is not None):
+                cur=out_dict.get("img_wh",None)
+                if(cur is None):
+                    out_dict["img_wh"]=imgLib.ensembleModel._normalizeImgWh(img_wh)
+                else:
+                    cur_wh=imgLib.ensembleModel._normalizeImgWh(cur)
+                    if(cur_wh is None):
+                        out_dict["img_wh"]=imgLib.ensembleModel._normalizeImgWh(img_wh)
+                    elif(cur_wh!=imgLib.ensembleModel._normalizeImgWh(img_wh)):
+                        raise ValueError(f"Error : img_wh conflict in Pipeline stage '{stage_label}'.")
+
+            return out_dict
 
         def __namesToIds(names_dict,name_list):
             """
@@ -26490,12 +26706,48 @@ class imgLib:
             elif(mode==imgLib.ensembleModel.ENSEMBLE_MODE_FILTER):
                 if(len(yolo_result_list)!=1):
                     raise ValueError("In Filter mode, inputs must be 1.")
-                b,s,c,names=imgLib.ensembleModel.__extractXyxyConfCls(yolo_result_list[0],1.0)
+                yri0=yolo_result_list[0]
+                b,s,c,names=imgLib.ensembleModel.__extractXyxyConfCls(yri0,1.0)
 
                 name_allow=yolo_ensemble_argv.get("name_allow",None)
                 class_allow=yolo_ensemble_argv.get("class_allow",None)
                 invert=bool(yolo_ensemble_argv.get("invert",False))
                 min_score=yolo_ensemble_argv.get("min_score",None)
+
+                min_area=yolo_ensemble_argv.get("min_area",None)
+                max_area=yolo_ensemble_argv.get("max_area",None)
+                min_area_ratio=yolo_ensemble_argv.get("min_area_ratio",None)
+                max_area_ratio=yolo_ensemble_argv.get("max_area_ratio",None)
+                min_w=yolo_ensemble_argv.get("min_w",None)
+                max_w=yolo_ensemble_argv.get("max_w",None)
+                min_h=yolo_ensemble_argv.get("min_h",None)
+                max_h=yolo_ensemble_argv.get("max_h",None)
+
+                # auto-apply propagated img_wh (from pipeline outputs etc.)
+                # if img_wh is explicitly provided and differs from propagated, raise error
+                img_wh_argv=yolo_ensemble_argv.get("img_wh",None)
+                img_wh_in=imgLib.ensembleModel._extractImgWh(yri0)
+                img_wh=None
+                if(img_wh_argv is not None):
+                    if(isinstance(img_wh_argv,(tuple,list)) and len(img_wh_argv)==2):
+                        img_wh=(int(img_wh_argv[0]),int(img_wh_argv[1]))
+                    elif(isinstance(img_wh_argv,dict) and ("w" in img_wh_argv) and ("h" in img_wh_argv)):
+                        img_wh=(int(img_wh_argv["w"]),int(img_wh_argv["h"]))
+                    else:
+                        raise ValueError("Error : img_wh must be (w,h) or {'w':w,'h':h}.")
+                    if((img_wh_in is not None) and (tuple(img_wh_in)!=tuple(img_wh))):
+                        raise ValueError(f"Error : img_wh mismatch. argv={img_wh}, inferred={img_wh_in}.")
+                else:
+                    img_wh=img_wh_in
+
+                use_ratio=((min_area_ratio is not None) or (max_area_ratio is not None))
+                img_area=None
+                if(use_ratio):
+                    if(img_wh is None):
+                        raise ValueError("Error : img_wh is required for min_area_ratio/max_area_ratio.")
+                    img_area=float(img_wh[0])*float(img_wh[1])
+                    if(img_area<=0.0):
+                        raise ValueError("Error : img_wh must be positive for area_ratio.")
 
                 allow_set=None
                 if(name_allow is not None):
@@ -26507,12 +26759,40 @@ class imgLib:
                 output_class_names=yolo_ensemble_argv.get("output_class_names",None)
 
                 nb=[]; ns=[]; nc=[]
+                any_geom_filter=((min_area is not None) or (max_area is not None) or (min_w is not None) or (max_w is not None) or (min_h is not None) or (max_h is not None) or use_ratio)
                 for bb,sc,cl in zip(b,s,c):
                     ok=True
                     if(allow_set is not None):
                         ok=(cl in allow_set)
                     if(min_score is not None):
                         ok=ok and (float(sc)>=float(min_score))
+
+                    if(ok and any_geom_filter):
+                        w_bb=float(bb[2])-float(bb[0])
+                        h_bb=float(bb[3])-float(bb[1])
+                        if((w_bb<=0.0) or (h_bb<=0.0)):
+                            ok=False
+                        else:
+                            area=w_bb*h_bb
+                            if(min_w is not None):
+                                ok=ok and (w_bb>=float(min_w))
+                            if(max_w is not None):
+                                ok=ok and (w_bb<=float(max_w))
+                            if(min_h is not None):
+                                ok=ok and (h_bb>=float(min_h))
+                            if(max_h is not None):
+                                ok=ok and (h_bb<=float(max_h))
+                            if(min_area is not None):
+                                ok=ok and (area>=float(min_area))
+                            if(max_area is not None):
+                                ok=ok and (area<=float(max_area))
+                            if(use_ratio):
+                                ar=area/img_area
+                                if(min_area_ratio is not None):
+                                    ok=ok and (ar>=float(min_area_ratio))
+                                if(max_area_ratio is not None):
+                                    ok=ok and (ar<=float(max_area_ratio))
+
                     if(invert):
                         ok=not ok
                     if(not ok):
@@ -26531,6 +26811,8 @@ class imgLib:
                     nc.append(new_cl)
 
                 out={"bboxes":nb,"scores":ns,"classes":nc}
+                if(img_wh is not None):
+                    out["img_wh"]=img_wh
                 if(output_class_names is not None):
                     out["cls_names_dict"]=pyExLib.safety_deepcopy(output_class_names)
                 return out
@@ -27003,6 +27285,23 @@ class imgLib:
                     multi_class_mode=stage_multi_class_mode,
                     **stage_args
                 )
+
+                # auto propagate meta info (cls_names_dict / img_wh) for downstream stages
+                p_wh=imgLib.ensembleModel._unifyImgWh(stage_input_list,strict=True)
+                p_cls=None
+                if(isinstance(out_dict,dict)):
+                    # propagate cls_names_dict only when the stage output does not already define it
+                    if("cls_names_dict" not in out_dict):
+                        if(len(stage_input_list)==1):
+                            p_cls=imgLib.ensembleModel._extractClsNamesDict(stage_input_list[0])
+                        else:
+                            src_i=stage_args.get("src_i",None)
+                            if(isinstance(src_i,int) and (0<=src_i<len(stage_input_list))):
+                                p_cls=imgLib.ensembleModel._extractClsNamesDict(stage_input_list[src_i])
+                            else:
+                                p_cls=imgLib.ensembleModel._unifyClsNamesDict(stage_input_list,strict=False)
+
+                    out_dict=imgLib.ensembleModel._propagateMetaToOutDict(out_dict,cls_names_dict=p_cls,img_wh=p_wh,stage_label=out_id)
 
                 if(out_id in results_map):
                     raise ValueError(f"In Pipeline mode, out_id {out_id} already exists!")
