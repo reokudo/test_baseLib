@@ -28110,7 +28110,61 @@ class imgLib:
                     imgLib.ensembleModel.ENSEMBLE_MODE_NMW,
                     imgLib.ensembleModel.ENSEMBLE_MODE_WBF,
                     imgLib.ensembleModel.ENSEMBLE_MODE_CENTER_CLUSTER,
+                    imgLib.ensembleModel.ENSEMBLE_MODE_FILTER,
+                    imgLib.ensembleModel.ENSEMBLE_MODE_IOU_FILTER,
+                    imgLib.ensembleModel.ENSEMBLE_MODE_CONCAT,
                 ]
+
+            @staticmethod
+            def _getEnsembleArgsCandidates(mode:str)->list:
+                """
+                Returns a small list of useful `ensemble_args` candidates for a given stage mode.
+                
+                Note:
+                    - Most modes do not use `ensemble_args` -> returns `[{}]`.
+                    - Concat uses `require_disjoint_classes`.
+                    - Filter uses `min_score`.
+                    - IoUFilter uses `empty_ref_policy`.
+
+                Args:
+                    mode (str): Ensemble mode.
+
+                Returns:
+                    list: List of candidate `ensemble_args` dictionaries.
+                """
+                if(mode==imgLib.ensembleModel.ENSEMBLE_MODE_CONCAT):
+                    return [
+                        {"require_disjoint_classes":False},
+                        {"require_disjoint_classes":True},
+                    ]
+                if(mode==imgLib.ensembleModel.ENSEMBLE_MODE_FILTER):
+                    return [
+                        {"min_score":0.01},
+                        {"min_score":0.05},
+                        {"min_score":0.1},
+                        {"min_score":0.2},
+                    ]
+                if(mode==imgLib.ensembleModel.ENSEMBLE_MODE_IOU_FILTER):
+                    return [
+                        {"empty_ref_policy":"keep_none"},
+                        {"empty_ref_policy":"keep_all"},
+                    ]
+                if(mode==imgLib.ensembleModel.ENSEMBLE_MODE_NVO_NMS):
+                    return [
+                        {"num_thread":0},
+                        {"num_thread":1},
+                        {"num_thread":2},
+                        {"num_thread":3},
+                    ]
+                if(mode==imgLib.ensembleModel.ENSEMBLE_MODE_RATE_NVO_NMS):
+                    return [
+                        {"thread_rate":0.25},
+                        {"thread_rate":0.33},
+                        {"thread_rate":0.5},
+                        {"thread_rate":0.67},
+                        {"thread_rate":0.75},
+                    ]
+                return [{}]
 
             @staticmethod
             def _alignBBimgJsonListList(
@@ -28119,6 +28173,10 @@ class imgLib:
             )->tuple[list,list]:
                 """
                 Align BBimgJson lists across models by raw_img_path.
+
+                Args:
+                    bb_img_json_list_list (list): List of BBimgJson lists from different models.
+                    strict (bool): If True, raises an error if the lists are not perfectly aligned.
 
                 Returns:
                     (aligned_list_list, key_list)
@@ -28299,6 +28357,18 @@ class imgLib:
                     - Matching policy: greedy by descending prediction score, one-to-one matching.
                     - A matched pair is counted as TP only if (IoU>=iou_threshold) and (class matches).
                       If IoU matches but class differs, it is treated as FP for predicted class and FN for GT class.
+
+                Args:
+                    bb_img_json_list (list): List of BBimgJson objects.
+                    iou_threshold (float): IoU threshold for matching.
+                    score_threshold (float): Minimum score threshold for predictions to consider.
+                    bbox_key (str): Key for predicted bounding boxes in ANN.
+                    cls_key (str): Key for predicted class numbers in ANN.
+                    score_key (str): Key for predicted scores in ANN.
+                    gt_block_key (str): Key for ground-truth block in BBimgJson dict.
+                    gt_bbox_key (str): Key for ground-truth bounding boxes in GT block.
+                    gt_cls_key (str): Key for ground-truth class numbers in GT block.
+                    eps (float): Small epsilon to avoid division by zero.
 
                 Returns:
                     dict: {
@@ -28922,6 +28992,9 @@ class imgLib:
                 order=sorted(range(m),key=lambda i:base_scores[i],reverse=True)
                 best_model_index=order[0]
 
+                # reference model(s) for IoUFilter templates (top-2 by base score)
+                ref_model_index_list=order[:min(2,len(order))]
+
                 weight_schemes=imgLib.ensembleModel.AutoPipelineSelector._makeWeightSchemes(base_scores)
 
                 # 2) generate candidate pipelines (small template set)
@@ -28938,21 +29011,33 @@ class imgLib:
 
                 # (A) single stage on all models
                 for mode in stage_mode_list:
-                    for iou in stage_iou_threshold_list:
-                        for mcm in stage_multi_class_mode_list:
-                            for w in weight_schemes:
-                                st=imgLib.ensembleModel.AutoPipelineSelector._makeStage(
-                                    out_id="s0",
-                                    inputs=model_ids,
-                                    mode=mode,
-                                    iou_threshold=iou,
-                                    multi_class_mode=mcm,
-                                    model_weights=w
-                                )
-                                _add_candidate(
-                                    {"stages":[st],"final_id":"s0"},
-                                    {"template":"single_stage","stage0_mode":mode}
-                                )
+                    # Filter / IoUFilter need specific input arity -> handled by dedicated templates.
+                    if(mode in [
+                        imgLib.ensembleModel.ENSEMBLE_MODE_FILTER,
+                        imgLib.ensembleModel.ENSEMBLE_MODE_IOU_FILTER,
+                    ]):
+                        continue
+
+                    ea0_list=imgLib.ensembleModel.AutoPipelineSelector._getEnsembleArgsCandidates(mode)
+                    w_list=[None] if(mode==imgLib.ensembleModel.ENSEMBLE_MODE_CONCAT) else weight_schemes
+
+                    for ea0 in ea0_list:
+                        for iou in stage_iou_threshold_list:
+                            for mcm in stage_multi_class_mode_list:
+                                for w in w_list:
+                                    st=imgLib.ensembleModel.AutoPipelineSelector._makeStage(
+                                        out_id="s0",
+                                        inputs=model_ids,
+                                        mode=mode,
+                                        iou_threshold=iou,
+                                        multi_class_mode=mcm,
+                                        model_weights=w,
+                                        ensemble_args=ea0
+                                    )
+                                    _add_candidate(
+                                        {"stages":[st],"final_id":"s0"},
+                                        {"template":"single_stage","stage0_mode":mode,"stage0_args":ea0}
+                                    )
 
                 # (B) merge -> prune (prune works on single input too)
                 merge_modes=[
@@ -28960,6 +29045,7 @@ class imgLib:
                     imgLib.ensembleModel.ENSEMBLE_MODE_NMW,
                     imgLib.ensembleModel.ENSEMBLE_MODE_OR_NMS,
                     imgLib.ensembleModel.ENSEMBLE_MODE_CENTER_CLUSTER,
+                    imgLib.ensembleModel.ENSEMBLE_MODE_CONCAT,
                 ]
                 prune_modes=[
                     imgLib.ensembleModel.ENSEMBLE_MODE_NMS,
@@ -28969,33 +29055,37 @@ class imgLib:
                 for merge_mode in merge_modes:
                     if(merge_mode not in stage_mode_list):
                         continue
+                    ea0_list=imgLib.ensembleModel.AutoPipelineSelector._getEnsembleArgsCandidates(merge_mode)
+                    w_list=[None] if(merge_mode==imgLib.ensembleModel.ENSEMBLE_MODE_CONCAT) else weight_schemes
                     for prune_mode in prune_modes:
                         if(prune_mode not in stage_mode_list):
                             continue
                         for iou0 in stage_iou_threshold_list:
                             for iou1 in stage_iou_threshold_list:
                                 for mcm in stage_multi_class_mode_list:
-                                    for w in weight_schemes:
-                                        st0=imgLib.ensembleModel.AutoPipelineSelector._makeStage(
-                                            out_id="s0",
-                                            inputs=model_ids,
-                                            mode=merge_mode,
-                                            iou_threshold=iou0,
-                                            multi_class_mode=mcm,
-                                            model_weights=w
-                                        )
-                                        st1=imgLib.ensembleModel.AutoPipelineSelector._makeStage(
-                                            out_id="s1",
-                                            inputs=["s0"],
-                                            mode=prune_mode,
-                                            iou_threshold=iou1,
-                                            multi_class_mode=mcm,
-                                            model_weights=None
-                                        )
-                                        _add_candidate(
-                                            {"stages":[st0,st1],"final_id":"s1"},
-                                            {"template":"merge_prune","stage0_mode":merge_mode,"stage1_mode":prune_mode}
-                                        )
+                                    for w in w_list:
+                                        for ea0 in ea0_list:
+                                            st0=imgLib.ensembleModel.AutoPipelineSelector._makeStage(
+                                                out_id="s0",
+                                                inputs=model_ids,
+                                                mode=merge_mode,
+                                                iou_threshold=iou0,
+                                                multi_class_mode=mcm,
+                                                model_weights=w,
+                                                ensemble_args=ea0
+                                            )
+                                            st1=imgLib.ensembleModel.AutoPipelineSelector._makeStage(
+                                                out_id="s1",
+                                                inputs=["s0"],
+                                                mode=prune_mode,
+                                                iou_threshold=iou1,
+                                                multi_class_mode=mcm,
+                                                model_weights=None
+                                            )
+                                            _add_candidate(
+                                                {"stages":[st0,st1],"final_id":"s1"},
+                                                {"template":"merge_prune","stage0_mode":merge_mode,"stage1_mode":prune_mode,"stage0_args":ea0}
+                                            )
 
                 # (C) consensus -> augment(best model) -> prune
                 consensus_modes=[
@@ -29039,6 +29129,107 @@ class imgLib:
                                         {"stages":[st0,st1,st2],"final_id":"s2"},
                                         {"template":"consensus_augment_prune","stage0_mode":cons_mode}
                                     )
+
+                # (D) merge -> filter (optional prune)
+                if(imgLib.ensembleModel.ENSEMBLE_MODE_FILTER in stage_mode_list):
+                    for merge_mode in merge_modes:
+                        if(merge_mode not in stage_mode_list):
+                            continue
+                        ea0_list=imgLib.ensembleModel.AutoPipelineSelector._getEnsembleArgsCandidates(merge_mode)
+                        w_list=[None] if(merge_mode==imgLib.ensembleModel.ENSEMBLE_MODE_CONCAT) else weight_schemes
+                        for iou in stage_iou_threshold_list:
+                            for mcm in stage_multi_class_mode_list:
+                                for w in w_list:
+                                    for ea0 in ea0_list:
+                                        st0=imgLib.ensembleModel.AutoPipelineSelector._makeStage(
+                                            out_id="s0",
+                                            inputs=model_ids,
+                                            mode=merge_mode,
+                                            iou_threshold=iou,
+                                            multi_class_mode=mcm,
+                                            model_weights=w,
+                                            ensemble_args=ea0
+                                        )
+                                        for ea1 in imgLib.ensembleModel.AutoPipelineSelector._getEnsembleArgsCandidates(imgLib.ensembleModel.ENSEMBLE_MODE_FILTER):
+                                            st1=imgLib.ensembleModel.AutoPipelineSelector._makeStage(
+                                                out_id="s1",
+                                                inputs=["s0"],
+                                                mode=imgLib.ensembleModel.ENSEMBLE_MODE_FILTER,
+                                                iou_threshold=iou,
+                                                multi_class_mode=mcm,
+                                                model_weights=None,
+                                                ensemble_args=ea1
+                                            )
+                                            _add_candidate(
+                                                {"stages":[st0,st1],"final_id":"s1"},
+                                                {"template":"merge_filter","stage0_mode":merge_mode,"stage1_mode":imgLib.ensembleModel.ENSEMBLE_MODE_FILTER,"stage0_args":ea0,"stage1_args":ea1}
+                                            )
+                                            for prune_mode in prune_modes:
+                                                if(prune_mode not in stage_mode_list):
+                                                    continue
+                                                st2=imgLib.ensembleModel.AutoPipelineSelector._makeStage(
+                                                    out_id="s2",
+                                                    inputs=["s1"],
+                                                    mode=prune_mode,
+                                                    iou_threshold=iou,
+                                                    multi_class_mode=mcm,
+                                                    model_weights=None
+                                                )
+                                                _add_candidate(
+                                                    {"stages":[st0,st1,st2],"final_id":"s2"},
+                                                    {"template":"merge_filter_prune","stage0_mode":merge_mode,"stage1_mode":imgLib.ensembleModel.ENSEMBLE_MODE_FILTER,"stage2_mode":prune_mode,"stage0_args":ea0,"stage1_args":ea1}
+                                                )
+
+                # (E) merge -> IoUFilter(ref=top model) (optional prune)
+                if(imgLib.ensembleModel.ENSEMBLE_MODE_IOU_FILTER in stage_mode_list):
+                    for merge_mode in merge_modes:
+                        if(merge_mode not in stage_mode_list):
+                            continue
+                        ea0_list=imgLib.ensembleModel.AutoPipelineSelector._getEnsembleArgsCandidates(merge_mode)
+                        w_list=[None] if(merge_mode==imgLib.ensembleModel.ENSEMBLE_MODE_CONCAT) else weight_schemes
+                        for ref_index in ref_model_index_list:
+                            for iou in stage_iou_threshold_list:
+                                for mcm in stage_multi_class_mode_list:
+                                    for w in w_list:
+                                        for ea0 in ea0_list:
+                                            st0=imgLib.ensembleModel.AutoPipelineSelector._makeStage(
+                                                out_id="s0",
+                                                inputs=model_ids,
+                                                mode=merge_mode,
+                                                iou_threshold=iou,
+                                                multi_class_mode=mcm,
+                                                model_weights=w,
+                                                ensemble_args=ea0
+                                            )
+                                            for ea1 in imgLib.ensembleModel.AutoPipelineSelector._getEnsembleArgsCandidates(imgLib.ensembleModel.ENSEMBLE_MODE_IOU_FILTER):
+                                                st1=imgLib.ensembleModel.AutoPipelineSelector._makeStage(
+                                                    out_id="s1",
+                                                    inputs=["s0",f"m{ref_index}"],
+                                                    mode=imgLib.ensembleModel.ENSEMBLE_MODE_IOU_FILTER,
+                                                    iou_threshold=iou,
+                                                    multi_class_mode=mcm,
+                                                    model_weights=None,
+                                                    ensemble_args=ea1
+                                                )
+                                                _add_candidate(
+                                                    {"stages":[st0,st1],"final_id":"s1"},
+                                                    {"template":"merge_iou_filter","stage0_mode":merge_mode,"stage1_mode":imgLib.ensembleModel.ENSEMBLE_MODE_IOU_FILTER,"ref_model_index":ref_index,"stage0_args":ea0,"stage1_args":ea1}
+                                                )
+                                                for prune_mode in prune_modes:
+                                                    if(prune_mode not in stage_mode_list):
+                                                        continue
+                                                    st2=imgLib.ensembleModel.AutoPipelineSelector._makeStage(
+                                                        out_id="s2",
+                                                        inputs=["s1"],
+                                                        mode=prune_mode,
+                                                        iou_threshold=iou,
+                                                        multi_class_mode=mcm,
+                                                        model_weights=None
+                                                    )
+                                                    _add_candidate(
+                                                        {"stages":[st0,st1,st2],"final_id":"s2"},
+                                                        {"template":"merge_iou_filter_prune","stage0_mode":merge_mode,"stage1_mode":imgLib.ensembleModel.ENSEMBLE_MODE_IOU_FILTER,"stage2_mode":prune_mode,"ref_model_index":ref_index,"stage0_args":ea0,"stage1_args":ea1}
+                                                    )
 
                 # downsample candidates if too many
                 if(len(candidates)>max_candidates):
