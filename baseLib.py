@@ -2482,10 +2482,10 @@ class pyExLib:
     @staticmethod
     def safety_deepcopy(
         obj:Any,
+        memo:dict[int,Any]|None=None,
         *,
         keep_types:tuple[type, ...]=None,
         keep_predicate:Callable[[Any],bool]|None=None,
-        memo:dict[int,Any]|None=None,
         max_depth:int|None=None,
     )->Any:
         """
@@ -2501,6 +2501,8 @@ class pyExLib:
         Returns:
             Any: Deep copied object with specified types or objects kept unchanged.
         """
+        if(memo is None):
+            memo={}
         raw_obj_type=type(obj)
         if(keep_types is None):
             keep_types=tuple(pyExLib.DEFAULT_SAFETY_DEEPCOPY_KEEP_TYPES)
@@ -21600,14 +21602,17 @@ class imgLib:
             """
             return imgLib.BBimgJson(pyExLib.safety_deepcopy(self.__d))
         
-        def __deepcopy__(self):
+        def __deepcopy__(self,memo:dict=None):
             """
             Creates a deep copy of the BBimgJson instance.
+
+            Args:
+                memo (dict): Memoization dictionary.
 
             Returns:
                 BBimgJson: Deep copy of the BBimgJson instance.
             """
-            return imgLib.BBimgJson(pyExLib.safety_deepcopy(self.__d))
+            return imgLib.BBimgJson(pyExLib.safety_deepcopy(self.__d,memo=memo))
 
         def DEFAULT_AUTO_IMG_NAME_FUNCTION(d:dict):
             """
@@ -35383,6 +35388,46 @@ class imgLib:
                     out.append(model_bb_list)
                 return out
 
+            @staticmethod
+            def _makeFunc(
+                models:list,
+                ensemble_args:dict,
+                yolo_args:dict|list|tuple,
+            ):
+                """
+                Creates a YOLO ensemble prediction function with specified models and arguments.
+
+                Args:
+                    models (list): The list of YOLO models to use for ensemble prediction.
+                    ensemble_args (dict): The arguments for ensemble prediction.
+                    yolo_args (dict|list|tuple): The YOLO arguments for prediction.
+
+                Returns:
+                    function: A function that performs YOLO ensemble prediction.
+                """
+                if(not isinstance(models,list)):
+                    raise TypeError("models should be a list")
+                if(not isinstance(ensemble_args,dict)):
+                    raise TypeError("ensemble_args should be a dict")
+                if(not isinstance(yolo_args,(dict,list,tuple))):
+                    raise TypeError("yolo_args should be a dict, list or tuple")
+
+                def proc_yolo_ensemble_predict_func(
+                    predict_data,
+                    gpu_flag:bool=True,
+                    check_model_names_flag:bool=True,
+                ):
+                    return imgLib.ensembleModel.procYOLOPredict(
+                        models=models,
+                        mode=imgLib.ensembleModel.ENSEMBLE_MODE_PIPELINE,
+                        predict_data=predict_data,
+                        gpu_flag=gpu_flag,
+                        ensemble_args=ensemble_args,
+                        yolo_args=yolo_args,
+                        check_model_names_flag=check_model_names_flag,
+                    )
+                return proc_yolo_ensemble_predict_func
+
             def searchBestPipeline(
                 self,
                 one_model_name_list:list=None,
@@ -35390,6 +35435,7 @@ class imgLib:
                 before_calc_one_model:bool=True,
                 include_one_model_read_model_list_obj:bool=True,
                 include_best_func:bool=True,
+                to_searched_eval_project:bool=False,
 
                 search_iou_thresholds:list=None,
                 score_key:str=None,
@@ -35420,6 +35466,7 @@ class imgLib:
                     before_calc_one_model (bool, optional): Whether to calculate one model predictions before searching.
                     include_one_model_read_model_list_obj (bool, optional): Whether to include the read model list object for one models in the result.
                     include_best_func (bool, optional): Whether to include the best function in the result.
+                    to_searched_eval_project (bool, optional): Whether to return a searched evaluation project.
                     search_iou_thresholds (list, optional): List of IoU thresholds to search.
                     score_key (str, optional): The score key to use for evaluation.
                     det_metrics_args (dict, optional): Additional arguments for detection metrics calculation.
@@ -35438,7 +35485,7 @@ class imgLib:
                     verbose (bool, optional): Whether to enable verbose output.
                 
                 Returns:
-                    dict: A dictionary containing the best pipeline configuration and evaluation results.
+                    dict: A dictionary containing the best pipeline configuration and related information.
                 """
                 if(one_model_name_list is None):
                     one_model_name_list=self.getModelNames()
@@ -35448,33 +35495,43 @@ class imgLib:
                 if(before_calc_one_model):
                     self.calcOneModel()
 
+                if(to_searched_eval_project):
+                    if(not include_one_model_read_model_list_obj):
+                        raise ValueError("include_one_model_read_model_list_obj must be True when to_searched_eval_project is True")
+                    if(include_best_func):
+                        raise ValueError("include_best_func must be False when to_searched_eval_project is True")
+
                 bb_img_json_list_list=self.getOneModelBBimgJsonListList(
                     one_model_name_list=one_model_name_list,
                     img_name_list=img_name_list
                 )
 
+                search_args={
+                    "bb_img_json_list_list":bb_img_json_list_list,
+                    
+                    "search_iou_thresholds":search_iou_thresholds,
+                    "score_key":score_key,
+                    "det_metrics_args":det_metrics_args,
+                    "score_func":score_func,
+                    "score_recipe":score_recipe,
+                    
+                    "stage_mode_list":stage_mode_list,
+                    "stage_iou_threshold_list":stage_iou_threshold_list,
+                    "stage_multi_class_mode_list":stage_multi_class_mode_list,
+
+                    "search_method":search_method,
+                    "search_preset":search_preset,
+                    "search_cfg":search_cfg,
+
+                    "max_candidates":max_candidates,
+                    "max_eval_images":max_eval_images,
+                    "random_seed":random_seed,
+                    "strict_align":strict_align,
+                    "verbose":verbose,
+                }
+
                 r_dict=imgLib.ensembleModel.AutoPipelineSelector.searchBestPipelineFromBBimgJsonListList(
-                    bb_img_json_list_list=bb_img_json_list_list,
-
-                    search_iou_thresholds=search_iou_thresholds,
-                    score_key=score_key,
-                    det_metrics_args=det_metrics_args,
-                    score_func=score_func,
-                    score_recipe=score_recipe,
-
-                    stage_mode_list=stage_mode_list,
-                    stage_iou_threshold_list=stage_iou_threshold_list,
-                    stage_multi_class_mode_list=stage_multi_class_mode_list,
-
-                    search_method=search_method,
-                    search_preset=search_preset,
-                    search_cfg=search_cfg,
-
-                    max_candidates=max_candidates,
-                    max_eval_images=max_eval_images,
-                    random_seed=random_seed,
-                    strict_align=strict_align,
-                    verbose=verbose,
+                    **search_args
                 )
                 
                 r_dict["one_model_name_list"]=one_model_name_list
@@ -35483,25 +35540,292 @@ class imgLib:
                     r_dict["one_model_read_model_list_obj"]=one_model_read_model_list_obj
                     
                 r_dict["img_name_list"]=img_name_list
+                r_dict["yolo_args"]=pyExLib.safety_deepcopy(self.__yolo_args)
 
                 if(include_best_func):
-                    def best_func(
-                        predict_data,
-                        gpu_flag:bool=True,
-                        check_model_names_flag:bool=True,
-                    ):
-                        return imgLib.ensembleModel.procYOLOPredict(
-                            models=one_model_read_model_list_obj.getYOLOModels(),
-                            mode=imgLib.ensembleModel.ENSEMBLE_MODE_PIPELINE,
-                            predict_data=predict_data,
-                            gpu_flag=gpu_flag,
-                            ensemble_args=r_dict["best_pipeline_argv"],
-                            yolo_args=self.__yolo_args,
-                            check_model_names_flag=check_model_names_flag,
-                        )
-                    r_dict["best_func"]=best_func
-                return r_dict
+                    r_dict["best_func"]=imgLib.YOLOModelLib.IncrementalYOLOEvalProject._makeFunc(
+                        models=one_model_read_model_list_obj.getYOLOModels(),
+                        ensemble_args=r_dict["best_pipeline_argv"],
+                        yolo_args=self.__yolo_args,
+                    )
+                
+                if(to_searched_eval_project):
+                    return imgLib.YOLOModelLib.IncrementalYOLOEvalProject.searchedEvalProject(
+                        best_dict=r_dict,
+                        search_args=search_args,
+                    )
+                else:
+                    return r_dict
+            
+            @_protectedClass.fileStoreMyLibRegister
+            class searchedEvalProject(_FileStore.FileStoreParser):
+                """
+                Represents a searched evaluation project with the best pipeline configuration.
+                """
 
+                REQUIRED_BEST_DICT_KEYS={
+                    "best_pipeline_argv",
+                    "best_score",
+                    "best_map_dict",
+                    "best_det_metrics",
+                    "best_score_detail",
+                    "best_desc",
+                    
+                    "report_df",
+                    "base_model_scores",
+
+                    "eval_num_images",
+                    "num_candidates",
+                    "total_time_sec",
+                    "score_key",
+                    "search_iou_thresholds",
+                    "det_metrics_args",
+                    "score_recipe",
+                    "search_method",
+                    "used_optuna",
+
+                    "hybrid_grid",
+                    "hybrid_tpe",
+
+                    "one_model_name_list",
+                    "one_model_read_model_list_obj",
+                    "img_name_list",
+                    "yolo_args",
+                }
+
+                def __checkBestDictKeys(self):
+                    """
+                    Checks if the best_dict contains all required keys.
+
+                    Raises:
+                        KeyError: If any required key is missing in best_dict.
+                    """
+                    for k in imgLib.YOLOModelLib.IncrementalYOLOEvalProject.searchedEvalProject.REQUIRED_BEST_DICT_KEYS:
+                        if(k not in self.__best_dict):
+                            raise KeyError(f"Key {k} not found in best_dict")
+                
+                def __init__(
+                    self,
+                    best_dict:dict,
+                    search_args:dict,
+                ):
+                    """
+                    Initializes the searchedEvalProject with the best pipeline configuration and search arguments.
+
+                    Args:
+                        best_dict (dict): The dictionary containing the best pipeline configuration.
+                        search_args (dict): The dictionary containing the search arguments.
+                    """
+                    if(not isinstance(best_dict,dict)):
+                        raise TypeError("best_dict should be a dict")
+                    self.__best_dict=best_dict
+                    self.__checkBestDictKeys()
+
+                    if(not isinstance(search_args,dict)):
+                        raise TypeError("search_args should be a dict")
+                    self.__search_args=search_args
+
+                @property
+                def best_dict(self):
+                    """
+                    Returns the best pipeline configuration dictionary.
+
+                    Returns:
+                        dict: The best pipeline configuration dictionary.
+                    """
+                    return pyExLib.safety_deepcopy(self.__best_dict)
+
+                def getBestDictData(self,key:str):
+                    """
+                    Retrieves a specific value from the best pipeline configuration dictionary.
+
+                    Args:
+                        key (str): The key to retrieve from the best_dict.
+                    
+                    Returns:
+                        Any: The value associated with the specified key in the best_dict.
+                    
+                    Raises:
+                        KeyError: If the specified key is not found in best_dict.
+                    """
+                    if(key not in self.REQUIRED_BEST_DICT_KEYS):
+                        raise KeyError(f"Key {key} not found in best_dict")
+                    return pyExLib.safety_deepcopy(self.__best_dict[key])
+
+                @property
+                def search_args(self):
+                    """
+                    Returns the search arguments dictionary.
+
+                    Returns:
+                        dict: The search arguments dictionary.
+                    """
+                    return pyExLib.safety_deepcopy(self.__search_args)
+    
+                def to_payload(self):
+                    """
+                    Converts the searchedEvalProject instance to a payload dictionary.
+
+                    Returns:
+                        dict: The payload dictionary.
+                    """
+                    return pyExLib.safety_deepcopy(self.__dict__)
+
+                @classmethod
+                def from_payload(cls,payload:dict,store:"IOLib.FileStore"):
+                    """
+                    Creates a searchedEvalProject instance from a payload dictionary.
+
+                    Args:
+                        payload (dict): The payload dictionary.
+                        store (IOLib.FileStore): The file store instance.
+
+                    Returns:
+                        imgLib.YOLOModelLib.ReadOnlyAllImagesResultBBImgJsonCombinationsModel: The created ReadOnlyAllImagesResultBBImgJsonCombinationsModel object.
+                    """
+                    obj=cls.__new__(cls)
+                    obj.__dict__.update(payload)
+                    return obj
+
+                def getReportDataFrame(self):
+                    """
+                    Retrieves the report DataFrame from the best pipeline configuration.
+
+                    Returns:
+                        pd.DataFrame: The report DataFrame.
+                    """
+                    report_df=self.__best_dict.get("report_df")
+                    if(not isinstance(report_df,pd.DataFrame)):
+                        raise TypeError("report_df should be a pd.DataFrame instance")
+                    return report_df.copy()
+
+                def getReportDataFrameLength(self):
+                    """
+                    Retrieves the number of items in the report DataFrame.
+
+                    Returns:
+                        int: The number of items in the report DataFrame.
+                    """
+                    report_df=self.getReportDataFrame()
+                    return len(report_df)
+
+                def getReportDataFrameItem(self,index:int):
+                    """
+                    Retrieves a specific row from the report DataFrame.
+
+                    Args:
+                        index (int): The index of the row to retrieve.
+
+                    Returns:
+                        pd.Series: The row at the specified index in the report DataFrame.
+                    
+                    Raises:
+                        TypeError: If the report_df is not a pd.DataFrame instance.
+                        IndexError: If the index is out of range in the report_df.
+                    """
+                    report_df=self.getReportDataFrame()
+                    if(index<0 or index>=len(report_df)):
+                        raise IndexError("index out of range in report_df")
+                    return report_df.iloc[index]
+
+                def getReportDataFrameItemPipelineArgv(self,index:int):
+                    """
+                    Retrieves the pipeline arguments for a specific index from the report DataFrame.
+
+                    Args:
+                        index (int): The index of the pipeline configuration to retrieve.
+
+                    Returns:
+                        dict: The pipeline arguments for the specified index.
+                    
+                    Raises:
+                        TypeError: If the report_df is not a pd.DataFrame instance or if the pipeline_argv is not a dict.
+                        IndexError: If the index is out of range in the report_df.
+                    """
+                    pipeline_argv_str=self.getReportDataFrameItem(index).to_dict().get("pipeline_argv")
+                    pipeline_argv=ast.literal_eval(pipeline_argv_str)
+                    if(not isinstance(pipeline_argv,dict)):
+                        raise TypeError("pipeline_argv should be a dict")
+                    return pipeline_argv
+            
+                def getOneModelReadModelListObj(self):
+                    """
+                    Retrieves the read model list object for one models.
+
+                    Returns:
+                        imgLib.YOLOModelLib.readYOLOModelList: The read model list object for one models.
+
+                    Raises:
+                        TypeError: If the one_model_read_model_list_obj is not a readYOLOModelList instance.
+                    """
+                    one_model_read_model_list_obj=self.__best_dict.get("one_model_read_model_list_obj")
+                    if(not isinstance(one_model_read_model_list_obj,imgLib.YOLOModelLib.readYOLOModelList)):
+                        raise TypeError("one_model_read_model_list_obj should be a readYOLOModelList instance")
+                    return one_model_read_model_list_obj.copy()
+            
+                def getOneModelList(self):
+                    """
+                    Retrieves the list of YOLO models for one models.
+
+                    Returns:
+                        list: The list of YOLO models for one models.
+                    
+                    Raises:
+                        TypeError: If the one_model_read_model_list_obj is not a readYOLOModelList instance or if models is not a list.
+                    """
+                    one_model_read_model_list_obj=self.getOneModelReadModelListObj()
+                    models=one_model_read_model_list_obj.getYOLOModels()
+                    if(not isinstance(models,list)):
+                        raise TypeError("models should be a list")
+                    return models
+
+                def getYOLOArgs(self):
+                    """
+                    Retrieves the YOLO arguments used in the best pipeline configuration.
+
+                    Returns:
+                        dict|list|tuple: The YOLO arguments.
+
+                    Raises:
+                        TypeError: If the yolo_args is not a dict, list, or tuple.
+                    """
+                    yolo_args=self.__best_dict.get("yolo_args")
+                    if(not isinstance(yolo_args,(dict,list,tuple))):
+                        raise TypeError("yolo_args should be a dict, list or tuple")
+                    return pyExLib.safety_deepcopy(yolo_args)
+                
+                def getYOLOEnsemblePredictFunc(self,index:int):
+                    """
+                    Retrieves the YOLO ensemble prediction function for the specified index.
+
+                    Args:
+                        index (int): The index of the pipeline configuration to retrieve.
+
+                    Returns:
+                        function: The YOLO ensemble prediction function.
+
+                    Raises:
+                        TypeError: If the one_model_read_model_list_obj or report_df are of incorrect types.
+                    """
+                    models=self.getOneModelList()
+                    ensemble_args=self.getReportDataFrameItemPipelineArgv(index)
+                    yolo_args=self.getYOLOArgs()
+
+                    return imgLib.YOLOModelLib.IncrementalYOLOEvalProject._makeFunc(
+                        models=models,
+                        ensemble_args=ensemble_args,
+                        yolo_args=yolo_args,
+                    )
+            
+                def getBestFunc(self):
+                    """
+                    Retrieves the best YOLO ensemble prediction function.
+
+                    Returns:
+                        function: The best YOLO ensemble prediction function.
+                    """ 
+                    return self.getYOLOEnsemblePredictFunc(0)
+                    
     class asciiArtLib:
         """
         ASCII art generation library.
