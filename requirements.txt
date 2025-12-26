@@ -33,3 +33,6 @@ moviepy
 
 # cloudpickle
 cloudpickle
+
+# optuna
+optuna
