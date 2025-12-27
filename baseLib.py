@@ -35816,7 +35816,66 @@ class imgLib:
                         ensemble_args=ensemble_args,
                         yolo_args=yolo_args,
                     )
+
+                def procYOLOANNPredict(
+                    self,
+                    index:int,
+                    yolo_ann:"imgLib.YOLOANN",
+                    gpu_flag:bool=True,
+                    check_model_names_flag:bool=True,
+                ):
+                    """
+                    Processes YOLOANN prediction using the best pipeline configuration at the specified index.
+
+                    Args:
+                        index (int): The index of the pipeline configuration to use.
+                        yolo_ann (imgLib.YOLOANN): The YOLOANN instance for prediction.
+                        gpu_flag (bool, optional): Whether to use GPU for prediction.
+                        check_model_names_flag (bool, optional): Whether to check model names during prediction.
+                    
+                    Returns:
+                        list or dict: List or dictionary of YOLOANNResult objects.
+
+                    Raises:
+                        TypeError: If yolo_ann is not an instance of imgLib.YOLOANN.
+                    """
+                    models=self.getOneModelList()
+                    ensemble_args=self.getReportDataFrameItemPipelineArgv(index)
+                    yolo_args=self.getYOLOArgs()
+                    
+                    if(not isinstance(yolo_ann,imgLib.YOLOANN)):
+                        raise TypeError("yolo_ann should be a imgLib.YOLOANN instance")
+                    
+                    return yolo_ann.procYOLOPredict(
+                        models=models,
+                        mode=imgLib.ensembleModel.ENSEMBLE_MODE_PIPELINE,
+                        gpu_flag=gpu_flag,
+                        ensemble_args=ensemble_args,
+                        yolo_args=yolo_args,
+                        check_model_names_flag=check_model_names_flag,
+                    )
             
+                def getBestIndexes(self):
+                    """
+                    Retrieves the index(es) of the best pipeline configuration(s).
+
+                    Returns:
+                        list: A list of index(es) of the best pipeline configuration(s).
+                    """
+                    best_score=float(self.__best_dict.get("best_score"))
+                    if(not isinstance(best_score,(int,float))):
+                        raise TypeError("best_score should be int or float")
+                    
+                    best_indexes=[]
+                    for i,row in self.getReportDataFrame().iterrows():
+                        pipeline_score=row.get("score")
+                        if(pipeline_score==best_score):
+                            best_indexes.append(i)
+                    best_indexes.sort()
+                    if(len(best_indexes)==0):
+                        raise ValueError("No best index found")
+                    return best_indexes
+
                 def getBestFunc(self):
                     """
                     Retrieves the best YOLO ensemble prediction function.
@@ -35824,8 +35883,32 @@ class imgLib:
                     Returns:
                         function: The best YOLO ensemble prediction function.
                     """ 
-                    return self.getYOLOEnsemblePredictFunc(0)
+                    return self.getYOLOEnsemblePredictFunc(self.getBestIndexes()[0])
                     
+                def procBestYOLOANNPredict(
+                    self,
+                    yolo_ann:"imgLib.YOLOANN",
+                    gpu_flag:bool=True,
+                    check_model_names_flag:bool=True,
+                ):
+                    """
+                    Processes YOLOANN prediction using the best pipeline configuration.
+
+                    Args:
+                        yolo_ann (imgLib.YOLOANN): The YOLOANN instance for prediction.
+                        gpu_flag (bool, optional): Whether to use GPU for prediction.
+                        check_model_names_flag (bool, optional): Whether to check model names during prediction.
+                    
+                    Returns:
+                        list or dict: List or dictionary of YOLOANNResult objects.
+                    """
+                    return self.procYOLOANNPredict(
+                        index=self.getBestIndexes()[0],
+                        yolo_ann=yolo_ann,
+                        gpu_flag=gpu_flag,
+                        check_model_names_flag=check_model_names_flag,
+                    )
+                
     class asciiArtLib:
         """
         ASCII art generation library.
