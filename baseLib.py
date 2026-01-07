@@ -1624,7 +1624,7 @@ class _FileStore:
         
         if(data.get("__schema__")!=_FileStore._SCHEMA):
             raise ValueError(f"Invalid schema: {data.get('__schema__')}")
-        return _FileStore.__internalize(data["root"],base_dir,additional_func=load_additional_func,force_decimal_to_float=force_decimal_to_float)
+        return _FileStore.__internalize(data["root"],base_dir,additional_func=load_additional_func,force_decimal_to_float=force_decimal_to_float,allow_unpickle=allow_unpickle)
 
     DEFAULT_BUNDLE_JSON_PATH="bundle.json"
 
@@ -9945,6 +9945,8 @@ class IOLib:
             load_args=payload.get("load_args",{})
             zip_asset=payload["zip_asset"]
 
+            keys=payload.get("keys")
+
             tmp_zip=tempfile.mkstemp(suffix=".zip")[1]
             try:
                 with zip_asset.fileOpen(mode="rb") as rf,open(tmp_zip,mode="wb") as wf:
@@ -9960,23 +9962,54 @@ class IOLib:
                     archive_type=IOLib.CompressionLib.ARCHIVE_TYPE_ZIP,
                     use_zst=False,
                 )
+                
+                data_dict=None
+                
+                # lazy loading by keys
+                if(isinstance(keys,list)):
+                    tmp={}
+                    ok=True
+                    seen=set()
+                    for key in keys:
+                        if(not isinstance(key,str)):
+                            ok=False
+                            break
+                        if(key in seen):
+                            raise KeyError(f"Duplicated key in payload: {key}")
+                        seen.add(key)
 
-                data_dict={}
-                for p in Path(out_dir).rglob("*.json"):
-                    loaded_dict=_FileStore.loadBundle(bundle_json_path=p,meta_str=meta_str,**load_args)
-                    if(not isinstance(loaded_dict,dict) or len(loaded_dict)!=1):
-                        continue
+                        p=Path(out_dir)/f"{key}.json"
+                        if(not p.exists()):
+                            ok=False
+                            break
 
-                    key,objv=next(iter(loaded_dict.items()))
+                        tmp[key]={
+                            "path":p,
+                            "type":object,
+                            "update_log":[IOLib.FileStoreVariable.__dumpDataLogDict("restore")],
+                        }
 
-                    if(key in data_dict):
-                        raise KeyError(f"Duplicated key found while restoring: {key} from {p}")
+                    if(ok):
+                        data_dict=tmp
+                
+                # legacy loading (scan all files)
+                if(data_dict is None):
+                    data_dict={}
+                    for p in Path(out_dir).rglob("*.json"):
+                        loaded_dict=_FileStore.loadBundle(bundle_json_path=p,meta_str=meta_str,**load_args)
+                        if(not isinstance(loaded_dict,dict) or len(loaded_dict)!=1):
+                            continue
 
-                    data_dict[key]={
-                        "path":Path(p),
-                        "type":type(objv),
-                        "update_log":[IOLib.FileStoreVariable.__dumpDataLogDict("restore")],
-                    }
+                        key,objv=next(iter(loaded_dict.items()))
+
+                        if(key in data_dict):
+                            raise KeyError(f"Duplicated key found while restoring: {key} from {p}")
+
+                        data_dict[key]={
+                            "path":Path(p),
+                            "type":type(objv),
+                            "update_log":[IOLib.FileStoreVariable.__dumpDataLogDict("restore")],
+                        }
 
                 obj._FileStoreVariable__data_dict=data_dict
                 return obj
