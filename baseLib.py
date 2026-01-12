@@ -9853,11 +9853,16 @@ class IOLib:
 
             self.__data_dict={}
 
+            self.__rmtreeWithRetry=getattr(IOLib,"rmtreeWithRetry",None)
+
         def __del__(self):
             """
             Destructor to clean up the save directory if it still exists.
             """
-            self.deleteAll()
+            try:
+                self.deleteAll()
+            except Exception:
+                pass
             
         def __str__(self):
             """
@@ -10278,9 +10283,17 @@ class IOLib:
             """
             Deletes all FileStoreParser objects from the FileStoreVariable.
             """
-            IOLib.rmtreeWithRetry(self.__save_directory)
-            self.__data_dict={}
-            self.__valid_save_directory=False
+            try:
+                sd=getattr(self,"_FileStoreVariable__save_directory",None)
+                if(sd is not None):
+                    fn=getattr(self,"_FileStoreVariable__rmtreeWithRetry",None)
+                    if(callable(fn)):
+                        fn(sd)
+                    else:
+                        shutil.rmtree(sd,ignore_errors=True)
+            finally:
+                self.__data_dict={}
+                self.__valid_save_directory=False
     
         def compactBlobs(self,*,remove_empty_dirs:bool=True)->dict:
             """
@@ -34750,19 +34763,47 @@ class imgLib:
                 """
                 return f"({model_name})::({img_name})"
 
-            def calcOneModel(self):
+            def __count_done_one_model_predict(self):
+                """
+                Counts the number of done one-model predictions.
+
+                Returns:
+                    tuple: A tuple containing the size of the done prediction matrix and the total number of done predictions.
+                """
+                matrix_size=self.__done_one_model_predict_matrix.size
+                total_done=self.__done_one_model_predict_matrix.values.sum()
+                return (matrix_size,total_done)
+
+            def calcOneModel(self,verbose:bool=False):
                 """
                 Calculates predictions for each individual model on all images.
+
+                Args:
+                    verbose (bool, optional): Whether to print verbose output.
 
                 Raises:
                     ValueError: If there are inconsistencies in the done prediction matrix.
                 """
+                if(verbose):
+                    print("[IncrementalYOLOEvalProject.calcOneModel] Calculating one-model predictions...")
+
                 self.__renewDonePredictMatrix()
-                
+
+                if(verbose):
+                    before_size,before_done=self.__count_done_one_model_predict()
+                    print(f"[IncrementalYOLOEvalProject.calcOneModel] Before: {before_done} / {before_size} ({(before_done/before_size*100):.2f}%)")
+
                 for model_name in self.__done_one_model_predict_matrix.columns:
+                    if(verbose):
+                        print(f"[IncrementalYOLOEvalProject.calcOneModel] Processing model: {model_name}")
                     tmp_yolo_model=self.__read_model_list.getYOLOModelByName(model_name)
                     for img_name in self.__done_one_model_predict_matrix.index:
+                        if(verbose):
+                            print(f"[IncrementalYOLOEvalProject.calcOneModel] Processing image: {img_name}")
+                        
                         if(not self.__done_one_model_predict_matrix.loc[img_name,model_name]):
+                            if(verbose):
+                                print(f"[IncrementalYOLOEvalProject.calcOneModel] Predicting...")
                             tmp_yolo_ann=self.__getYOLOANN(img_name)
 
                             ns,tmp_all_results=imgLib.ensembleModel.MultiYOLOModelModule.predictAllYOLOModels(
@@ -34792,8 +34833,16 @@ class imgLib:
                             del tmp_all_results
 
                             self.__done_one_model_predict_matrix.loc[img_name,model_name]=True
+
+                            if(verbose):
+                                after_size,after_done=self.__count_done_one_model_predict()
+                                print(f"[IncrementalYOLOEvalProject.calcOneModel] Done: {after_done} / {after_size} ({(after_done/after_size*100):.2f}%)\n")
                         
                     del tmp_yolo_model
+
+                    if(verbose):
+                        after_size,after_done=self.__count_done_one_model_predict()
+                        print(f"[IncrementalYOLOEvalProject.calcOneModel] After model {model_name}: {after_done} / {after_size} ({(after_done/after_size*100):.2f}%)\n")
 
             def __getOneModelResult(self,model_name:str,img_name:str):
                 """
@@ -34867,18 +34916,38 @@ class imgLib:
                 """
                 return f"({ensemble_model_name})::({img_name})"
 
-            def calcEnsembleAllImages(self):
+            def __count_done_ensemble_model_predict(self):
+                """
+                Counts the number of done ensemble model predictions.
+
+                Returns:
+                    tuple: A tuple containing the size of the done ensemble prediction matrix and the total number of done ensemble predictions.
+                """
+                matrix_size=self.__done_ensemble_model_predict_matrix.size
+                total_done=self.__done_ensemble_model_predict_matrix.values.sum()
+                return (matrix_size,total_done)
+
+            def calcEnsembleAllImages(self,verbose:bool=False):
                 """
                 Calculates ensemble predictions for all images based on the configured prediction settings.
+
+                Args:
+                    verbose (bool, optional): Whether to print verbose output.
 
                 Raises:
                     ValueError: If there are inconsistencies in the done prediction matrix.
                 """
                 self.__renewDonePredictMatrix()
 
-                self.calcOneModel()
+                self.calcOneModel(verbose=verbose)
+
+                if(verbose):
+                    print("[IncrementalYOLOEvalProject.calcEnsembleAllImages] Calculating ensemble model predictions...")
 
                 for img_name in self.getImageNames():
+                    if(verbose):
+                        print(f"[IncrementalYOLOEvalProject.calcEnsembleAllImages] Processing image: {img_name}")
+                        
                     tmp_all_results=self.__getAllOneModelResult(img_name)
                     tmp_yolo_ann=self.__getYOLOANN(img_name)
                     tmp_yolo_model_predict=imgLib.YOLOModelLib.YOLOModelPredict(
@@ -34892,6 +34961,9 @@ class imgLib:
                     )
 
                     for ensemble_model_name,ymp_comb,ensemble_predict_config in tmp_yolo_model_predict.generatorPredictCombinationsModel(self.__predict_config_list,force_bb_img_json_mode=True):
+                        if(verbose):
+                            print(f"[IncrementalYOLOEvalProject.calcEnsembleAllImages] Processing ensemble model: {ensemble_model_name}")
+
                         if(
                             not (
                                 (img_name in self.__done_ensemble_model_predict_matrix.index) and
@@ -34901,6 +34973,9 @@ class imgLib:
                             raise ValueError(f"Ensemble model name {ensemble_model_name} or image name {img_name} not found in done matrix")
 
                         if(not self.__done_ensemble_model_predict_matrix.loc[img_name,ensemble_model_name]):
+                            if(verbose):
+                                print(f"[IncrementalYOLOEvalProject.calcEnsembleAllImages] Predicting...")
+
                             r=ymp_comb.procEnsembleModel(**ensemble_predict_config)
                             if(len(r)!=1):
                                 raise ValueError("Expected exactly one result from procEnsembleModel.")
@@ -34920,9 +34995,17 @@ class imgLib:
                             
                             self.__done_ensemble_model_predict_matrix.loc[img_name,ensemble_model_name]=True
 
+                            if(verbose):
+                                after_size,after_done=self.__count_done_ensemble_model_predict()
+                                print(f"[IncrementalYOLOEvalProject.calcEnsembleAllImages] Done: {after_done} / {after_size} ({(after_done/after_size*100):.2f}%)\n")
+
                     del tmp_all_results
                     del tmp_yolo_ann
                     del tmp_yolo_model_predict
+                
+                if(verbose):
+                    final_size,final_done=self.__count_done_ensemble_model_predict()
+                    print(f"[IncrementalYOLOEvalProject.calcEnsembleAllImages] Finished: {final_done} / {final_size} ({(final_done/final_size*100):.2f}%)\n")
 
             def __loadEnsembleBBImgJson(self,ensemble_model_name:str,img_name:str):
                 """
@@ -35526,7 +35609,7 @@ class imgLib:
                     img_name_list=self.getImageNames()
 
                 if(before_calc_one_model):
-                    self.calcOneModel()
+                    self.calcOneModel(verbose=verbose)
 
                 if(to_searched_eval_project):
                     if(not include_one_model_read_model_list_obj):
