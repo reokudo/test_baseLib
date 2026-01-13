@@ -10,7 +10,7 @@ import multiprocessing as mp
 from multiprocessing import Pool, cpu_count
 import threading
 import _thread
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed, wait, FIRST_COMPLETED
 import json
 import math
 import cmath
@@ -34927,7 +34927,12 @@ class imgLib:
                 total_done=self.__done_ensemble_model_predict_matrix.values.sum()
                 return (matrix_size,total_done)
 
-            def calcEnsembleAllImages(self,verbose:bool=False):
+            def calcEnsembleAllImages(
+                self,
+                parallel_workers:int=0,
+                queue_mul:int=2,
+                verbose:bool=False
+            ):
                 """
                 Calculates ensemble predictions for all images based on the configured prediction settings.
 
@@ -34938,8 +34943,11 @@ class imgLib:
                     ValueError: If there are inconsistencies in the done prediction matrix.
                 """
                 self.__renewDonePredictMatrix()
-
                 self.calcOneModel(verbose=verbose)
+
+                if(parallel_workers<=0):
+                    parallel_workers=min(32,(os.cpu_count() or 1))
+                max_inflight=max(1,parallel_workers*max(1,queue_mul))
 
                 if(verbose):
                     print("[IncrementalYOLOEvalProject.calcEnsembleAllImages] Calculating ensemble model predictions...")
@@ -34960,45 +34968,68 @@ class imgLib:
                         all_results=tmp_all_results,
                     )
 
-                    for ensemble_model_name,ymp_comb,ensemble_predict_config in tmp_yolo_model_predict.generatorPredictCombinationsModel(self.__predict_config_list,force_bb_img_json_mode=True):
-                        if(verbose):
-                            print(f"[IncrementalYOLOEvalProject.calcEnsembleAllImages] Processing ensemble model: {ensemble_model_name}")
+                    def _run_one(
+                        ensemble_model_name,
+                        ymp_comb,
+                        ensemble_predict_config
+                    ):
+                        r=ymp_comb.procEnsembleModel(**ensemble_predict_config)
+                        if(len(r)!=1):
+                            raise ValueError("Expected exactly one result from procEnsembleModel.")
+                        if(not isinstance(r[0],imgLib.BBimgJson)):
+                            raise TypeError("Expected result to be an instance of imgLib.BBimgJson.")
+                        bb=r[0]
+                        bb.setImgName(img_name=img_name)
+                        return ensemble_model_name,bb
 
-                        if(
-                            not (
-                                (img_name in self.__done_ensemble_model_predict_matrix.index) and
-                                (ensemble_model_name in self.__done_ensemble_model_predict_matrix.columns)
-                            )
+                    def _commit(one_result):
+                        ensemble_model_name,bb=one_result
+                        self.__ensemble_model_result_fsv.appendData(
+                            key=imgLib.YOLOModelLib.IncrementalYOLOEvalProject.__ensemble_model_result_fsv_key(ensemble_model_name,img_name),
+                            data=bb,
+                            release_after=True,
+                            aggressive_release=True,
+                        )
+                        self.__done_ensemble_model_predict_matrix.loc[img_name,ensemble_model_name]=True
+                        del bb
+
+                    with ThreadPoolExecutor(max_workers=parallel_workers) as ex:
+                        inflight=set()
+                        for ensemble_model_name,ymp_comb,ensemble_predict_config in tmp_yolo_model_predict.generatorPredictCombinationsModel(
+                            self.__predict_config_list,
+                            force_bb_img_json_mode=True
                         ):
-                            raise ValueError(f"Ensemble model name {ensemble_model_name} or image name {img_name} not found in done matrix")
-
-                        if(not self.__done_ensemble_model_predict_matrix.loc[img_name,ensemble_model_name]):
                             if(verbose):
-                                print(f"[IncrementalYOLOEvalProject.calcEnsembleAllImages] Predicting...")
+                                print(f"[IncrementalYOLOEvalProject.calcEnsembleAllImages] Processing ensemble model: {ensemble_model_name}")
 
-                            r=ymp_comb.procEnsembleModel(**ensemble_predict_config)
-                            if(len(r)!=1):
-                                raise ValueError("Expected exactly one result from procEnsembleModel.")
-                            if(not isinstance(r[0],imgLib.BBimgJson)):
-                                raise TypeError("Expected result to be an instance of imgLib.BBimgJson.")
-                            result_bb_img_json=r[0]
-                            result_bb_img_json.setImgName(img_name=img_name)
+                            if(
+                                not (
+                                    (img_name in self.__done_ensemble_model_predict_matrix.index) and
+                                    (ensemble_model_name in self.__done_ensemble_model_predict_matrix.columns)
+                                )
+                            ):
+                                raise ValueError(f"Ensemble model name {ensemble_model_name} or image name {img_name} not found in done matrix")
 
-                            self.__ensemble_model_result_fsv.appendData(
-                                key=imgLib.YOLOModelLib.IncrementalYOLOEvalProject.__ensemble_model_result_fsv_key(ensemble_model_name,img_name),
-                                data=result_bb_img_json,
-                                release_after=True,
-                                aggressive_release=True,
-                            )
-                            del r
-                            del result_bb_img_json
-                            
-                            self.__done_ensemble_model_predict_matrix.loc[img_name,ensemble_model_name]=True
+                            if(not self.__done_ensemble_model_predict_matrix.loc[img_name,ensemble_model_name]):
+                                if(verbose):
+                                    print(f"[IncrementalYOLOEvalProject.calcEnsembleAllImages] Predicting...")
+                                
+                                inflight.add(ex.submit(_run_one,ensemble_model_name,ymp_comb,ensemble_predict_config))
 
-                            if(verbose):
-                                after_size,after_done=self.__count_done_ensemble_model_predict()
-                                print(f"[IncrementalYOLOEvalProject.calcEnsembleAllImages] Done: {after_done} / {after_size} ({(after_done/after_size*100):.2f}%)\n")
+                                if(len(inflight)>=max_inflight):
+                                    done,inflight=wait(inflight,return_when=FIRST_COMPLETED)
+                                    for fut in done:
+                                        _commit(fut.result())
 
+                                if(verbose):
+                                    after_size,after_done=self.__count_done_ensemble_model_predict()
+                                    print(f"[IncrementalYOLOEvalProject.calcEnsembleAllImages] Done: {after_done} / {after_size} ({(after_done/after_size*100):.2f}%)\n")
+
+                        if(len(inflight)>0):
+                            done,_=wait(inflight)
+                            for fut in done:
+                                _commit(fut.result())
+                    
                     del tmp_all_results
                     del tmp_yolo_ann
                     del tmp_yolo_model_predict
