@@ -4806,7 +4806,15 @@ class pyExLib:
             r=[]
             index_list=set()
             for key,item in d.items():
-                index=int(key)
+                index=None
+                try:
+                    index=int(key)
+                except:
+                    try:
+                        index=int(float(key))
+                    except:
+                        raise ValueError(f"Key must be a non-negative integer! : {key}")
+
                 if(index<0):
                     raise ValueError("Key must be a non-negative integer!")
                 
@@ -31161,6 +31169,19 @@ class imgLib:
                         return True,registgeredmodel_names.index(model_name)
                     return False,-1
 
+                def checkClassName(
+                    read_yolo_model_obj_class_names,
+                    self_class_names
+                ):
+                    rcn=pyExLib.IterableLib.numericKeyDict2List(read_yolo_model_obj_class_names)
+                    scn=pyExLib.IterableLib.numericKeyDict2List(self_class_names)
+                    if(len(rcn)!=len(scn)):
+                        return False
+                    for i in range(len(rcn)):
+                        if(rcn[i]!=scn[i]):
+                            return False
+                    return True
+
                 append_mode="normal"
                 overwrite_index=None
 
@@ -31169,7 +31190,7 @@ class imgLib:
                 
                 if(len(self.__read_yolo_model_obj_list)==0):
                     pass
-                elif(read_yolo_model_obj.getClassNames()!=self.getClassNames()):
+                elif(not checkClassName(read_yolo_model_obj.getClassNames(),self.getClassNames())):
                     raise ValueError("Class names of read_yolo_model_obj do not match the class names of the list.")
 
                 model_name=read_yolo_model_obj.getModelName()
@@ -35029,7 +35050,7 @@ class imgLib:
                             done,_=wait(inflight)
                             for fut in done:
                                 _commit(fut.result())
-                    
+
                     del tmp_all_results
                     del tmp_yolo_ann
                     del tmp_yolo_model_predict
