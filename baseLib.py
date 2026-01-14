@@ -21766,6 +21766,200 @@ class imgLib:
             """
             return imgLib.BBimgJson(IOLib.JSONLib.readMETAJSON(path,imgLib.BBimgJson.META_BB_IMG_JSON,raise_error=True))
         
+        def toYOLOANN(
+            self,
+            ann_mode:str="gt",
+            load_img_flag:bool=False,
+            apply_reshape_log:bool=True,
+            strict_gt_flag:bool=True,
+            allow_reshape_flag:bool=True
+        ):
+            """
+            Convert this BBimgJson to imgLib.YOLOANN.
+
+            ann_mode:
+              - "gt"   : use YOLOANN_obj_additional_info["ann"/"ann_cls_nums"]
+              - "final": use final_ann["bboxes"/"classes"] (scores are ignored)
+              - "auto" : use "gt" if available else "final"
+
+            load_img_flag:
+              - False: create YOLOANN with IMG_MODE_WH (no image ndarray)
+              - True : create YOLOANN with IMG_MODE_IMG (loads image from raw_img_path)
+
+            Args:
+                ann_mode (str): Annotation mode.
+                load_img_flag (bool): Whether to load the image.
+                apply_reshape_log (bool): Whether to apply the reshape log.
+                strict_gt_flag (bool): Whether to raise an error if GT data is missing.
+                allow_reshape_flag (bool): Whether to allow reshaping.
+
+            Returns:
+                imgLib.YOLOANN: YOLOANN instance.
+            """
+
+            if(not isinstance(ann_mode,str)):
+                raise TypeError("ann_mode must be str.")
+            ann_mode=str(ann_mode)
+
+            d=self.__d
+            gt_block=d.get("YOLOANN_obj_additional_info",None)
+            if(gt_block is None):
+                gt_block={}
+            elif(not isinstance(gt_block,dict)):
+                gt_block={}
+
+            has_gt=("ann" in gt_block and "ann_cls_nums" in gt_block and "wh" in gt_block)
+
+            # --- choose ann source ---
+            if(ann_mode=="gt"):
+                if((not has_gt) and strict_gt_flag):
+                    raise TypeError("YOLOANN_obj_additional_info is missing (gt data not available).")
+                bboxes=gt_block.get("ann",[])
+                classes=gt_block.get("ann_cls_nums",[])
+            elif(ann_mode=="final"):
+                ann=self.getANN()
+                bboxes=ann.get("bboxes",[])
+                classes=ann.get("classes",[])
+            elif(ann_mode=="auto"):
+                if(has_gt):
+                    bboxes=gt_block.get("ann",[])
+                    classes=gt_block.get("ann_cls_nums",[])
+                else:
+                    ann=self.getANN()
+                    bboxes=ann.get("bboxes",[])
+                    classes=ann.get("classes",[])
+            else:
+                raise ValueError("ann_mode must be 'gt', 'final', or 'auto'.")
+
+            if(len(bboxes)!=len(classes)):
+                raise ValueError("The lengths of bboxes and classes must be the same.")
+
+            # --- class names ---
+            class_names_txt_path=gt_block.get("class_names_txt_path",None)
+            if(isinstance(class_names_txt_path,str)):
+                if(not os.path.isfile(class_names_txt_path)):
+                    class_names_txt_path=None
+            else:
+                class_names_txt_path=None
+
+            class_names_data=gt_block.get("class_names_data",None)
+            if(class_names_data is None):
+                # YOLOANNResult.getResultBBimgJsonObj adds "cls_names" into BBimgJson
+                class_names_data=self.getClsNames()
+
+            img_specific_key_in_coco_data=gt_block.get("img_specific_key_in_coco_data",None)
+
+            # --- image / wh ---
+            wh=gt_block.get("wh",None)
+
+            if(load_img_flag):
+                raw_img=self.getRawImg()
+                if(apply_reshape_log):
+                    img=imgLib.YOLOANN.reshapeImg(raw_img,self.getImgReshapeLog())
+                else:
+                    img=raw_img
+                img_mode=imgLib.YOLOANN.IMG_MODE_IMG
+                arg=img
+                if(wh is None):
+                    wh=[int(img.shape[1]),int(img.shape[0])]
+            else:
+                img_mode=imgLib.YOLOANN.IMG_MODE_WH
+                if(wh is None):
+                    if(strict_gt_flag):
+                        raise TypeError("wh is missing and load_img_flag is False.")
+                    # fallback (may read image internally)
+                    wh=self.getImgWH()
+                arg=(int(wh[0]),int(wh[1]))
+
+            yolo_ann=imgLib.YOLOANN(
+                img_mode=img_mode,
+                ann_data_arg={
+                    "bboxes":pyExLib.safety_deepcopy(bboxes),
+                    "classes":pyExLib.safety_deepcopy(classes)
+                },
+                arg=arg,
+                img_reshape_log=self.getImgReshapeLog(),
+                class_names_txt_path=class_names_txt_path,
+                ann_file_mode=imgLib.YOLOANN.ANN_FILE_MODE_YOLOV3_DATA_DICT,
+                img_specific_key_in_coco_data=img_specific_key_in_coco_data,
+                allow_reshape_flag=allow_reshape_flag
+            )
+
+            # --- optionally restore paths (useful if you want to re-export BBimgJson later) ---
+            try:
+                setattr(yolo_ann,"_YOLOANN__img_path",self.getRawImgPath())
+            except Exception:
+                pass
+
+            ann_data_path=gt_block.get("ann_data_path",None)
+            if(isinstance(ann_data_path,str)):
+                try:
+                    setattr(yolo_ann,"_YOLOANN__ann_data_path",ann_data_path)
+                except Exception:
+                    pass
+
+            # --- apply class names if available ---
+            if(class_names_data is not None):
+                try:
+                    yolo_ann.setANNClsNames(class_names_data=class_names_data,exist_ok=True)
+                except Exception:
+                    pass
+
+            # --- polygon (if exists) ---
+            if("ann_polygon" in gt_block):
+                try:
+                    setattr(yolo_ann,"_YOLOANN__ann_polygon_data",pyExLib.safety_deepcopy(gt_block["ann_polygon"]))
+                except Exception:
+                    pass
+
+            return yolo_ann
+
+
+        def toYOLOANNResult(
+            self,
+            raw_ann_mode:str="gt",
+            apply_reshape_log:bool=True,
+            strict_gt_flag:bool=True
+        ):
+            """
+            Convert this BBimgJson to imgLib.YOLOANNResult.
+
+            NOTE:
+              YOLOANNResult requires raw_yolo_ann.getImg() to be a valid ndarray,
+              so this will load the image from raw_img_path.
+
+            Args:
+                raw_ann_mode (str): Annotation mode for the raw YOLOANN.
+                apply_reshape_log (bool): Whether to apply the reshape log.
+                strict_gt_flag (bool): Whether to raise an error if GT data is missing.
+
+            Returns:
+                imgLib.YOLOANNResult: YOLOANNResult instance.
+            """
+            raw_yolo_ann=self.toYOLOANN(
+                ann_mode=raw_ann_mode,
+                load_img_flag=True,
+                apply_reshape_log=apply_reshape_log,
+                strict_gt_flag=strict_gt_flag
+            )
+
+            result_data=pyExLib.safety_deepcopy(self.getANN())
+
+            # provide cls_names_dict so YOLOANNResult can restore class names
+            cls_names=self.getClsNames()
+            if(cls_names is None):
+                gt_block=self.__d.get("YOLOANN_obj_additional_info",{})
+                if(isinstance(gt_block,dict)):
+                    cls_names=gt_block.get("class_names_data",None)
+
+            if(cls_names is not None):
+                result_data["cls_names_dict"]={i:cls_name for i,cls_name in enumerate(cls_names)}
+
+            return imgLib.YOLOANNResult(
+                raw_yolo_ann=raw_yolo_ann,
+                result_data=result_data
+            )
+
         DEFAULT_LABEL_STR_FORMAT="{name_class} : {score:.3f}"
         def getImg(
                 self,
@@ -34958,6 +35152,8 @@ class imgLib:
                 Calculates ensemble predictions for all images based on the configured prediction settings.
 
                 Args:
+                    parallel_workers (int, optional): The number of parallel workers to use. If 0 or less, it will be set to the number of CPU cores or 32, whichever is smaller.
+                    queue_mul (int, optional): The multiplier for the maximum number of inflight tasks in the thread pool.
                     verbose (bool, optional): Whether to print verbose output.
 
                 Raises:
@@ -35118,6 +35314,8 @@ class imgLib:
                 save_json_args:dict=None,
                 save_bb_img_json_img:bool=False,
                 save_bb_img_json_img_args:dict=None,
+
+                cache_mode:bool=False,
             ):
                 """
                 Builds the result model for all images.
@@ -35131,6 +35329,7 @@ class imgLib:
                     save_json_args (dict, optional): Additional arguments for saving JSON files.
                     save_bb_img_json_img (bool, optional): Whether to save BB images.
                     save_bb_img_json_img_args (dict, optional): Additional arguments for saving BB images.
+                    cache_mode (bool, optional): Whether to enable cache mode for the result model.
 
                 Returns:
                     imgLib.YOLOModelLib.AllImagesResultBBImgJsonCombinationsModel: The result model for all images.
@@ -35161,7 +35360,9 @@ class imgLib:
                 if(save_bb_img_json_img_args is None):
                     save_bb_img_json_img_args={}
 
-                all_model=imgLib.YOLOModelLib.AllImagesResultBBImgJsonCombinationsModel()
+                all_model=imgLib.YOLOModelLib.AllImagesResultBBImgJsonCombinationsModel(
+                    cache_mode=cache_mode
+                )
 
                 for img_name in append_img_names:
                     result_obj=self.__buildResultObjForImage(img_name,ensemble_model_names,strict=strict)
@@ -35265,13 +35466,19 @@ class imgLib:
                 ea=self.__copyDictOrEmpty(evaluation_args)
                 return {k:ea[k] for k in ea if(k in allowed)}
 
-            def calcEnsembleEvaluationAll(self,evaluation_args:dict=None,build_args:dict=None):
+            def calcEnsembleEvaluationAll(
+                self,
+                evaluation_args:dict=None,
+                build_args:dict=None,
+                cache_mode:bool=False
+            ):
                 """
                 Calculates the ensemble evaluation for all images.
 
                 Args:
                     evaluation_args (dict, optional): Arguments for evaluation calculation.
                     build_args (dict, optional): Arguments for building the result model.
+                    cache_mode (bool, optional): Whether to enable cache mode for the result model.
                 
                 Returns:
                     dict: The evaluation results for all images.
@@ -35289,6 +35496,7 @@ class imgLib:
                     save_json_args=ba.get("save_json_args",{}),
                     save_bb_img_json_img=ba.get("save_bb_img_json_img",False),
                     save_bb_img_json_img_args=ba.get("save_bb_img_json_img_args",{}),
+                    cache_mode=cache_mode,
                 )
                 return all_model.getEvaluationDict(**ea)
 
@@ -35297,7 +35505,8 @@ class imgLib:
                 evaluation_args:dict=None,
                 img_tags:list=None,
                 build_args:dict=None,
-                include_all:bool=True
+                include_all:bool=True,
+                cache_mode:bool=False,
             ):
                 """
                 Calculates the ensemble evaluation grouped by image tags.
@@ -35307,6 +35516,7 @@ class imgLib:
                     img_tags (list, optional): The list of image tags to include. If None, all image tags will be used.
                     build_args (dict, optional): Arguments for building the result model.
                     include_all (bool, optional): Whether to include the overall evaluation for all images.
+                    cache_mode (bool, optional): Whether to enable cache mode for the result model.
                 
                 Returns:
                     dict: A dictionary containing evaluation results for each image tag and optionally for all images.
@@ -35319,7 +35529,11 @@ class imgLib:
 
                 out={}
                 if(include_all):
-                    out["__all__"]=self.calcEnsembleEvaluationAll(evaluation_args=ea,build_args=ba)
+                    out["__all__"]=self.calcEnsembleEvaluationAll(
+                        evaluation_args=ea,
+                        build_args=ba,
+                        cache_mode=cache_mode,
+                    )
 
                 for tag in img_tags:
                     img_names=self.extractImageNamesEachImgTag(tag)
@@ -35335,6 +35549,7 @@ class imgLib:
                         save_json_args=ba.get("save_json_args",{}),
                         save_bb_img_json_img=ba.get("save_bb_img_json_img",False),
                         save_bb_img_json_img_args=ba.get("save_bb_img_json_img_args",{}),
+                        cache_mode=cache_mode,
                     )
                     out[tag]=tag_model.getEvaluationDict(**ea)
 
