@@ -18493,10 +18493,16 @@ class imgLib:
                 
                 head=parts[0]
                 tail=Path(*parts[1:])
+                tail_str=str(tail).replace("\\","/")
 
                 name=kwargs.get("name")
-                if(name):
-                    kwargs["name"]=str(tail/str(name))
+                if(name is not None):
+                    name_str=str(name).strip()
+                    name_is_abs=Path(name_str).is_absolute() or bool(re.match(r"^[A-Za-z]:[\\/]",name_str)) or name_str.startswith(("/","\\"))
+                    if(not name_is_abs):
+                        name_norm=name_str.replace("\\","/").lstrip("/").lstrip("\\")
+                        if(not (name_norm==tail_str or name_norm.startswith(tail_str+"/"))):
+                            kwargs["name"]=str(tail/name_str)
                 else:
                     kwargs["name"]=str(tail)
 
