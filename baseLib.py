@@ -17391,7 +17391,6 @@ class imgLib:
             if(len(paths)!=len(hashes)):
                 raise ValueError("ImageIndex payload is invalid: len(paths)!=len(hashes).")
 
-            # 内部状態を復元
             self.__paths=[Path(p) for p in paths]
             self.__hashes=[int(h) for h in hashes]
             self.__hash_to_indices={}
@@ -18460,6 +18459,82 @@ class imgLib:
                 obj.__saved_relpath=rel
                 obj.__meta=payload.get("meta") or {}
                 return obj
+                    
+            @staticmethod
+            def _normalizeProjectName(kwargs:dict)->dict:
+                """
+                Normalizes the project name in the provided keyword arguments.
+
+                Note:
+                    This method handles both absolute and relative project paths.
+                    This method is for compatibility with ultralytics version 8.4 and later.
+
+                Args:
+                    kwargs (dict): Keyword arguments containing the project name.
+
+                Returns:
+                    dict: Updated keyword arguments with normalized project name.
+                """
+                project_arg=kwargs.get("project",None)
+                if(project_arg is None):
+                    return kwargs
+                
+                project_path_str=str(project_arg).strip()
+                project_path=Path(project_path_str)
+
+                is_abs=project_path.is_absolute() or bool(re.match(r"^[A-Za-z]:[\\/]",project_path_str))
+                if(is_abs):
+                    return kwargs
+
+                parts=[x for x in re.split(r"[\\/]+",project_path_str.strip("/\\")) if x]
+                if(len(parts)<=1):
+                    kwargs["project"]=parts[0] if parts else None
+                    return kwargs
+                
+                head=parts[0]
+                tail=Path(*parts[1:])
+
+                name=kwargs.get("name")
+                if(name):
+                    kwargs["name"]=str(tail/str(name))
+                else:
+                    kwargs["name"]=str(tail)
+
+                kwargs["project"]=head
+                return kwargs
+
+            def train(self,*args,**kwargs):
+                """
+                Trains the YOLO model with the provided arguments.
+                Look at ultralytics.YOLO.train for more details. (https://docs.ultralytics.com/modes/train/)
+                """
+                kwargs=imgLib.FileStoreYOLO._normalizeProjectName(dict(kwargs))
+                return super().train(*args,**kwargs)
+
+            def val(self,*args,**kwargs):
+                """
+                Validates the YOLO model with the provided arguments.
+                Look at ultralytics.YOLO.val for more details. (https://docs.ultralytics.com/modes/val/)
+                """
+                kwargs=imgLib.FileStoreYOLO._normalizeProjectName(dict(kwargs))
+                return super().val(*args,**kwargs)
+
+            def predict(self,*args,**kwargs):
+                """
+                Predicts using the YOLO model with the provided arguments.
+                Look at ultralytics.YOLO.predict for more details. (https://docs.ultralytics.com/modes/predict/)
+                """
+                kwargs=imgLib.FileStoreYOLO._normalizeProjectName(dict(kwargs))
+                return super().predict(*args,**kwargs)
+
+            def track(self,*args,**kwargs):
+                """
+                Tracks objects using the YOLO model with the provided arguments.
+                Look at ultralytics.YOLO.track for more details. (https://docs.ultralytics.com/modes/track/)
+                """
+                kwargs=imgLib.FileStoreYOLO._normalizeProjectName(dict(kwargs))
+                return super().track(*args,**kwargs)
+
     else:
         print("Warning : The ultralytics package is not installed! The FileStoreYOLO class will not be available.")
 
