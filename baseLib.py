@@ -33980,316 +33980,6 @@ class imgLib:
                     
                 return dfl
 
-            def saveAllData(
-                self,
-                output_dir:str,
-                save_bb_img_json:bool=True,
-                save_bb_img_json_inner_dir:str|Path=None,
-                save_json_args:dict=None,
-                save_img:bool=False,
-                save_img_args:dict=None,
-                save_all_iou_df:bool=True,
-                include_mean_iou:bool=False,
-                save_evaluation_json:bool=True,
-                save_evaluation_excel:bool=True,
-                evaluation_args:dict=None,
-                excel_writer_args:dict=pyExLib.DataFrameExLib.DataFrameList.DEFAULT_EXCEL_WRITER_ARGS,
-                include_index:bool=True,
-                include_title:bool=True,
-                freeze_head:bool=True,
-                save_data_frame_csvs:bool=False,
-                save_data_cm_fig:bool=False,
-                cm_fig_header_index_face_color:str=DEFAULT_CM_FIG_HEADER_INDEX_FACE_COLOR,
-                cm_fig_gradient_cmap:str=DEFAULT_CM_FIG_GRADIENT_CMAP,
-                cm_fig_include_title:bool=True,
-                cm_fig_title_args:dict=None,
-            ):
-                """
-                Saves all data related to the evaluation.
-
-                Args:
-                    output_dir (str): Directory to save the output files.
-                    save_bb_img_json (bool, optional): Whether to save bounding box image JSON files.
-                    save_bb_img_json_inner_dir (str|Path, optional): Inner directory for saving bounding box image JSON files.
-                    save_json_args (dict, optional): Arguments for saving JSON files.
-                    save_img (bool, optional): Whether to save bounding box images.
-                    save_img_args (dict, optional): Arguments for saving images.
-                    save_all_iou_df (bool, optional): Whether to save the IoU DataFrame.
-                    include_mean_iou (bool, optional): Whether to include the mean IoU in the DataFrame.
-                    save_evaluation_json (bool, optional): Whether to save the evaluation JSON.
-                    save_evaluation_excel (bool, optional): Whether to save the evaluation Excel file.
-                    evaluation_args (dict, optional): Additional arguments for evaluation.
-                    excel_writer_args (dict, optional): Additional arguments for the Excel writer.
-                    include_index (bool, optional): Whether to include the index in the Excel file.
-                    include_title (bool, optional): Whether to include the title in the Excel file.
-                    freeze_head (bool, optional): Whether to freeze the header row in the Excel file.
-                    save_data_frame_csvs (bool, optional): Whether to save DataFrames as CSV files.
-
-                Raises:
-                    TypeError: If the result object is not of the expected type.
-                """
-                output_dir_obj=Path(output_dir)
-                output_dir_obj.mkdir(parents=True,exist_ok=True)
-
-                if(save_json_args is None):
-                    save_json_args={}
-                else:
-                    save_json_args=pyExLib.safety_deepcopy(save_json_args)
-
-                if(save_img_args is None):
-                    save_img_args={}
-                else:
-                    save_img_args=pyExLib.safety_deepcopy(save_img_args)
-
-                if(evaluation_args is None):
-                    evaluation_args={}
-                elif(not isinstance(evaluation_args,dict)):
-                    raise TypeError("evaluation_args should be a dict!")
-                else:
-                    evaluation_args=pyExLib.safety_deepcopy(evaluation_args)
-
-
-                if(save_bb_img_json or save_img):
-                    for img_name,result_obj in self.generator():
-                        if(not isinstance(result_obj,imgLib.YOLOModelLib.resultBBImgJsonCombinationsModel)):
-                            raise TypeError(f"Expected resultBBImgJsonCombinationsModel for image {img_name}, got {type(result_obj)}")
-
-                        save_img_dir=None
-                        if(save_bb_img_json_inner_dir is not None):
-                            save_img_dir=output_dir_obj/Path(save_bb_img_json_inner_dir)/Path(img_name)
-                        else:
-                            save_img_dir=output_dir_obj/Path(img_name)
-                        
-                        if(save_bb_img_json):
-                            result_obj.allSaveJson(
-                                save_img_dir,
-                                **save_json_args
-                            )
-                        if(save_img):
-                            result_obj.allSaveImg(
-                                save_img_dir,
-                                **save_img_args,
-                            )
-
-                if(save_all_iou_df):
-                    all_iou_df=self.getAllIoUDataFrame(include_iou_mean=include_mean_iou)
-                    all_iou_df.to_csv(output_dir_obj/Path("all_iou_df.csv"))
-                
-                if(save_evaluation_json):
-                    self.saveEvaluationJson(
-                        output_dir_obj/Path("evaluation.json"),
-                        evaluation_args=evaluation_args
-                    )
-
-                if(save_evaluation_excel):
-                    self.saveEvaluationsExcel(
-                        output_dir_obj/Path("evaluation.xlsx"),
-                        include_mean_iou=include_mean_iou,
-                        evaluation_args=evaluation_args,
-                        excel_writer_args=excel_writer_args,
-                        include_index=include_index,
-                        include_title=include_title,
-                        freeze_head=freeze_head,
-                        save_data_frame_csvs=save_data_frame_csvs,
-                        evaluation_csvs_dir=output_dir_obj/Path("evaluation_csvs")
-                    )
-
-                if(save_data_cm_fig):
-                    cm_fig_iou_threshold=evaluation_args.get("iou_threshold",None)
-                    cm_fig_include_background=evaluation_args.get("include_background",True)
-                    cm_fig_background_label=evaluation_args.get("background_label",None)
-
-                    self.saveConfusionMatrixFig(
-                        save_dir=output_dir_obj/Path("cm_fig/"),
-                        iou_threshold=cm_fig_iou_threshold,
-                        include_background=cm_fig_include_background,
-                        background_label=cm_fig_background_label,
-                        cm_fig_header_index_face_color=cm_fig_header_index_face_color,
-                        cm_fig_gradient_cmap=cm_fig_gradient_cmap,
-                        cm_fig_include_title=cm_fig_include_title,
-                        cm_fig_title_args=cm_fig_title_args,
-                    )
-
-            META_ALL_IMAGES_RESULT_BB_IMG_JSON_COMBINATION_MODEL_OBJ="AllImagesResultBBImgJsonCombinationsModelObj"
-
-            def toJson(self,path:str,indent:int=IOLib.JSONLib.DEFAULT_INDENT,minimalize_flag:bool=False):
-                """
-                Converts the evaluation results to JSON format.
-                
-                Args:
-                    path (str): Path to save the JSON file.
-                    indent (int): Indentation level for the JSON output.
-                    minimalize_flag (bool): Whether to minimalize the JSON output.
-                """
-                IOLib.JSONLib.saveMETAJSON(
-                    file_path=path,
-                    meta_str=imgLib.YOLOModelLib.AllImagesResultBBImgJsonCombinationsModel.META_ALL_IMAGES_RESULT_BB_IMG_JSON_COMBINATION_MODEL_OBJ,
-                    data=self.__results,
-                    indent=indent,
-                    minimalize_flag=minimalize_flag
-                )
-
-            @staticmethod
-            def fromJson(path:str,cache_mode:bool=False):
-                """
-                Converts the JSON file to the evaluation results.
-
-                Args:
-                    path (str): Path to the JSON file.
-                    cache_mode (bool): Whether to enable cache mode for storing intermediate results.
-                """
-                tmp_dict=IOLib.JSONLib.readMETAJSON(
-                    file_path=path,
-                    meta_str=imgLib.YOLOModelLib.AllImagesResultBBImgJsonCombinationsModel.META_ALL_IMAGES_RESULT_BB_IMG_JSON_COMBINATION_MODEL_OBJ
-                )
-                tmp_obj=imgLib.YOLOModelLib.AllImagesResultBBImgJsonCombinationsModel(cache_mode=cache_mode)
-
-                for key in tmp_dict:
-                    tmp_obj.append(
-                        key,
-                        result_obj=imgLib.YOLOModelLib.resultBBImgJsonCombinationsModel.allDict2Obj(tmp_dict[key])
-                    )
-                tmp_obj.setLockAppend()
-                return tmp_obj
-
-            @staticmethod
-            def checkFromDirectory(directory_path:str):
-                """
-                Checks the directory for valid image subdirectories and returns relevant information.
-
-                Args:
-                    directory_path (str): The path to the directory containing image subdirectories.
-
-                Returns:
-                    dict: A dictionary containing information about the valid image subdirectories.
-
-                Raises:
-                    FileNotFoundError: If the directory is not found.
-                    ValueError: If no valid image subdirectories are found or if there are inconsistencies in class names or model configurations.
-                    TypeError: If the data types of class names or model configurations are invalid.
-                """
-                img_dirs=[Path(p) for p in glob.glob(f"{directory_path}/**/",recursive=False)]
-
-                class_names=None
-                yolo_model_config=None
-                result_img_dirs=[]
-                img_name_list=[]
-                json_file_list_list=[]
-                
-                for img_dir_path in img_dirs:
-                    valid=True
-                    if(not img_dir_path.is_dir()):
-                        valid=False
-                    else:
-                        img_name=img_dir_path.name
-                        tmp_json_file_list=None
-
-                        check_img_dict=imgLib.YOLOModelLib.resultBBImgJsonCombinationsModel.checkFromDirectory(img_dir_path)
-                        if(not isinstance(check_img_dict,dict)):
-                            raise TypeError("check_img_dict should be a dict")
-                        
-                        if(check_img_dict.get("num_files",0)<=0):
-                            valid=False
-                        else:
-                            tmp_class_names=check_img_dict.get("class_names",None)
-                            tmp_yolo_model_config_list=check_img_dict.get("yolo_model_config_list",None)
-                            tmp_json_file_list=check_img_dict.get("json_file_list",None)
-                            
-                            if(not isinstance(tmp_class_names,list)):
-                                raise TypeError("class_names should be a list")
-                            if(class_names is None):
-                                class_names=tmp_class_names
-                            elif(class_names!=tmp_class_names):
-                                raise ValueError("class_names do not match")
-                            
-                            if(not isinstance(tmp_yolo_model_config_list,list)):
-                                raise TypeError("yolo_model_config_list should be a list")
-                            if(yolo_model_config is None):
-                                yolo_model_config=tmp_yolo_model_config_list
-                            elif(yolo_model_config!=tmp_yolo_model_config_list):
-                                raise ValueError("yolo_model_config_list do not match")
-
-                            if(not isinstance(tmp_json_file_list,list)):
-                                raise TypeError("tmp_json_file_list should be a list")
-                    
-                    if(valid):
-                        result_img_dirs.append(img_dir_path)
-                        img_name_list.append(img_name)
-                        json_file_list_list.append(tmp_json_file_list)
-                
-                if(yolo_model_config is None):
-                    raise ValueError("No valid yolo_model_config found")
-
-                model_names=[]
-                for mi in yolo_model_config:
-                    if(not isinstance(mi,dict)):
-                        raise TypeError("yolo_model_config_list should be a list of dict")
-                    model_name=mi.get("proc_ensemble_model_name",None)
-                    if(model_name is None):
-                        raise ValueError("proc_ensemble_model_name not found in yolo_model_config")
-                    model_names.append(model_name)
-
-                if(not (len(img_name_list)==len(result_img_dirs) and len(img_name_list)==len(json_file_list_list))):
-                    raise ValueError("Inconsistent lengths in checked data")
-
-                return {
-                    "num_images":len(result_img_dirs),
-                    "image_names":img_name_list,
-                    "img_dirs":result_img_dirs,
-                    "json_file_list_list":json_file_list_list,
-                    "class_names":class_names,
-                    "yolo_model_config_list":yolo_model_config,
-                    "model_names":model_names
-                }
-
-            @staticmethod
-            def fromDirectory(
-                directory_path:str,
-                img_name_regex_list:list=None,
-                cache_mode:bool=False,
-                skip_img_name_list:list=None,
-            ):
-                """
-                Creates an AllImagesResultBBImgJsonCombinationsModel instance from a directory containing image subdirectories.
-
-                Args:
-                    directory_path (str): The path to the directory containing image subdirectories.
-                    img_name_regex_list (list, optional): List of regex patterns to filter image names.
-                    cache_mode (bool, optional): Whether to enable cache mode for storing intermediate results.
-                    skip_img_name_list (list, optional): List of image names to skip.
-
-                Returns:
-                    imgLib.YOLOModelLib.AllImagesResultBBImgJsonCombinationsModel: The created AllImagesResultBBImgJsonCombinationsModel object.
-
-                Raises:
-                    FileNotFoundError: If the directory is not found.
-                """
-                if(skip_img_name_list is None):
-                    skip_img_name_list=[]
-                else:
-                    skip_img_name_list=pyExLib.safety_deepcopy(skip_img_name_list)
-
-                tmp_obj=imgLib.YOLOModelLib.AllImagesResultBBImgJsonCombinationsModel(cache_mode=cache_mode)
-                img_dirs=[Path(p) for p in glob.glob(f"{directory_path}/**/",recursive=False)]
-
-                for img_dir_path in img_dirs:
-                    if(not img_dir_path.is_dir()):
-                        continue
-                    img_name=img_dir_path.name
-
-                    skip_flag=False
-                    if(img_name_regex_list is not None):
-                        if(all([(re.match(img_name_regex,img_name) is None) for img_name_regex in img_name_regex_list])):
-                            skip_flag=True
-                    if(img_name in skip_img_name_list):
-                        skip_flag=True
-                    if(skip_flag):
-                        continue
-
-                    tmp_result_obj=imgLib.YOLOModelLib.resultBBImgJsonCombinationsModel.fromDirectory(img_dir_path)
-                    tmp_obj.append(img_name,tmp_result_obj,save_bb_img_json=False)
-                tmp_obj.setLockAppend()
-                return tmp_obj
 
             @staticmethod
             def __normalize_model_filter(
@@ -34530,6 +34220,419 @@ class imgLib:
                     }
                 }
 
+            def saveSelectModelsTopkAndDiversity(
+                self,
+                save_json_path:str|Path,
+                topk_metric_col:str,
+                topk_n:int,
+                diversity_m:int,
+                diversity_target_classes:list|str|None=None,
+                diversity_iou_threshold:float=0.5,
+                div_strategy:str="total",
+                
+                div_min_metric_col:str|None=None,
+                div_min_metric:float|None=None,
+                div_max_metric_col:str|None=None,
+                div_max_metric:float|None=None,
+                
+                candidate_models:list|None=None,
+                exclude_models:list|None=None,
+                include_regex:str|None=None,
+                exclude_regex:str|None=None,
+                
+                evaluation_args:dict|None=None,
+                include_mean_iou:bool=False,
+
+                json_indent:int=None,
+                json_args:dict=None,
+            ):
+                """
+                Saves the selected models based on top-k performance and diversity criteria to a JSON file.
+
+                Args:
+                    save_json_path (str|Path): Path to the output JSON file.
+                    topk_metric_col (str): The metric column to use for top-k selection.
+                    topk_n (int): The number of top models to select.
+                    diversity_m (int): The number of diverse models to select.
+                    diversity_target_classes (list|str|None, optional): Target classes for diversity selection.
+                    diversity_iou_threshold (float, optional): IoU threshold for diversity selection.
+                    div_strategy (str, optional): Strategy for diversity selection ("total" or "novelty").
+                    div_min_metric_col (str|None, optional): Minimum metric column for diversity filtering.
+                    div_min_metric (float|None, optional): Minimum metric value for diversity filtering.
+                    div_max_metric_col (str|None, optional): Maximum metric column for diversity filtering.
+                    div_max_metric (float|None, optional): Maximum metric value for diversity filtering.
+                    candidate_models (list|None, optional): List of candidate models to consider.
+                    exclude_models (list|None, optional): List of models to exclude.
+                    include_regex (str|None, optional): Regex pattern to include models.
+                    exclude_regex (str|None, optional): Regex pattern to exclude models.
+                    evaluation_args (dict|None, optional): Additional arguments for evaluation.
+                    include_mean_iou (bool, optional): Whether to include the mean IoU in the DataFrame.
+                    json_indent (int, optional): Indentation level for the JSON output.
+                    json_args (dict|None, optional): Additional arguments for JSON serialization.
+                """
+                result=self.selectModelsTopkAndDiversity(
+                    topk_metric_col=topk_metric_col,
+                    topk_n=topk_n,
+                    diversity_m=diversity_m,
+                    diversity_target_classes=diversity_target_classes,
+                    diversity_iou_threshold=diversity_iou_threshold,
+                    div_strategy=div_strategy,
+                    div_min_metric_col=div_min_metric_col,
+                    div_min_metric=div_min_metric,
+                    div_max_metric_col=div_max_metric_col,
+                    div_max_metric=div_max_metric,
+                    candidate_models=candidate_models,
+                    exclude_models=exclude_models,
+                    include_regex=include_regex,
+                    exclude_regex=exclude_regex,
+                    evaluation_args=evaluation_args,
+                    include_mean_iou=include_mean_iou,
+                )
+
+                if(json_indent is None):
+                    json_indent=IOLib.JSONLib.DEFAULT_INDENT
+
+                if(json_args is None):
+                    json_args={}
+
+                with open(save_json_path,mode="w",encoding="utf-8") as f:
+                    json.dump(
+                        result,
+                        f,
+                        indent=json_indent,
+                        **json_args
+                    )
+
+            def saveAllData(
+                self,
+                output_dir:str,
+                save_bb_img_json:bool=True,
+                save_bb_img_json_inner_dir:str|Path=None,
+                save_json_args:dict=None,
+                save_img:bool=False,
+                save_img_args:dict=None,
+                save_all_iou_df:bool=True,
+                include_mean_iou:bool=False,
+                save_evaluation_json:bool=True,
+                save_evaluation_excel:bool=True,
+                evaluation_args:dict=None,
+                excel_writer_args:dict=pyExLib.DataFrameExLib.DataFrameList.DEFAULT_EXCEL_WRITER_ARGS,
+                include_index:bool=True,
+                include_title:bool=True,
+                freeze_head:bool=True,
+                save_data_frame_csvs:bool=False,
+                save_data_cm_fig:bool=False,
+                cm_fig_header_index_face_color:str=DEFAULT_CM_FIG_HEADER_INDEX_FACE_COLOR,
+                cm_fig_gradient_cmap:str=DEFAULT_CM_FIG_GRADIENT_CMAP,
+                cm_fig_include_title:bool=True,
+                cm_fig_title_args:dict=None,
+                save_selcted_models_json:bool=False,
+                selcted_models_args:dict=None,
+            ):
+                """
+                Saves all data related to the evaluation.
+
+                Args:
+                    output_dir (str): Directory to save the output files.
+                    save_bb_img_json (bool, optional): Whether to save bounding box image JSON files.
+                    save_bb_img_json_inner_dir (str|Path, optional): Inner directory for saving bounding box image JSON files.
+                    save_json_args (dict, optional): Arguments for saving JSON files.
+                    save_img (bool, optional): Whether to save bounding box images.
+                    save_img_args (dict, optional): Arguments for saving images.
+                    save_all_iou_df (bool, optional): Whether to save the IoU DataFrame.
+                    include_mean_iou (bool, optional): Whether to include the mean IoU in the DataFrame.
+                    save_evaluation_json (bool, optional): Whether to save the evaluation JSON.
+                    save_evaluation_excel (bool, optional): Whether to save the evaluation Excel file.
+                    evaluation_args (dict, optional): Additional arguments for evaluation.
+                    excel_writer_args (dict, optional): Additional arguments for the Excel writer.
+                    include_index (bool, optional): Whether to include the index in the Excel file.
+                    include_title (bool, optional): Whether to include the title in the Excel file.
+                    freeze_head (bool, optional): Whether to freeze the header row in the Excel file.
+                    save_data_frame_csvs (bool, optional): Whether to save DataFrames as CSV files.
+                    save_data_cm_fig (bool, optional): Whether to save the confusion matrix figure.
+                    cm_fig_header_index_face_color (str, optional): Face color for the confusion matrix figure header index.
+                    cm_fig_gradient_cmap (str, optional): Gradient colormap for the confusion matrix figure.
+                    cm_fig_include_title (bool, optional): Whether to include the title in the confusion matrix figure.
+                    cm_fig_title_args (dict, optional): Additional arguments for the confusion matrix figure title.
+                    save_selcted_models_json (bool, optional): Whether to save the selected models JSON.
+                    selcted_models_args (dict, optional): Arguments for selecting models.
+
+                Raises:
+                    TypeError: If the result object is not of the expected type.
+                """
+                output_dir_obj=Path(output_dir)
+                output_dir_obj.mkdir(parents=True,exist_ok=True)
+
+                if(save_json_args is None):
+                    save_json_args={}
+                else:
+                    save_json_args=pyExLib.safety_deepcopy(save_json_args)
+
+                if(save_img_args is None):
+                    save_img_args={}
+                else:
+                    save_img_args=pyExLib.safety_deepcopy(save_img_args)
+
+                if(evaluation_args is None):
+                    evaluation_args={}
+                elif(not isinstance(evaluation_args,dict)):
+                    raise TypeError("evaluation_args should be a dict!")
+                else:
+                    evaluation_args=pyExLib.safety_deepcopy(evaluation_args)
+
+
+                if(save_bb_img_json or save_img):
+                    for img_name,result_obj in self.generator():
+                        if(not isinstance(result_obj,imgLib.YOLOModelLib.resultBBImgJsonCombinationsModel)):
+                            raise TypeError(f"Expected resultBBImgJsonCombinationsModel for image {img_name}, got {type(result_obj)}")
+
+                        save_img_dir=None
+                        if(save_bb_img_json_inner_dir is not None):
+                            save_img_dir=output_dir_obj/Path(save_bb_img_json_inner_dir)/Path(img_name)
+                        else:
+                            save_img_dir=output_dir_obj/Path(img_name)
+                        
+                        if(save_bb_img_json):
+                            result_obj.allSaveJson(
+                                save_img_dir,
+                                **save_json_args
+                            )
+                        if(save_img):
+                            result_obj.allSaveImg(
+                                save_img_dir,
+                                **save_img_args,
+                            )
+
+                if(save_all_iou_df):
+                    all_iou_df=self.getAllIoUDataFrame(include_iou_mean=include_mean_iou)
+                    all_iou_df.to_csv(output_dir_obj/Path("all_iou_df.csv"))
+                
+                if(save_evaluation_json):
+                    self.saveEvaluationJson(
+                        output_dir_obj/Path("evaluation.json"),
+                        evaluation_args=evaluation_args
+                    )
+
+                if(save_evaluation_excel):
+                    self.saveEvaluationsExcel(
+                        output_dir_obj/Path("evaluation.xlsx"),
+                        include_mean_iou=include_mean_iou,
+                        evaluation_args=evaluation_args,
+                        excel_writer_args=excel_writer_args,
+                        include_index=include_index,
+                        include_title=include_title,
+                        freeze_head=freeze_head,
+                        save_data_frame_csvs=save_data_frame_csvs,
+                        evaluation_csvs_dir=output_dir_obj/Path("evaluation_csvs")
+                    )
+
+                if(save_data_cm_fig):
+                    cm_fig_iou_threshold=evaluation_args.get("iou_threshold",None)
+                    cm_fig_include_background=evaluation_args.get("include_background",True)
+                    cm_fig_background_label=evaluation_args.get("background_label",None)
+
+                    self.saveConfusionMatrixFig(
+                        save_dir=output_dir_obj/Path("cm_fig/"),
+                        iou_threshold=cm_fig_iou_threshold,
+                        include_background=cm_fig_include_background,
+                        background_label=cm_fig_background_label,
+                        cm_fig_header_index_face_color=cm_fig_header_index_face_color,
+                        cm_fig_gradient_cmap=cm_fig_gradient_cmap,
+                        cm_fig_include_title=cm_fig_include_title,
+                        cm_fig_title_args=cm_fig_title_args,
+                    )
+
+                if(save_selcted_models_json):
+                    if(selcted_models_args is None):
+                        selcted_models_args={}
+                    if(selcted_models_args.get("save_json_path") is None):
+                        selcted_models_args["save_json_path"]=output_dir_obj/Path("selected_models.json")
+
+                    self.saveSelectModelsTopkAndDiversity(
+                        **selcted_models_args
+                    )
+
+            META_ALL_IMAGES_RESULT_BB_IMG_JSON_COMBINATION_MODEL_OBJ="AllImagesResultBBImgJsonCombinationsModelObj"
+
+            def toJson(self,path:str,indent:int=IOLib.JSONLib.DEFAULT_INDENT,minimalize_flag:bool=False):
+                """
+                Converts the evaluation results to JSON format.
+                
+                Args:
+                    path (str): Path to save the JSON file.
+                    indent (int): Indentation level for the JSON output.
+                    minimalize_flag (bool): Whether to minimalize the JSON output.
+                """
+                IOLib.JSONLib.saveMETAJSON(
+                    file_path=path,
+                    meta_str=imgLib.YOLOModelLib.AllImagesResultBBImgJsonCombinationsModel.META_ALL_IMAGES_RESULT_BB_IMG_JSON_COMBINATION_MODEL_OBJ,
+                    data=self.__results,
+                    indent=indent,
+                    minimalize_flag=minimalize_flag
+                )
+
+            @staticmethod
+            def fromJson(path:str,cache_mode:bool=False):
+                """
+                Converts the JSON file to the evaluation results.
+
+                Args:
+                    path (str): Path to the JSON file.
+                    cache_mode (bool): Whether to enable cache mode for storing intermediate results.
+                """
+                tmp_dict=IOLib.JSONLib.readMETAJSON(
+                    file_path=path,
+                    meta_str=imgLib.YOLOModelLib.AllImagesResultBBImgJsonCombinationsModel.META_ALL_IMAGES_RESULT_BB_IMG_JSON_COMBINATION_MODEL_OBJ
+                )
+                tmp_obj=imgLib.YOLOModelLib.AllImagesResultBBImgJsonCombinationsModel(cache_mode=cache_mode)
+
+                for key in tmp_dict:
+                    tmp_obj.append(
+                        key,
+                        result_obj=imgLib.YOLOModelLib.resultBBImgJsonCombinationsModel.allDict2Obj(tmp_dict[key])
+                    )
+                tmp_obj.setLockAppend()
+                return tmp_obj
+
+            @staticmethod
+            def checkFromDirectory(directory_path:str):
+                """
+                Checks the directory for valid image subdirectories and returns relevant information.
+
+                Args:
+                    directory_path (str): The path to the directory containing image subdirectories.
+
+                Returns:
+                    dict: A dictionary containing information about the valid image subdirectories.
+
+                Raises:
+                    FileNotFoundError: If the directory is not found.
+                    ValueError: If no valid image subdirectories are found or if there are inconsistencies in class names or model configurations.
+                    TypeError: If the data types of class names or model configurations are invalid.
+                """
+                img_dirs=[Path(p) for p in glob.glob(f"{directory_path}/**/",recursive=False)]
+
+                class_names=None
+                yolo_model_config=None
+                result_img_dirs=[]
+                img_name_list=[]
+                json_file_list_list=[]
+                
+                for img_dir_path in img_dirs:
+                    valid=True
+                    if(not img_dir_path.is_dir()):
+                        valid=False
+                    else:
+                        img_name=img_dir_path.name
+                        tmp_json_file_list=None
+
+                        check_img_dict=imgLib.YOLOModelLib.resultBBImgJsonCombinationsModel.checkFromDirectory(img_dir_path)
+                        if(not isinstance(check_img_dict,dict)):
+                            raise TypeError("check_img_dict should be a dict")
+                        
+                        if(check_img_dict.get("num_files",0)<=0):
+                            valid=False
+                        else:
+                            tmp_class_names=check_img_dict.get("class_names",None)
+                            tmp_yolo_model_config_list=check_img_dict.get("yolo_model_config_list",None)
+                            tmp_json_file_list=check_img_dict.get("json_file_list",None)
+                            
+                            if(not isinstance(tmp_class_names,list)):
+                                raise TypeError("class_names should be a list")
+                            if(class_names is None):
+                                class_names=tmp_class_names
+                            elif(class_names!=tmp_class_names):
+                                raise ValueError("class_names do not match")
+                            
+                            if(not isinstance(tmp_yolo_model_config_list,list)):
+                                raise TypeError("yolo_model_config_list should be a list")
+                            if(yolo_model_config is None):
+                                yolo_model_config=tmp_yolo_model_config_list
+                            elif(yolo_model_config!=tmp_yolo_model_config_list):
+                                raise ValueError("yolo_model_config_list do not match")
+
+                            if(not isinstance(tmp_json_file_list,list)):
+                                raise TypeError("tmp_json_file_list should be a list")
+                    
+                    if(valid):
+                        result_img_dirs.append(img_dir_path)
+                        img_name_list.append(img_name)
+                        json_file_list_list.append(tmp_json_file_list)
+                
+                if(yolo_model_config is None):
+                    raise ValueError("No valid yolo_model_config found")
+
+                model_names=[]
+                for mi in yolo_model_config:
+                    if(not isinstance(mi,dict)):
+                        raise TypeError("yolo_model_config_list should be a list of dict")
+                    model_name=mi.get("proc_ensemble_model_name",None)
+                    if(model_name is None):
+                        raise ValueError("proc_ensemble_model_name not found in yolo_model_config")
+                    model_names.append(model_name)
+
+                if(not (len(img_name_list)==len(result_img_dirs) and len(img_name_list)==len(json_file_list_list))):
+                    raise ValueError("Inconsistent lengths in checked data")
+
+                return {
+                    "num_images":len(result_img_dirs),
+                    "image_names":img_name_list,
+                    "img_dirs":result_img_dirs,
+                    "json_file_list_list":json_file_list_list,
+                    "class_names":class_names,
+                    "yolo_model_config_list":yolo_model_config,
+                    "model_names":model_names
+                }
+
+            @staticmethod
+            def fromDirectory(
+                directory_path:str,
+                img_name_regex_list:list=None,
+                cache_mode:bool=False,
+                skip_img_name_list:list=None,
+            ):
+                """
+                Creates an AllImagesResultBBImgJsonCombinationsModel instance from a directory containing image subdirectories.
+
+                Args:
+                    directory_path (str): The path to the directory containing image subdirectories.
+                    img_name_regex_list (list, optional): List of regex patterns to filter image names.
+                    cache_mode (bool, optional): Whether to enable cache mode for storing intermediate results.
+                    skip_img_name_list (list, optional): List of image names to skip.
+
+                Returns:
+                    imgLib.YOLOModelLib.AllImagesResultBBImgJsonCombinationsModel: The created AllImagesResultBBImgJsonCombinationsModel object.
+
+                Raises:
+                    FileNotFoundError: If the directory is not found.
+                """
+                if(skip_img_name_list is None):
+                    skip_img_name_list=[]
+                else:
+                    skip_img_name_list=pyExLib.safety_deepcopy(skip_img_name_list)
+
+                tmp_obj=imgLib.YOLOModelLib.AllImagesResultBBImgJsonCombinationsModel(cache_mode=cache_mode)
+                img_dirs=[Path(p) for p in glob.glob(f"{directory_path}/**/",recursive=False)]
+
+                for img_dir_path in img_dirs:
+                    if(not img_dir_path.is_dir()):
+                        continue
+                    img_name=img_dir_path.name
+
+                    skip_flag=False
+                    if(img_name_regex_list is not None):
+                        if(all([(re.match(img_name_regex,img_name) is None) for img_name_regex in img_name_regex_list])):
+                            skip_flag=True
+                    if(img_name in skip_img_name_list):
+                        skip_flag=True
+                    if(skip_flag):
+                        continue
+
+                    tmp_result_obj=imgLib.YOLOModelLib.resultBBImgJsonCombinationsModel.fromDirectory(img_dir_path)
+                    tmp_obj.append(img_name,tmp_result_obj,save_bb_img_json=False)
+                tmp_obj.setLockAppend()
+                return tmp_obj
+            
         @_protectedClass.fileStoreMyLibRegister
         class ReadOnlyAllImagesResultBBImgJsonCombinationsModel(AllImagesResultBBImgJsonCombinationsModel,_FileStore.FileStoreParser):
             """
