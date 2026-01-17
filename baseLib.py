@@ -34290,7 +34290,246 @@ class imgLib:
                     tmp_obj.append(img_name,tmp_result_obj,save_bb_img_json=False)
                 tmp_obj.setLockAppend()
                 return tmp_obj
-            
+
+            @staticmethod
+            def __normalize_model_filter(
+                model_names:list,
+                candidate_models:list|None,
+                exclude_models:list|None,
+                include_regex:str|None,
+                exclude_regex:str|None,
+            )->list:
+                """
+                Normalizes the model filter based on the provided criteria.
+
+                Args:
+                    model_names (list): List of model names to filter.
+                    candidate_models (list|None): List of candidate models to include.
+                    exclude_models (list|None): List of models to exclude.
+                    include_regex (str|None): Regex pattern to include models.
+                    exclude_regex (str|None): Regex pattern to exclude models.
+
+                Returns:
+                    list: A list of normalized model names after applying the filters.
+                """
+                cand=set(model_names)
+
+                if(candidate_models is not None):
+                    cand=cand & set([str(x) for x in candidate_models])
+                if(exclude_models is not None):
+                    cand=cand - set([str(x) for x in exclude_models])
+                if(include_regex is not None):
+                    rx=re.compile(include_regex)
+                    cand=set([m for m in cand if rx.search(m) is not None])
+                if(exclude_regex is not None):
+                    rx=re.compile(exclude_regex)
+                    cand=set([m for m in cand if rx.search(m) is None])
+
+                return [m for m in model_names if m in cand]
+
+            @staticmethod
+            def __build_detection_sets(
+                all_iou_df:pd.DataFrame,
+                target_cols:list,
+                thr:float,
+            )->dict:
+                """
+                Builds detection sets for each model based on IoU thresholds.
+
+                Args:
+                    all_iou_df (pd.DataFrame): DataFrame containing IoU values for images and models.
+                    target_cols (list): List of target columns representing classes.
+                    thr (float): IoU threshold for detection.
+
+                Returns:
+                    dict: A dictionary mapping model names to sets of detected image names.
+                """
+                use_cols=["img_name","model_name"]+target_cols
+                df=all_iou_df[use_cols].copy()
+
+                has_gt=df[target_cols].notna().any(axis=1)
+                det=(df[target_cols].notna() & df[target_cols].ge(thr)).any(axis=1)
+                det=det & has_gt
+
+                det_rows=df.loc[det,["model_name","img_name"]].drop_duplicates()
+
+                det_sets={}
+                for mn,grp in det_rows.groupby("model_name"):
+                    det_sets[str(mn)]=set(grp["img_name"].astype(str).tolist())
+
+                for mn in df["model_name"].unique().tolist():
+                    det_sets.setdefault(str(mn),set())
+
+                return det_sets
+
+            def selectModelsTopkAndDiversity(
+                self,
+                topk_metric_col:str,
+                topk_n:int,
+                diversity_m:int,
+                diversity_target_classes:list|str|None=None,
+                diversity_iou_threshold:float=0.5,
+                div_strategy:str="total",
+                
+                div_min_metric_col:str|None=None,
+                div_min_metric:float|None=None,
+                div_max_metric_col:str|None=None,
+                div_max_metric:float|None=None,
+                
+                candidate_models:list|None=None,
+                exclude_models:list|None=None,
+                include_regex:str|None=None,
+                exclude_regex:str|None=None,
+                
+                evaluation_args:dict|None=None,
+                include_mean_iou:bool=False,
+            ):
+                """
+                Selects models based on top-k performance and diversity criteria.
+
+                Args:
+                    topk_metric_col (str): The metric column to use for top-k selection.
+                    topk_n (int): The number of top models to select.
+                    diversity_m (int): The number of diverse models to select.
+                    diversity_target_classes (list|str|None, optional): Target classes for diversity selection.
+                    diversity_iou_threshold (float, optional): IoU threshold for diversity selection.
+                    div_strategy (str, optional): Strategy for diversity selection ("total" or "novelty").
+                    div_min_metric_col (str|None, optional): Minimum metric column for diversity filtering.
+                    div_min_metric (float|None, optional): Minimum metric value for diversity filtering.
+                    div_max_metric_col (str|None, optional): Maximum metric column for diversity filtering.
+                    div_max_metric (float|None, optional): Maximum metric value for diversity filtering.
+                    candidate_models (list|None, optional): List of candidate models to consider.
+                    exclude_models (list|None, optional): List of models to exclude.
+                    include_regex (str|None, optional): Regex pattern to include models.
+                    exclude_regex (str|None, optional): Regex pattern to exclude models.
+                    evaluation_args (dict|None, optional): Additional arguments for evaluation.
+                    include_mean_iou (bool, optional): Whether to include the mean IoU in the DataFrame.
+
+                Returns:
+                    dict: A dictionary containing selected models, top-k models, diversity models, and metadata.
+                """
+                if(evaluation_args is None):
+                    evaluation_args={}
+
+                dfl=self.getEvaluateDataFrames(include_mean_iou=include_mean_iou,evaluation_args=evaluation_args)
+                _,all_eval_df,_=dfl.getItemByKey("AllEvaluateData")
+
+                if(topk_metric_col not in all_eval_df.columns):
+                    raise KeyError(f"topk_metric_col '{topk_metric_col}' not found in AllEvaluateData")
+
+                all_eval_df=all_eval_df.copy()
+                all_eval_df["model_name"]=all_eval_df["model_name"].astype(str)
+                all_eval_df[topk_metric_col]=pd.to_numeric(all_eval_df[topk_metric_col],errors="coerce")
+
+                model_order=all_eval_df["model_name"].tolist()
+                allowed_models=imgLib.YOLOModelLib.AllImagesResultBBImgJsonCombinationsModel.__normalize_model_filter(
+                    model_order,candidate_models,exclude_models,include_regex,exclude_regex
+                )
+                all_eval_df=all_eval_df.loc[all_eval_df["model_name"].isin(set(allowed_models))]
+
+                tmp=all_eval_df[["model_name",topk_metric_col]].dropna(subset=[topk_metric_col])
+                topk_models=tmp.sort_values(topk_metric_col,ascending=False)["model_name"].head(int(topk_n)).tolist()
+
+                diversity_models=[]
+                if(int(diversity_m)>0):
+                    all_iou_df=self.getAllIoUDataFrame(include_iou_mean=False).copy()
+                    all_iou_df["model_name"]=all_iou_df["model_name"].astype(str)
+                    all_iou_df["img_name"]=all_iou_df["img_name"].astype(str)
+
+                    all_iou_df=all_iou_df.loc[all_iou_df["model_name"].isin(set(allowed_models))]
+
+                    if(diversity_target_classes is None):
+                        target_cols=[c for c in all_iou_df.columns if c not in ("img_name","model_name")]
+                    elif(isinstance(diversity_target_classes,str)):
+                        if(diversity_target_classes=="*"):
+                            target_cols=[c for c in all_iou_df.columns if c not in ("img_name","model_name")]
+                        else:
+                            target_cols=[diversity_target_classes]
+                    else:
+                        target_cols=list(diversity_target_classes)
+
+                    missing=[c for c in target_cols if c not in all_iou_df.columns]
+                    if(len(missing)>0):
+                        raise KeyError(f"target class columns not found in AllIoUData: {missing}")
+
+                    div_candidate=set([m for m in allowed_models if m not in set(topk_models)])
+
+                    if(div_min_metric_col is not None and div_min_metric is not None):
+                        if(div_min_metric_col not in all_eval_df.columns):
+                            raise KeyError(f"div_min_metric_col '{div_min_metric_col}' not found in AllEvaluateData")
+                        v=pd.to_numeric(all_eval_df[div_min_metric_col],errors="coerce")
+                        ok=set(all_eval_df.loc[v.ge(float(div_min_metric)),"model_name"].tolist())
+                        div_candidate=div_candidate & ok
+
+                    if(div_max_metric_col is not None and div_max_metric is not None):
+                        if(div_max_metric_col not in all_eval_df.columns):
+                            raise KeyError(f"div_max_metric_col '{div_max_metric_col}' not found in AllEvaluateData")
+                        v=pd.to_numeric(all_eval_df[div_max_metric_col],errors="coerce")
+                        ok=set(all_eval_df.loc[v.le(float(div_max_metric)),"model_name"].tolist())
+                        div_candidate=div_candidate & ok
+
+                    det_sets=imgLib.YOLOModelLib.AllImagesResultBBImgJsonCombinationsModel.__build_detection_sets(
+                        all_iou_df,target_cols,float(diversity_iou_threshold)
+                    )
+
+                    det_sets={k:v for k,v in det_sets.items() if k in div_candidate}
+
+                    if(div_strategy=="total"):
+                        scored=sorted(
+                            [(len(v),k) for k,v in det_sets.items()],
+                            key=lambda x:(-x[0],x[1])
+                        )
+                        for _,mn in scored:
+                            diversity_models.append(mn)
+                            if(len(diversity_models)>=int(diversity_m)):
+                                break
+
+                    elif(div_strategy=="novelty"):
+                        covered=set()
+                        for mn in topk_models:
+                            covered |= det_sets.get(mn,set())
+
+                        remaining=set(det_sets.keys())
+                        while(len(diversity_models)<int(diversity_m) and len(remaining)>0):
+                            best_mn=None
+                            best_gain=-1
+                            for mn in sorted(list(remaining)):
+                                gain=len(det_sets[mn]-covered)
+                                if(gain>best_gain):
+                                    best_gain=gain
+                                    best_mn=mn
+                            if(best_mn is None):
+                                break
+                            diversity_models.append(best_mn)
+                            covered |= det_sets[best_mn]
+                            remaining.remove(best_mn)
+
+                    else:
+                        raise ValueError("div_strategy must be 'total' or 'novelty'")
+
+                selected=topk_models+diversity_models
+                return {
+                    "selected":selected,
+                    "topk":topk_models,
+                    "diversity":diversity_models,
+                    "meta":{
+                        "topk_metric_col":topk_metric_col,
+                        "topk_n":int(topk_n),
+                        "diversity_m":int(diversity_m),
+                        "div_target_classes":diversity_target_classes,
+                        "div_iou_threshold":float(diversity_iou_threshold),
+                        "div_strategy":div_strategy,
+                        "div_min_metric_col":div_min_metric_col,
+                        "div_min_metric":div_min_metric,
+                        "div_max_metric_col":div_max_metric_col,
+                        "div_max_metric":div_max_metric,
+                        "candidate_models":candidate_models,
+                        "exclude_models":exclude_models,
+                        "include_regex":include_regex,
+                        "exclude_regex":exclude_regex,
+                    }
+                }
+
         @_protectedClass.fileStoreMyLibRegister
         class ReadOnlyAllImagesResultBBImgJsonCombinationsModel(AllImagesResultBBImgJsonCombinationsModel,_FileStore.FileStoreParser):
             """
