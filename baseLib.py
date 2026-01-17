@@ -27506,6 +27506,19 @@ class imgLib:
                 else:
                     raise ValueError("Error : yolo_result_list must be a list of ultralytics.engine.results.Results!")
 
+                def roundFunc(yolo_ensemble_argv:dict,default:callable):
+                    if("thread_func_mode" in yolo_ensemble_argv):
+                        thread_func_mode=yolo_ensemble_argv["thread_func_mode"]
+                        if(thread_func_mode=="floor"):
+                            return math.floor
+                        elif(thread_func_mode=="ceil"):
+                            return math.ceil
+                        elif(thread_func_mode=="round"):
+                            return round
+                        else:
+                            raise ValueError("'thread_func_mode' must be one of 'floor', 'ceil', or 'round'!")
+                    return default
+
                 if(not(len(bboxes)==len(scores) and len(bboxes)==len(classes))):
                     raise ValueError("Error : The lengths of bboxes, scores, and classes are not aligned!") 
 
@@ -27558,8 +27571,10 @@ class imgLib:
                             raise ValueError("In RateNVONMS mode, 'thread_rate' must be a numeric value!")
                         if(not (0.0<=thread_rate<=1.0)):
                             raise ValueError("In RateNVONMS mode, 'thread_rate' must be in [0.0,1.0]!")
-                        num_thread=math.floor(models_num*thread_rate)
                         
+                        thread_func=roundFunc(yolo_ensemble_argv,math.floor)
+                        num_thread=thread_func(models_num*thread_rate)
+
                         return imgLib.ensembleModel.NVONMS(
                             bboxes=bboxes,
                             scores=scores,
@@ -27572,13 +27587,17 @@ class imgLib:
                         raise ValueError("In RateNVONMS mode, a 'thread_rate' argument is required!")
 
                 elif(mode==imgLib.ensembleModel.ENSEMBLE_MODE_MAJORITY_RULE_NMS):
+                    
+                    thread_func=roundFunc(yolo_ensemble_argv,math.floor)
+                    num_thread=thread_func(models_num/2)
+
                     return imgLib.ensembleModel.NVONMS(
                         bboxes=bboxes,
                         scores=scores,
                         classes=classes,
                         iou_threshold=iou_threshold,
                         multi_class_mode=multi_class_mode,
-                        num_thread=math.floor(models_num/2)
+                        num_thread=num_thread
                     )
 
                 elif(mode==imgLib.ensembleModel.ENSEMBLE_MODE_AND_NMS):
