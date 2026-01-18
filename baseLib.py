@@ -22098,6 +22098,7 @@ class imgLib:
                 tmp_img=imgLib.drawShapeLine(
                     mode=imgLib.MODE_DRAW_SHAPE_LINE_RECT,
                     img=tmp_img,
+                    shape_colors=imgLib.YOLOANN.staticColorOfANNClsNums(classes),
                     shape_list=bboxes,
                     label_flag=label_flag,
                     label_list=label_list,
