@@ -34035,6 +34035,7 @@ class imgLib:
                 include_map:bool=False,
                 map_args:dict=None,
                 include_all_annotation_iou_df:bool=False,
+                include_all_annotation_iou_dict:bool=False,
                 all_annotation_iou_df_args:dict=None,
             ):
                 """
@@ -34049,7 +34050,10 @@ class imgLib:
                     include_confusion_matrix_df (bool, optional): Whether to include the confusion matrix DataFrame.
                     include_map (bool, optional): Whether to include mAP in the evaluation.
                     map_args (dict, optional): Additional arguments for mAP calculation.
-
+                    include_all_annotation_iou_df (bool, optional): Whether to include all annotation IoU DataFrame.
+                    include_all_annotation_iou_dict (bool, optional): Whether to include all annotation IoU as a dictionary.
+                    all_annotation_iou_df_args (dict, optional): Additional arguments for all annotation IoU DataFrame.
+                    
                 Returns:
                     dict: A dictionary containing evaluation metrics.
 
@@ -34117,9 +34121,14 @@ class imgLib:
                     if(include_map and isinstance(map_dict,dict) and model_name in map_dict):
                         append_dict["map_data"]=map_dict[model_name]
                     
-                    if(include_all_annotation_iou_df and isinstance(all_annotation_iou_df,pd.DataFrame)):
-                        append_dict["all_annotation_iou_df"]=all_annotation_iou_df.loc[all_annotation_iou_df["model_name"].eq(model_name)].reset_index(drop=True)
-                                    
+                    if((include_all_annotation_iou_df or include_all_annotation_iou_dict) and isinstance(all_annotation_iou_df,pd.DataFrame)):
+                        tmp_all_annotation_iou_df=all_annotation_iou_df.loc[all_annotation_iou_df["model_name"].eq(model_name)].reset_index(drop=True)
+                        
+                        if(include_all_annotation_iou_df):
+                            append_dict["all_annotation_iou_df"]=tmp_all_annotation_iou_df
+                        if(include_all_annotation_iou_dict):
+                            append_dict["all_annotation_iou_dict"]=tmp_all_annotation_iou_df.to_dict(orient="dict")
+
                     result_dict[model_name]={
                         **append_dict,
                         **imgLib.cocoDatasetLib.datasetInfo.resultYOLOTrain.modelEvaluation4ConfusionMatrix(
@@ -34161,6 +34170,7 @@ class imgLib:
                     evaluation_args=pyExLib.safety_deepcopy(evaluation_args)
 
                 evaluation_args["include_confusion_matrix_df"]=False
+                evaluation_args["include_all_annotation_iou_df"]=False
 
                 IOLib.JSONLib.saveMETAJSON(
                     file_path=file_path,
@@ -34235,9 +34245,11 @@ class imgLib:
                 )
 
                 evaluation_args["include_confusion_matrix_df"]=True
+                evaluation_args["include_all_annotation_iou_df"]=True
                 data=self.getEvaluationDict(**evaluation_args)
 
                 all_evaluate_data_dict={}
+                all_all_annotation_iou_df=pd.DataFrame()
 
                 for i,data_key in enumerate(data):
                     dfl.append(
@@ -34254,10 +34266,6 @@ class imgLib:
                         all_evaluate_data_dict[data_key]["mAP50"]=map_data.get("mAP50",None)
                         all_evaluate_data_dict[data_key]["mAP50_95"]=map_data.get("mAP50_95",None)
                     
-                    all_annotation_iou_df=data[data_key].get("all_annotation_iou_df",None)
-                    if(isinstance(all_annotation_iou_df,pd.DataFrame)):
-                        all_evaluate_data_dict[data_key]["all_annotation_iou_df"]=all_annotation_iou_df
-
                     for cls_name,cls_data in data[data_key]["class_data"].items():
                         all_evaluate_data_dict[data_key][f"{cls_name}_TP"]=cls_data["TP"]
                         all_evaluate_data_dict[data_key][f"{cls_name}_FP"]=cls_data["FP"]
@@ -34266,7 +34274,13 @@ class imgLib:
                         all_evaluate_data_dict[data_key][f"{cls_name}_precision"]=cls_data["precision"]
                         all_evaluate_data_dict[data_key][f"{cls_name}_recall"]=cls_data["recall"]
                         all_evaluate_data_dict[data_key][f"{cls_name}_f1"]=cls_data["f1"]
-
+                    
+                    if("all_annotation_iou_df" in data[data_key]):
+                        tmp_all_annotation_iou_df=data[data_key]["all_annotation_iou_df"].copy()
+                        if(isinstance(tmp_all_annotation_iou_df,pd.Series)):
+                            tmp_all_annotation_iou_df=pd.concat(tmp_all_annotation_iou_df.tolist(),axis=0).reset_index(drop=True)
+                        all_all_annotation_iou_df=pd.concat([all_all_annotation_iou_df,tmp_all_annotation_iou_df],axis=0).reset_index(drop=True)                        
+                
                 all_evaluate_df=pd.DataFrame(all_evaluate_data_dict).T.reset_index().rename(columns={"index":"model_name"})
                 dfl.renewDataFrameByKey("AllEvaluateData",all_evaluate_df)
                 if(isinstance(all_evaluate_df,pd.DataFrame)):
@@ -34281,12 +34295,9 @@ class imgLib:
                         except Exception:
                             pass
                     
-                    if("all_annotation_iou_df" in all_evaluate_df.columns):
-                        all_annotation_iou_df=all_evaluate_df["all_annotation_iou_df"].copy()
-                        if(isinstance(all_annotation_iou_df,pd.Series)):
-                            all_annotation_iou_df=pd.concat(all_annotation_iou_df.tolist(),axis=0).reset_index(drop=True)
-                        dfl.renewDataFrameByKey("AllAnnotationIoUData",all_annotation_iou_df)
-                        
+                if(all_all_annotation_iou_df.shape[0]>0):
+                    dfl.renewDataFrameByKey("AllAnnotationIoUData",all_all_annotation_iou_df)
+                    
                 return dfl
 
             def saveEvaluationsExcel(
