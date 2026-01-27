@@ -32879,6 +32879,283 @@ class imgLib:
                     out_df["iou_mean"]=out_df.drop(columns=["model_name"]).select_dtypes("number").mean(axis=1)
 
                 return out_df
+            
+            @staticmethod
+            def __calcPerAnnotationIoUMatch(
+                gt_boxes:list,
+                gt_cls_nums:list,
+                pred_boxes:list,
+                pred_cls_nums:list,
+                unmatched_value:float=0.0,
+                one_to_one:bool=True,
+                class_aware:bool=True,
+                iou_func:callable=None,
+                iou_args:dict=None,
+            ):
+                """
+                Calculates per-annotation IoU and matched prediction index.
+
+                For each GT annotation, find the best matching prediction (by IoU).
+                If `one_to_one=True`, matching is done greedily by global IoU descending.
+                If `class_aware=True`, matching is performed within the same class number.
+
+                Args:
+                    gt_boxes (list): Ground-truth bboxes (xyxy).
+                    gt_cls_nums (list): Ground-truth class numbers.
+                    pred_boxes (list): Predicted bboxes (xyxy).
+                    pred_cls_nums (list): Predicted class numbers.
+                    unmatched_value (float): IoU value when unmatched.
+                    one_to_one (bool): One-to-one matching flag.
+                    class_aware (bool): Class-aware matching flag.
+                    iou_func (callable): IoU function. If None, use imgLib.IoULib.calcIoU.
+                    iou_args (dict): Extra args for iou_func.
+
+                Returns:
+                    tuple: (iou_list, matched_pred_index_list)
+                        - iou_list: list of float, length=len(gt_boxes)
+                        - matched_pred_index_list: list of int or None, length=len(gt_boxes)
+                """
+                if(iou_args is None):
+                    iou_args={}
+                else:
+                    iou_args=pyExLib.safety_deepcopy(iou_args)
+
+                if(iou_func is None):
+                    iou_func=imgLib.IoULib.IoU
+
+                if(gt_boxes is None):
+                    gt_boxes=[]
+                if(gt_cls_nums is None):
+                    gt_cls_nums=[]
+                if(pred_boxes is None):
+                    pred_boxes=[]
+                if(pred_cls_nums is None):
+                    pred_cls_nums=[]
+
+                if(len(gt_boxes)!=len(gt_cls_nums)):
+                    raise TypeError("Error : The lengths of gt_boxes and gt_cls_nums must be the same.")
+                if(len(pred_boxes)!=len(pred_cls_nums)):
+                    raise TypeError("Error : The lengths of pred_boxes and pred_cls_nums must be the same.")
+
+                n_gt=len(gt_boxes)
+                n_pred=len(pred_boxes)
+
+                out_iou=[float(unmatched_value) for _ in range(n_gt)]
+                out_pred_idx=[None for _ in range(n_gt)]
+                if(n_gt==0 or n_pred==0):
+                    return out_iou,out_pred_idx
+
+                def _match_one_group(gt_idx_list:list,pred_idx_list:list):
+                    if(len(gt_idx_list)==0 or len(pred_idx_list)==0):
+                        return
+                    if(one_to_one):
+                        pairs=[]
+                        for i in gt_idx_list:
+                            for j in pred_idx_list:
+                                v=float(iou_func(gt_boxes[i],pred_boxes[j],**iou_args))
+                                pairs.append((v,i,j))
+                        pairs.sort(key=lambda x:x[0],reverse=True)
+                        used_gt=set()
+                        used_pred=set()
+                        for v,i,j in pairs:
+                            if(i in used_gt or j in used_pred):
+                                continue
+                            out_iou[i]=v
+                            out_pred_idx[i]=j
+                            used_gt.add(i)
+                            used_pred.add(j)
+                    else:
+                        for i in gt_idx_list:
+                            best_v=None
+                            best_j=None
+                            for j in pred_idx_list:
+                                v=float(iou_func(gt_boxes[i],pred_boxes[j],**iou_args))
+                                if(best_v is None or v>best_v):
+                                    best_v=v
+                                    best_j=j
+                            if(best_v is not None):
+                                out_iou[i]=best_v
+                                out_pred_idx[i]=best_j
+
+                if(class_aware):
+                    # match within each class
+                    unique_cls=list(set(gt_cls_nums))
+                    for cls_num in unique_cls:
+                        gt_idx_list=[i for i,c in enumerate(gt_cls_nums) if c==cls_num]
+                        pred_idx_list=[j for j,c in enumerate(pred_cls_nums) if c==cls_num]
+                        _match_one_group(gt_idx_list,pred_idx_list)
+                else:
+                    _match_one_group(list(range(n_gt)),list(range(n_pred)))
+
+                return out_iou,out_pred_idx
+
+            @staticmethod
+            def __calcPerAnnotationIoUList(
+                gt_boxes:list,
+                gt_cls_nums:list,
+                pred_boxes:list,
+                pred_cls_nums:list,
+                unmatched_value:float=0.0,
+                one_to_one:bool=True,
+                class_aware:bool=True,
+                iou_func:callable=None,
+                iou_args:dict=None,
+            ):
+                """
+                Calculates the per-annotation IoU list.
+
+                Args:
+                    gt_boxes (list): List of ground truth bounding boxes.
+                    gt_cls_nums (list): List of ground truth class numbers.
+                    pred_boxes (list): List of predicted bounding boxes.
+                    pred_cls_nums (list): List of predicted class numbers.
+                    unmatched_value (float): Value to assign for unmatched annotations.
+                    one_to_one (bool): Whether to perform one-to-one matching.
+                    class_aware (bool): Whether to consider class information.
+
+                Returns:
+                    list: List of IoU values for each ground truth annotation.
+                """
+                out_iou,_=imgLib.YOLOModelLib.resultBBImgJsonCombinationsModel.__calcPerAnnotationIoUMatch(
+                    gt_boxes=gt_boxes,
+                    gt_cls_nums=gt_cls_nums,
+                    pred_boxes=pred_boxes,
+                    pred_cls_nums=pred_cls_nums,
+                    unmatched_value=unmatched_value,
+                    one_to_one=one_to_one,
+                    class_aware=class_aware,
+                    iou_func=iou_func,
+                    iou_args=iou_args
+                )
+                return out_iou
+
+            def getAnnotationIoUDataFrame(
+                self,
+                unmatched_value:float=0.0,
+                one_to_one:bool=True,
+                class_aware:bool=True,
+                iou_func:callable=None,
+                iou_args:dict=None,
+            ):
+                """
+                Gets per-annotation IoU table as a DataFrame (per image).
+
+                Args:
+                    unmatched_value (float): Value to assign for unmatched annotations.
+                    one_to_one (bool): Whether to perform one-to-one matching.
+                    class_aware (bool): Whether to consider class information.
+                    iou_func (callable): Function to calculate IoU. If None, uses default.
+                    iou_args (dict): Additional arguments for the IoU function.
+                
+                Note:
+                    - "annotation_id" is the GT index within this image.
+                    - Requires BBimgJson to contain "YOLOANN_obj_additional_info"
+                      (need yolo_ann_additional_info_flag=True when creating BBimgJson).
+
+                Returns:
+                    pd.DataFrame with columns:
+                        - model_name
+                        - annotation_id
+                        - iou
+                        - gt_cls_num, gt_cls_name
+                        - gt_x1, gt_y1, gt_x2, gt_y2
+                        - pred_index
+                        - pred_cls_num, pred_cls_name
+                        - pred_score
+                        - pred_x1, pred_y1, pred_x2, pred_y2
+                """
+                rows=[]
+                for result,model_name in self.generatorResultsAndModelNames():
+                    if(not isinstance(result,imgLib.BBimgJson)):
+                        raise TypeError("Expected result to be of type BBimgJson.")
+
+                    d=result.getDict()
+                    if(not isinstance(d,dict)):
+                        raise TypeError("Expected result dictionary to be of type dict.")
+
+                    gt_info=d.get("YOLOANN_obj_additional_info",None)
+                    if(gt_info is None):
+                        raise ValueError("YOLOANN_obj_additional_info not found (need yolo_ann_additional_info_flag=True)")
+
+                    gt_boxes=gt_info.get("ann",[])
+                    gt_cls_nums=gt_info.get("ann_cls_nums",[])
+                    class_names_data=gt_info.get("class_names_data",None)
+                    if(class_names_data is None):
+                        class_names_data=d.get("cls_names",None)
+
+                    final_ann=d.get("final_ann",imgLib.BBimgJson.EMPTY_ANN_DICT)
+                    pred_boxes=final_ann.get("bboxes",[])
+                    pred_cls_nums=final_ann.get("classes",[])
+                    pred_scores=final_ann.get("scores",[])
+
+                    iou_list,pred_idx_list=imgLib.YOLOModelLib.resultBBImgJsonCombinationsModel.__calcPerAnnotationIoUMatch(
+                        gt_boxes=gt_boxes,
+                        gt_cls_nums=gt_cls_nums,
+                        pred_boxes=pred_boxes,
+                        pred_cls_nums=pred_cls_nums,
+                        unmatched_value=unmatched_value,
+                        one_to_one=one_to_one,
+                        class_aware=class_aware,
+                        iou_func=iou_func,
+                        iou_args=iou_args,
+                    )
+
+                    def _cls_num_to_name(cls_num:int):
+                        if(class_names_data is None):
+                            return str(cls_num)
+                        if(not isinstance(cls_num,int)):
+                            return str(cls_num)
+                        if(0<=cls_num<len(class_names_data)):
+                            v=class_names_data[cls_num]
+                            if(v is not None and v!=""):
+                                return str(v)
+                        return str(cls_num)
+
+                    def _bbox_xyxy(box):
+                        if(not isinstance(box,(list,tuple))):
+                            return None,None,None,None
+                        if(len(box)<4):
+                            return None,None,None,None
+                        return float(box[0]),float(box[1]),float(box[2]),float(box[3])
+
+                    for ann_id,(iou_v,pred_idx) in enumerate(zip(iou_list,pred_idx_list)):
+                        gt_box=gt_boxes[ann_id] if(ann_id<len(gt_boxes)) else None
+                        gt_cls_num=gt_cls_nums[ann_id] if(ann_id<len(gt_cls_nums)) else None
+                        gt_x1,gt_y1,gt_x2,gt_y2=_bbox_xyxy(gt_box)
+
+                        pred_box=None
+                        pred_cls_num=None
+                        pred_score=None
+                        if(pred_idx is not None):
+                            if(pred_idx<len(pred_boxes)):
+                                pred_box=pred_boxes[pred_idx]
+                            if(pred_idx<len(pred_cls_nums)):
+                                pred_cls_num=pred_cls_nums[pred_idx]
+                            if(pred_idx<len(pred_scores)):
+                                pred_score=pred_scores[pred_idx]
+                        pred_x1,pred_y1,pred_x2,pred_y2=_bbox_xyxy(pred_box)
+
+                        rows.append({
+                            "model_name":str(model_name),
+                            "annotation_id":int(ann_id),
+                            "iou":float(iou_v) if(iou_v is not None) else None,
+                            "gt_cls_num":int(gt_cls_num) if(gt_cls_num is not None) else None,
+                            "gt_cls_name":_cls_num_to_name(int(gt_cls_num)) if(gt_cls_num is not None) else None,
+                            "gt_x1":gt_x1,
+                            "gt_y1":gt_y1,
+                            "gt_x2":gt_x2,
+                            "gt_y2":gt_y2,
+                            "pred_index":int(pred_idx) if(pred_idx is not None) else None,
+                            "pred_cls_num":int(pred_cls_num) if(pred_cls_num is not None) else None,
+                            "pred_cls_name":_cls_num_to_name(int(pred_cls_num)) if(pred_cls_num is not None) else None,
+                            "pred_score":float(pred_score) if(pred_score is not None) else None,
+                            "pred_x1":pred_x1,
+                            "pred_y1":pred_y1,
+                            "pred_x2":pred_x2,
+                            "pred_y2":pred_y2,
+                        })
+
+                return pd.DataFrame(rows)
 
             def getIoUFeaturesDataFrame(self):
                 """
@@ -33011,6 +33288,7 @@ class imgLib:
                 self.__confusion_matrix_dict=None
                 self.__evaluation_dict=None
                 self.__map_dict=None
+                self.__all_annotation_iou_df=None
 
             def to_payload(self):
                 """
@@ -33702,6 +33980,50 @@ class imgLib:
                         title_args=cm_fig_title_args,
                     )
 
+            def getAllAnnotationIoUDataFrame(
+                self,
+                unmatched_value:float=0.0,
+                one_to_one:bool=True,
+                class_aware:bool=True,
+            ):
+                """
+                Gets the IoU data for all annotations across all images.
+
+                Args:
+                    unmatched_value (float, optional): Value to assign for unmatched annotations.
+                    one_to_one (bool, optional): Whether to enforce one-to-one matching.
+                    class_aware (bool, optional): Whether to consider class labels in matching.
+
+                Returns:
+                    pd.DataFrame with columns:
+                        - img_name
+                        - model_name
+                        - annotation_id
+                        - iou
+                """
+                args_list=[float(unmatched_value),bool(one_to_one),bool(class_aware)]
+
+                if(self.__all_annotation_iou_df is not None):
+                    if(tuple(args_list) in self.__all_annotation_iou_df):
+                        return self.__all_annotation_iou_df[tuple(args_list)]
+
+                all_df=pd.DataFrame()
+                for img_name,result_obj in self.generator():
+                    tmp_df=result_obj.getAnnotationIoUDataFrame(
+                        unmatched_value=unmatched_value,
+                        one_to_one=one_to_one,
+                        class_aware=class_aware,
+                    )
+                    tmp_df.insert(0,"img_name",img_name)
+                    all_df=pd.concat([all_df,tmp_df],axis=0).reset_index(drop=True)
+
+                if(self.__lock_append and self.__cache_mode):
+                    if(self.__all_annotation_iou_df is None):
+                        self.__all_annotation_iou_df={}
+                    self.__all_annotation_iou_df[tuple(args_list)]=all_df
+
+                return all_df.copy()
+
             def getEvaluationDict(
                 self,
                 iou_threshold:float=None,
@@ -33711,7 +34033,9 @@ class imgLib:
                 NEAR_ZERO:float=None,
                 include_confusion_matrix_df:bool=False,
                 include_map:bool=False,
-                map_args:dict=None
+                map_args:dict=None,
+                include_all_annotation_iou_df:bool=False,
+                all_annotation_iou_df_args:dict=None,
             ):
                 """
                 Gets the evaluation metrics for the model.
@@ -33765,6 +34089,12 @@ class imgLib:
 
                 result_dict={}
 
+                all_annotation_iou_df=None
+                if(include_all_annotation_iou_df):
+                    if(all_annotation_iou_df_args is None):
+                        all_annotation_iou_df_args={}
+                    all_annotation_iou_df=self.getAllAnnotationIoUDataFrame(**all_annotation_iou_df_args)
+
                 for model_name,cmi in cm_dict.items():
                     if(not isinstance(cmi,pd.DataFrame)):
                         raise ValueError(f"Confusion matrix for model {model_name} is not a DataFrame.")
@@ -33786,6 +34116,9 @@ class imgLib:
 
                     if(include_map and isinstance(map_dict,dict) and model_name in map_dict):
                         append_dict["map_data"]=map_dict[model_name]
+                    
+                    if(include_all_annotation_iou_df and isinstance(all_annotation_iou_df,pd.DataFrame)):
+                        append_dict["all_annotation_iou_df"]=all_annotation_iou_df.loc[all_annotation_iou_df["model_name"].eq(model_name)].reset_index(drop=True)
                                     
                     result_dict[model_name]={
                         **append_dict,
@@ -33803,7 +34136,7 @@ class imgLib:
                     self.__evaluation_dict[tuple(args_list)]=result_dict
 
                 return result_dict
-
+            
             META_ALL_IMAGES_RESULT_BB_IMG_JSON_COMBINATION_MODEL_EVALUATION="AllImagesResultBBImgJsonCombinationsModelEvaluation"
 
             def saveEvaluationJson(
@@ -33878,6 +34211,12 @@ class imgLib:
                 )
 
                 dfl.append(
+                    "AllAnnotationIoUData",
+                    pd.DataFrame(),
+                    "All Annotation IoU Data"
+                )
+
+                dfl.append(
                     "AllFeaturesPerImages",
                     self.getFeaturesPerImagesDataFrame(),
                     "All Features Per Images"
@@ -33914,6 +34253,10 @@ class imgLib:
                     if(isinstance(map_data,dict)):
                         all_evaluate_data_dict[data_key]["mAP50"]=map_data.get("mAP50",None)
                         all_evaluate_data_dict[data_key]["mAP50_95"]=map_data.get("mAP50_95",None)
+                    
+                    all_annotation_iou_df=data[data_key].get("all_annotation_iou_df",None)
+                    if(isinstance(all_annotation_iou_df,pd.DataFrame)):
+                        all_evaluate_data_dict[data_key]["all_annotation_iou_df"]=all_annotation_iou_df
 
                     for cls_name,cls_data in data[data_key]["class_data"].items():
                         all_evaluate_data_dict[data_key][f"{cls_name}_TP"]=cls_data["TP"]
@@ -33937,7 +34280,13 @@ class imgLib:
                             dfl.renewDataFrameByKey("AllMAPSummary",all_evaluate_df[cols].copy())
                         except Exception:
                             pass
-
+                    
+                    if("all_annotation_iou_df" in all_evaluate_df.columns):
+                        all_annotation_iou_df=all_evaluate_df["all_annotation_iou_df"].copy()
+                        if(isinstance(all_annotation_iou_df,pd.Series)):
+                            all_annotation_iou_df=pd.concat(all_annotation_iou_df.tolist(),axis=0).reset_index(drop=True)
+                        dfl.renewDataFrameByKey("AllAnnotationIoUData",all_annotation_iou_df)
+                        
                 return dfl
 
             def saveEvaluationsExcel(
