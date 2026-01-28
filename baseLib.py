@@ -33781,7 +33781,8 @@ class imgLib:
                     self,
                     iou_threshold:float=None,
                     include_background:bool=True,
-                    background_label:str=None
+                    background_label:str=None,
+                    orientation:str=None
                 ):
                 """
                 Calculates the confusion matrix for each model.
@@ -33790,11 +33791,15 @@ class imgLib:
                     iou_threshold (float, optional): IoU threshold for the confusion matrix.
                     include_background (bool, optional): Whether to include background class.
                     background_label (str, optional): Label for the background class.
+                    orientation (str, optional): Orientation for building the confusion matrix.
 
                 Returns:
                     dict: A dictionary containing confusion matrices for each model.
                 """
-                args_list=[iou_threshold,include_background,background_label]
+                if(orientation is None):
+                    orientation=imgLib.BBimgJson.BUILD_CONFUSION_MATRIX_FROM_BB_IMG_JSON_LIST_ORIENTATION_ULTRALYTICS
+                
+                args_list=[iou_threshold,include_background,background_label,orientation]
 
                 if(self.__confusion_matrix_dict is not None):
                     if(tuple(args_list) in self.__confusion_matrix_dict):
@@ -33812,7 +33817,7 @@ class imgLib:
                         iou_threshold=iou_threshold,
                         include_background=include_background,
                         background_label=background_label,
-                        orientation=imgLib.BBimgJson.BUILD_CONFUSION_MATRIX_FROM_BB_IMG_JSON_LIST_ORIENTATION_ULTRALYTICS
+                        orientation=orientation
                     )
                 if(self.__lock_append and self.__cache_mode):
                     if(self.__confusion_matrix_dict is None):
@@ -33825,7 +33830,8 @@ class imgLib:
                     self,
                     iou_threshold:float=None,
                     include_background:bool=True,
-                    background_label:str=None
+                    background_label:str=None,
+                    orientation:str=None
                 ):
                 """
                 Gets the confusion matrix dictionary for each model.
@@ -33834,6 +33840,7 @@ class imgLib:
                     iou_threshold (float, optional): IoU threshold for the confusion matrix.
                     include_background (bool, optional): Whether to include background class.
                     background_label (str, optional): Label for the background class.
+                    orientation (str, optional): Orientation for building the confusion matrix.
                 
                 Returns:
                     dict: A dictionary containing confusion matrices for each model.
@@ -33841,7 +33848,8 @@ class imgLib:
                 return self.calcConfusionMatrix(
                     iou_threshold=iou_threshold,
                     include_background=include_background,
-                    background_label=background_label
+                    background_label=background_label,
+                    orientation=orientation
                 )
 
             def calcMAP(
@@ -33903,16 +33911,32 @@ class imgLib:
             DEFAULT_CM_FIG_HEADER_INDEX_FACE_COLOR="#888888"
             DEFAULT_CM_FIG_GRADIENT_CMAP="Blues"
 
+            DEFAULT_CM_FIG_GT_PREDICT_LABEL_TEXT_CONFIG={
+                "add_title_axis_note_text":False,
+                "add_left_and_top_text":True,
+                "cm_fig_text_gt":"GT",
+                "cm_fig_text_predict":"Predict",
+                "cm_fig_text_fontsize":10,
+                "cm_fig_text_fontweight":"bold",
+                "cm_fig_text_margin_left":0.07,
+                "cm_fig_text_left_gap":0.02,
+                "cm_fig_text_title_gap":0.01,
+                "cm_fig_text_table_gap":0.03,
+            }
+
             def saveConfusionMatrixFig(
                 self,
                 save_dir:Path|str,
                 iou_threshold:float=None,
                 include_background:bool=True,
                 background_label:str=None,
+                orientation:str=None,
                 cm_fig_header_index_face_color:str=DEFAULT_CM_FIG_HEADER_INDEX_FACE_COLOR,
                 cm_fig_gradient_cmap:str=DEFAULT_CM_FIG_GRADIENT_CMAP,
                 cm_fig_include_title:bool=True,
                 cm_fig_title_args:dict=None,
+                cm_fig_include_gt_predict_text:bool=False,
+                cm_fig_gt_predict_label_text_config:dict=None,
             ):
                 """
                 Saves confusion matrix figures for each model.
@@ -33922,18 +33946,59 @@ class imgLib:
                     iou_threshold (float, optional): IoU threshold for the confusion matrix.
                     include_background (bool, optional): Whether to include background class.
                     background_label (str, optional): Label for the background class.
+                    orientation (str, optional): Orientation for building the confusion matrix.
                     cm_fig_header_index_face_color (str, optional): Face color for the header index.
                     cm_fig_gradient_cmap (str, optional): Colormap for the gradient.
                     cm_fig_include_title (bool, optional): Whether to include title in the figure.
                     cm_fig_title_args (dict, optional): Additional arguments for the figure title.
+                    cm_fig_include_gt_predict_text (bool, optional): Whether to include GT/Predict text.
+                    cm_fig_gt_predict_label_text_config (dict, optional): Configuration for GT/Predict label text. The dictionary can contain the following keys:
+                        - add_title_axis_note_text (bool): Whether to add title axis note text.
+                        - add_left_and_top_text (bool): Whether to add left and top text.
+                        - cm_fig_text_gt (str): Text for GT label.
+                        - cm_fig_text_predict (str): Text for Predict label.
+                        - cm_fig_text_fontsize (int): Font size for the text.
+                        - cm_fig_text_fontweight (str): Font weight for the text.
+                        - cm_fig_text_margin_left (float): Margin left for the text.
+                        - cm_fig_text_left_gap (float): Left gap for the text.
+                        - cm_fig_text_title_gap (float): Title gap for the text.
+                        - cm_fig_text_table_gap (float): Table gap for the text.
                 """
                 save_dir=Path(save_dir)
                 save_dir.mkdir(parents=True,exist_ok=True)
+                
+                if(cm_fig_gt_predict_label_text_config is None):
+                    cm_fig_gt_predict_label_text_config={}
+                for key,item in imgLib.YOLOModelLib.AllImagesResultBBImgJsonCombinationsModel.DEFAULT_CM_FIG_GT_PREDICT_LABEL_TEXT_CONFIG.items():
+                    cm_fig_gt_predict_label_text_config.setdefault(key,item)
+
+                add_title_axis_note_text=cm_fig_gt_predict_label_text_config["add_title_axis_note_text"]
+                add_left_and_top_text=cm_fig_gt_predict_label_text_config["add_left_and_top_text"]
+                cm_fig_text_gt=cm_fig_gt_predict_label_text_config["cm_fig_text_gt"]
+                cm_fig_text_predict=cm_fig_gt_predict_label_text_config["cm_fig_text_predict"]
+                cm_fig_text_fontsize=cm_fig_gt_predict_label_text_config["cm_fig_text_fontsize"]
+                cm_fig_text_fontweight=cm_fig_gt_predict_label_text_config["cm_fig_text_fontweight"]
+                cm_fig_text_margin_left=cm_fig_gt_predict_label_text_config["cm_fig_text_margin_left"]
+                cm_fig_text_left_gap=cm_fig_gt_predict_label_text_config["cm_fig_text_left_gap"]
+                cm_fig_text_title_gap=cm_fig_gt_predict_label_text_config["cm_fig_text_title_gap"]
+                cm_fig_text_table_gap=cm_fig_gt_predict_label_text_config["cm_fig_text_table_gap"]
+
+
+                final_add_title_axis_note_text=add_title_axis_note_text and cm_fig_include_gt_predict_text
+                final_add_left_and_top_text=add_left_and_top_text and cm_fig_include_gt_predict_text
+
+                if(orientation is None):
+                    orientation=imgLib.BBimgJson.BUILD_CONFUSION_MATRIX_FROM_BB_IMG_JSON_LIST_ORIENTATION_ULTRALYTICS
+                if(orientation==imgLib.BBimgJson.BUILD_CONFUSION_MATRIX_FROM_BB_IMG_JSON_LIST_ORIENTATION_GT_PRED):
+                    axis_note=f"rows: {cm_fig_text_gt} / cols: {cm_fig_text_predict}"
+                else:
+                    axis_note=f"rows: {cm_fig_text_predict} / cols: {cm_fig_text_gt}"
 
                 cm_dict=self.getConfusionMatrixDict(
                     iou_threshold=iou_threshold,
                     include_background=include_background,
-                    background_label=background_label
+                    background_label=background_label,
+                    orientation=orientation
                 )
 
                 cm_fig_header_index_styles={
@@ -33950,7 +34015,9 @@ class imgLib:
                     cm_fig_title=None
                     if(cm_fig_include_title):
                         cm_fig_title=str(model_name)
-
+                    if(final_add_title_axis_note_text):
+                        cm_fig_title=axis_note if(cm_fig_title is None) else f"{cm_fig_title}\n{axis_note}"
+                    
                     cm_df.insert(0,(cm_df.index.name or "index"),cm_df.index)
 
                     columns=list(cm_df.columns)
@@ -33960,7 +34027,9 @@ class imgLib:
                     vmax=float(cm_df.max(skipna=True,numeric_only=True).max())
 
                     out_path=save_dir/f"{model_name}.png"
-                    pyExLib.DataFrameExLib.TablePlotter.dataFrameTablePlot(
+                    
+                    fig_title_for_tableplot=None if(final_add_left_and_top_text) else cm_fig_title
+                    fig,ax,tbl=pyExLib.DataFrameExLib.TablePlotter.dataFrameTablePlot(
                         cm_df,
                         output_path=out_path,
                         gradient_columns=columns,
@@ -33976,9 +34045,114 @@ class imgLib:
                         col_styles={
                             index_column_name:cm_fig_header_index_styles
                         },
-                        fig_title=cm_fig_title,
+                        fig_title=fig_title_for_tableplot,
                         title_args=cm_fig_title_args,
+                        clear_figure=(not final_add_left_and_top_text),
                     )
+
+                    if(final_add_left_and_top_text):
+                        if(orientation==imgLib.BBimgJson.BUILD_CONFUSION_MATRIX_FROM_BB_IMG_JSON_LIST_ORIENTATION_GT_PRED):
+                                left_text=cm_fig_text_gt
+                                top_text=cm_fig_text_predict
+                        else:
+                            left_text=cm_fig_text_predict
+                            top_text=cm_fig_text_gt
+
+                        fig.subplots_adjust(left=cm_fig_text_margin_left)
+                        fig.canvas.draw()
+
+                        title_bbox=None
+                        if(cm_fig_include_title):
+                            st=fig.suptitle(cm_fig_title,**(cm_fig_title_args or {}))
+                                                
+                        top_label=fig.text(
+                            0.5,
+                            0.98,
+                            top_text,
+                            ha="center",
+                            va="top",
+                            fontsize=cm_fig_text_fontsize,
+                            fontweight=cm_fig_text_fontweight
+                        )
+                        
+                        fig.canvas.draw()
+                        renderer=fig.canvas.get_renderer()
+
+                        if(cm_fig_include_title):
+                            tb=st.get_window_extent(renderer=renderer)
+                            title_bottom_y=tb.y0/fig.bbox.height
+                        else:    
+                            title_bottom_y=1.0
+
+                        lb=top_label.get_window_extent(renderer=renderer)
+                        label_h=lb.height/fig.bbox.height
+
+                        top_label_top_y=title_bottom_y-cm_fig_text_title_gap
+                        min_top_y=0.2+label_h
+                        if(top_label_top_y<min_top_y):
+                            top_label_top_y=min_top_y
+                            
+                        top_label.set_position((0.5,top_label_top_y))
+                        fig.canvas.draw()
+                        lb=top_label.get_window_extent(renderer=renderer)
+                        label_bottom_y=lb.y0/fig.bbox.height
+
+                        axes_top=label_bottom_y-cm_fig_text_table_gap
+                        if(axes_top>0.95):
+                            axes_top=0.95
+                        if(axes_top<0.2):
+                            axes_top=0.2
+
+                        fig.subplots_adjust(top=axes_top)
+
+                        fig.canvas.draw()
+                        renderer=fig.canvas.get_renderer()
+
+                        cells=tbl.get_celld()
+                        rows=sorted({r for (r,c) in cells.keys()})
+                        cols=sorted({c for (r,c) in cells.keys()})
+
+                        header_r=rows[0]
+                        data_r0=header_r+1
+                        data_r1=rows[-1]
+
+                        has_rowlabels=(min(cols)<0)
+                        data_c0=1
+                        data_c1=max([c for c in cols if c>=0])
+
+                        b_tl=cells[(data_r0,data_c0)].get_window_extent(renderer)  # top-left data cell
+                        b_br=cells[(data_r1,data_c1)].get_window_extent(renderer)  # bottom-right data cell
+
+                        inv=fig.transFigure.inverted()
+                        (x0,y1)=inv.transform((b_tl.x0,b_tl.y1))  # left, top
+                        (x1,y0)=inv.transform((b_br.x1,b_br.y0))  # right, bottom
+
+                        xc=(x0+x1)/2
+                        yc=(y0+y1)/2
+
+                        top_label.set_position((xc,top_label.get_position()[1]))
+
+                        x_table_left=ax.get_position().x0
+                        left_label_x=x_table_left-cm_fig_text_left_gap
+
+                        fig.text(
+                            left_label_x,
+                            yc,
+                            left_text,
+                            rotation=90,
+                            ha="center",
+                            va="center",
+                            fontsize=cm_fig_text_fontsize,
+                            fontweight=cm_fig_text_fontweight
+                        )
+
+                        fig.savefig(
+                            out_path,
+                            bbox_inches="tight",
+                            pad_inches=0.1,
+                            dpi=200
+                        )
+                        plt.close(fig)
 
             def getAllAnnotationIoUDataFrame(
                 self,
@@ -34702,12 +34876,15 @@ class imgLib:
                 freeze_head:bool=True,
                 save_data_frame_csvs:bool=False,
                 save_data_cm_fig:bool=False,
+                cm_fig_orientation:str=None,
                 cm_fig_header_index_face_color:str=DEFAULT_CM_FIG_HEADER_INDEX_FACE_COLOR,
                 cm_fig_gradient_cmap:str=DEFAULT_CM_FIG_GRADIENT_CMAP,
                 cm_fig_include_title:bool=True,
                 cm_fig_title_args:dict=None,
-                save_selcted_models_json:bool=False,
-                selcted_models_args:dict=None,
+                cm_fig_include_gt_predict_text:bool=False,
+                cm_fig_gt_predict_label_text_config:dict=None,
+                save_selected_models_json:bool=False,
+                selected_models_args:dict=None,
             ):
                 """
                 Saves all data related to the evaluation.
@@ -34730,12 +34907,15 @@ class imgLib:
                     freeze_head (bool, optional): Whether to freeze the header row in the Excel file.
                     save_data_frame_csvs (bool, optional): Whether to save DataFrames as CSV files.
                     save_data_cm_fig (bool, optional): Whether to save the confusion matrix figure.
+                    cm_fig_orientation (str, optional): Orientation of the confusion matrix figure.
                     cm_fig_header_index_face_color (str, optional): Face color for the confusion matrix figure header index.
                     cm_fig_gradient_cmap (str, optional): Gradient colormap for the confusion matrix figure.
                     cm_fig_include_title (bool, optional): Whether to include the title in the confusion matrix figure.
                     cm_fig_title_args (dict, optional): Additional arguments for the confusion matrix figure title.
-                    save_selcted_models_json (bool, optional): Whether to save the selected models JSON.
-                    selcted_models_args (dict, optional): Arguments for selecting models.
+                    cm_fig_include_gt_predict_text (bool, optional): Whether to include ground truth and prediction text in the confusion matrix figure.
+                    cm_fig_gt_predict_label_text_config (dict, optional): Configuration for ground truth and prediction label text in the confusion matrix figure.
+                    save_selected_models_json (bool, optional): Whether to save the selected models JSON.
+                    selected_models_args (dict, optional): Arguments for selecting models.
 
                 Raises:
                     TypeError: If the result object is not of the expected type.
@@ -34816,20 +34996,22 @@ class imgLib:
                         iou_threshold=cm_fig_iou_threshold,
                         include_background=cm_fig_include_background,
                         background_label=cm_fig_background_label,
+                        orientationr=cm_fig_orientation,
                         cm_fig_header_index_face_color=cm_fig_header_index_face_color,
                         cm_fig_gradient_cmap=cm_fig_gradient_cmap,
                         cm_fig_include_title=cm_fig_include_title,
                         cm_fig_title_args=cm_fig_title_args,
+                        cm_fig_include_gt_predict_text=cm_fig_include_gt_predict_text,
+                        cm_fig_gt_predict_label_text_config=cm_fig_gt_predict_label_text_config,
                     )
 
-                if(save_selcted_models_json):
-                    if(selcted_models_args is None):
-                        selcted_models_args={}
-                    if(selcted_models_args.get("save_json_path") is None):
-                        selcted_models_args["save_json_path"]=output_dir_obj/Path("selected_models.json")
-
+                if(save_selected_models_json):
+                    if(selected_models_args is None):
+                        selected_models_args={}
+                    if(selected_models_args.get("save_json_path") is None):
+                        selected_models_args["save_json_path"]=output_dir_obj/Path("selected_models.json")
                     self.saveSelectModelsTopkAndDiversity(
-                        **selcted_models_args
+                        **selected_models_args
                     )
 
             META_ALL_IMAGES_RESULT_BB_IMG_JSON_COMBINATION_MODEL_OBJ="AllImagesResultBBImgJsonCombinationsModelObj"
