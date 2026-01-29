@@ -21673,6 +21673,7 @@ class imgLib:
             d.setdefault("img_name",imgLib.BBimgJson.DEFAULT_AUTO_IMG_NAME_FUNCTION(d))
             d.setdefault("img_reshape_log",[])
             d.setdefault("final_ann",imgLib.BBimgJson.EMPTY_ANN_DICT)
+            d.setdefault("raw_img_info",{})
 
             self.__d=d
             self.__raw_img=None
@@ -22172,6 +22173,109 @@ class imgLib:
             """
             return self.__d["final_ann"]
 
+        def filterANN(
+            self,
+            filter_func:callable=None,
+            filter_args:dict=None,
+            fill_score_value:float=1.0,
+            strict_length_flag:bool=False,
+            return_index_flag:bool=False
+        ):
+            """
+            Filters `final_ann` (bboxes/scores/classes) and returns a NEW BBimgJson.
+
+            Args:
+                filter_func (callable):
+                    Callable that decides whether to keep each bbox.
+                    It can accept any subset of the following keyword arguments:
+                        - bbox, score, cls_num, index, ann, bb_img_json
+                    Return True to keep, False to drop.
+                    If None, keeps all.
+                filter_args (dict): Optional extra kwargs passed into filter_func.
+                fill_score_value (float): Value used to fill missing scores.
+                strict_length_flag (bool): If True, requires len(bboxes)==len(scores)==len(classes).
+                return_index_flag (bool): If True, returns (new_bbimgjson, kept_indices).
+
+            Returns:
+                BBimgJson | (BBimgJson, list[int])
+            """
+            if(filter_args is None):
+                filter_args={}
+            else:
+                filter_args=pyExLib.safety_deepcopy(filter_args)
+
+            if(filter_func is None):
+                def filter_func(**kwargs):
+                    return True
+            elif(not callable(filter_func)):
+                raise TypeError("Error : filter_func must be callable!")
+
+            ann=self.getANN() or {}
+            bboxes=ann.get("bboxes",[]) or []
+            scores=ann.get("scores",[]) or []
+            classes=ann.get("classes",[]) or []
+
+            if(strict_length_flag and (len(bboxes)!=len(scores) or len(bboxes)!=len(classes))):
+                raise ValueError("Error : The lengths of bboxes/scores/classes must be the same when strict_length_flag is True!")
+
+            # normalize lengths (scores may be missing)
+            n=min(len(bboxes),len(classes))
+            if(len(scores)<n):
+                scores=list(scores)+[fill_score_value for _ in range(n-len(scores))]
+            if(len(scores)>n):
+                scores=list(scores)[:n]
+            bboxes=list(bboxes)[:n]
+            classes=list(classes)[:n]
+
+            kept_bboxes=[]
+            kept_scores=[]
+            kept_classes=[]
+            kept_indices=[]
+
+            def _call_filter(fn:callable,kwargs:dict):
+                try:
+                    sig=inspect.signature(fn)
+                    call_kwargs={k:v for k,v in kwargs.items() if k in sig.parameters}
+                    return fn(**call_kwargs)
+                except Exception:
+                    try:
+                        return fn(kwargs.get("bbox"),kwargs.get("score"),kwargs.get("cls_num"),kwargs.get("index"))
+                    except TypeError:
+                        try:
+                            return fn(kwargs.get("bbox"),kwargs.get("score"),kwargs.get("cls_num"))
+                        except TypeError:
+                            return fn(kwargs.get("bbox"))
+
+            for i,(bbox,score,cls_num) in enumerate(zip(bboxes,scores,classes)):
+                call_kwargs={
+                    "bbox":bbox,
+                    "score":score,
+                    "cls_num":cls_num,
+                    "index":i,
+                    "ann":ann,
+                    "bb_img_json":self,
+                }
+                if(isinstance(filter_args,dict)):
+                    call_kwargs.update(filter_args)
+
+                keep=bool(_call_filter(filter_func,call_kwargs))
+                if(keep):
+                    kept_bboxes.append(pyExLib.safety_deepcopy(bbox))
+                    kept_scores.append(float(score) if score is not None else float(fill_score_value))
+                    kept_classes.append(int(cls_num) if cls_num is not None else int(0))
+                    kept_indices.append(i)
+
+            new_d=self.getDict()
+            new_d["final_ann"]={
+                "bboxes":kept_bboxes,
+                "scores":kept_scores,
+                "classes":kept_classes
+            }
+            new_obj=imgLib.BBimgJson(new_d)
+            if(return_index_flag):
+                return new_obj,kept_indices
+            return new_obj
+
         def changeRawImgPath(self,new_path:str):
             """
             Changes the path to the raw image.
@@ -22262,6 +22366,1022 @@ class imgLib:
                 if(0<=cls_num<len(cls_names)):
                     return cls_names[int(cls_num)]
             return cls_num_str
+
+        @staticmethod
+        def __bbox_area_xyxy(b:list,eps:float=0.0)->float:
+            """
+            Calculates the area of a bounding box in [x1,y1,x2,y2] format.
+
+            Args:
+                b (list): Bounding box in [x1,y1,x2,y2] format.
+                eps (float): Small value to add to the area.
+
+            Returns:
+                float: Area of the bounding box.
+            """
+            if(b is None or len(b)<4):
+                return 0.0
+            w=float(b[2])-float(b[0])
+            h=float(b[3])-float(b[1])
+            if(w<=0.0 or h<=0.0):
+                return 0.0
+            return max(0.0,w)*max(0.0,h)+float(eps)
+
+        @staticmethod
+        def __bbox_iou_xyxy(a:list,b:list,eps:float=1e-12)->float:
+            """
+            Calculates the Intersection over Union (IoU) of two bounding boxes in [x1,y1,x2,y2] format.
+            
+            Args:
+                a (list): First bounding box in [x1,y1,x2,y2] format.
+                b (list): Second bounding box in [x1,y1,x2,y2] format.
+                eps (float): Small value to add to the union area.
+
+            Returns:
+                float: IoU of the two bounding boxes.
+            """
+            if(a is None or b is None or len(a)<4 or len(b)<4):
+                return 0.0
+            
+            ax1=float(a[0])
+            ay1=float(a[1])
+            
+            ax2=float(a[2])
+            ay2=float(a[3])
+            
+            bx1=float(b[0])
+            by1=float(b[1])
+            
+            bx2=float(b[2])
+            by2=float(b[3])
+
+            ix1=max(ax1,bx1)
+            iy1=max(ay1,by1)
+            
+            ix2=min(ax2,bx2)
+            iy2=min(ay2,by2)
+            
+            iw=ix2-ix1
+            ih=iy2-iy1
+
+            if(iw<=0.0 or ih<=0.0):
+                return 0.0
+
+            inter=iw*ih
+            area_a=imgLib.BBimgJson.__bbox_area_xyxy([ax1,ay1,ax2,ay2])
+            area_b=imgLib.BBimgJson.__bbox_area_xyxy([bx1,by1,bx2,by2])
+            union=area_a+area_b-inter
+
+            if(union<=0.0):
+                return 0.0
+            return float(inter)/(float(union)+float(eps))
+
+        @staticmethod
+        def __clip_bbox_xyxy(b:list,w:Optional[int]=None,h:Optional[int]=None)->list:
+            """
+            Clips a bounding box in [x1,y1,x2,y2] format to fit within the given width and height.
+
+            Args:
+                b (list): Bounding box in [x1,y1,x2,y2] format.
+                w (int): Width to clip to.
+                h (int): Height to clip to.
+
+            Returns:
+                list: Clipped bounding box in [x1,y1,x2,y2] format.
+            """
+            if(b is None or len(b)<4):
+                return [0.0,0.0,0.0,0.0]
+
+            x1=float(b[0])
+            y1=float(b[1])
+            
+            x2=float(b[2])
+            y2=float(b[3])
+            
+            if(w is not None):
+                x1=max(0.0,min(float(w),x1))
+                x2=max(0.0,min(float(w),x2))
+
+            if(h is not None):
+                y1=max(0.0,min(float(h),y1))
+                y2=max(0.0,min(float(h),y2))
+
+            if(x2<x1):
+                x1,x2=x2,x1
+
+            if(y2<y1):
+                y1,y2=y2,y1
+
+            return [x1,y1,x2,y2]
+
+        @staticmethod
+        def __ann_dict(
+            bboxes:Optional[list]=None,
+            scores:Optional[list]=None,
+            classes:Optional[list]=None
+        )->dict:
+            """
+            Creates an annotation dictionary.
+
+            Args:
+                bboxes (list): List of bounding boxes.
+                scores (list): List of scores.
+                classes (list): List of class numbers.
+
+            Returns:
+                dict: Annotation dictionary.
+            """
+            return {
+                "bboxes":list(bboxes or []),
+                "scores":list(scores or []),
+                "classes":list(classes or [])
+            }
+
+        def updateRawImgInfo(
+            self,
+            base_dir:Optional[str]=None,
+            calc_sha256:bool=False,
+            sha256_block_size:int=1024*1024
+        )->dict:
+            """
+            Save raw image integrity metadata into dict key `raw_img_info`.
+
+            Stored keys (best-effort):
+              - path_abs, path_rel, exists, size, mtime, sha256, wh
+
+            Args:
+                base_dir (str): Base directory for relative path calculation.
+                calc_sha256 (bool): Whether to calculate SHA256 hash.
+                sha256_block_size (int): Block size for SHA256 calculation.
+            
+            Returns:
+                dict: Updated raw image information.
+            """
+            info=self.__d.get("raw_img_info",{})
+            if(not isinstance(info,dict)):
+                info={}
+            raw_path=self.getRawImgPath()
+            if(raw_path is None):
+                self.__d["raw_img_info"]=info
+                return pyExLib.safety_deepcopy(info)
+
+            path_abs=os.path.abspath(raw_path)
+            info["path_abs"]=path_abs
+            if(isinstance(base_dir,str) and base_dir!=""):
+                try:
+                    info["path_rel"]=os.path.relpath(path_abs,os.path.abspath(base_dir))
+                except Exception:
+                    info["path_rel"]=None
+            exists=os.path.exists(path_abs)
+            info["exists"]=bool(exists)
+            if(exists):
+                try:
+                    st=os.stat(path_abs)
+                    info["size"]=int(st.st_size)
+                    info["mtime"]=float(st.st_mtime)
+                except Exception:
+                    pass
+
+                # width/height (lazy: if already loaded, use it; else read header via cv2)
+                try:
+                    img=self.__raw_img if isinstance(self.__raw_img,np.ndarray) else None
+                    if(img is None and IMPORT_OPENCV_FLAG):
+                        img=cv2.imread(path_abs)
+                    if(isinstance(img,np.ndarray) and img.ndim>=2):
+                        h=int(img.shape[0]);w=int(img.shape[1])
+                        info["wh"]=[w,h]
+                except Exception:
+                    pass
+
+                if(calc_sha256):
+                    try:
+                        h=hashlib.sha256()
+                        with open(path_abs,"rb") as f:
+                            while(True):
+                                buf=f.read(int(sha256_block_size))
+                                if(not buf):
+                                    break
+                                h.update(buf)
+                        info["sha256"]=h.hexdigest()
+                    except Exception:
+                        info["sha256"]=None
+
+            self.__d["raw_img_info"]=info
+            return pyExLib.safety_deepcopy(info)
+
+        def verifyRawImgInfo(
+            self,
+            base_dir:Optional[str]=None,
+            verify_sha256:bool=False,
+            sha256_block_size:int=1024*1024,
+            allow_missing_meta:bool=True
+        )->dict:
+            """
+            Verify raw image based on `raw_img_info` saved by updateRawImgInfo().
+
+            Args:
+                base_dir (str): Base directory for relative path resolution.
+                verify_sha256 (bool): Whether to verify SHA256 hash.
+                sha256_block_size (int): Block size for SHA256 calculation.
+                allow_missing_meta (bool): If True, missing path is considered OK.
+
+            Returns:
+                dict: Verification result with keys:
+                    - ok (bool): Overall verification result.
+                    - checks (dict): Individual check results.
+                    - path_abs (str|None): Resolved absolute path.
+                    - meta (dict): Raw image info metadata used for verification.
+            """
+            info=self.__d.get("raw_img_info",{})
+            if(not isinstance(info,dict)):
+                info={}
+            raw_path=self.getRawImgPath()
+            path_abs=os.path.abspath(raw_path) if(raw_path is not None) else None
+
+            # try resolve from rel
+            if((path_abs is None or not os.path.exists(path_abs)) and isinstance(base_dir,str) and base_dir!="" and isinstance(info.get("path_rel"),str)):
+                cand=os.path.join(os.path.abspath(base_dir),info.get("path_rel"))
+                if(os.path.exists(cand)):
+                    path_abs=os.path.abspath(cand)
+
+            result={"ok":True,"checks":{},"path_abs":path_abs,"meta":pyExLib.safety_deepcopy(info)}
+            if(path_abs is None):
+                result["ok"]=bool(allow_missing_meta)
+                result["checks"]["path"]=False
+                return result
+
+            exists=os.path.exists(path_abs)
+            result["checks"]["exists"]=bool(exists)
+            if(not exists):
+                result["ok"]=False
+                return result
+
+            # size, mtime
+            try:
+                st=os.stat(path_abs)
+                size=int(st.st_size)
+                mtime=float(st.st_mtime)
+                if("size" in info):
+                    result["checks"]["size"]=(int(info.get("size"))==size)
+                if("mtime" in info):
+                    # allow slight diff by rounding
+                    try:
+                        result["checks"]["mtime"]=(abs(float(info.get("mtime"))-mtime)<=1.0)
+                    except Exception:
+                        result["checks"]["mtime"]=False
+            except Exception:
+                result["checks"]["stat"]=False
+
+            # wh
+            if("wh" in info):
+                try:
+                    img=self.__raw_img if isinstance(self.__raw_img,np.ndarray) else None
+                    if(img is None and IMPORT_OPENCV_FLAG):
+                        img=cv2.imread(path_abs)
+                    if(isinstance(img,np.ndarray) and img.ndim>=2):
+                        h=int(img.shape[0]);w=int(img.shape[1])
+                        result["checks"]["wh"]=(list(info.get("wh"))==[w,h])
+                    else:
+                        result["checks"]["wh"]=False
+                except Exception:
+                    result["checks"]["wh"]=False
+
+            # sha256
+            if(verify_sha256 and isinstance(info.get("sha256"),str) and len(info.get("sha256"))>=32):
+                try:
+                    h=hashlib.sha256()
+                    with open(path_abs,"rb") as f:
+                        while(True):
+                            buf=f.read(int(sha256_block_size))
+                            if(not buf):
+                                break
+                            h.update(buf)
+                    result["checks"]["sha256"]=(h.hexdigest()==info.get("sha256"))
+                except Exception:
+                    result["checks"]["sha256"]=False
+
+            # final ok
+            for k,v in result["checks"].items():
+                if(v is False):
+                    result["ok"]=False
+                    break
+            return result
+
+        def __get_gt_from_dict(
+            self,
+            gt_block_key:str="YOLOANN_obj_additional_info",
+            gt_bbox_key:str="ann",
+            gt_cls_key:str="ann_cls_nums"
+        )->tuple[list,list]:
+            """
+            Gets ground truth bounding boxes and classes from the internal dictionary.
+
+            Args:
+                gt_block_key (str): Key for the ground truth block.
+                gt_bbox_key (str): Key for the ground truth bounding boxes.
+                gt_cls_key (str): Key for the ground truth classes.
+
+            Returns:
+                tuple: Tuple containing lists of bounding boxes and classes.
+            """
+            d=self.__d if isinstance(self.__d,dict) else {}
+            gt_block=d.get(gt_block_key,{})
+            if(not isinstance(gt_block,dict)):
+                gt_block={}
+            bboxes=gt_block.get(gt_bbox_key,[])
+            classes=gt_block.get(gt_cls_key,[])
+            if(not isinstance(bboxes,list)):
+                bboxes=[]
+            if(not isinstance(classes,list)):
+                classes=[]
+            return bboxes,classes
+
+        def nmsANN(
+            self,
+            iou_threshold:float=0.5,
+            score_threshold:float|None=None,
+            max_dets:Optional[int]=None,
+            class_aware:bool=True,
+            in_place:bool=False
+        ):
+            """
+            Apply NMS to `final_ann`.
+            For detailed predictions, you should use `imgLib.ensembleModel.procYOLOPredict`.
+
+            Args:
+                iou_threshold: IoU threshold for suppression.
+                score_threshold: filter by score before NMS (None: no filter).
+                max_dets: maximum detections kept (None: keep all).
+                class_aware: NMS separately for each class.
+                in_place: overwrite this instance's final_ann if True.
+
+            Returns:
+                BBimgJson: result instance (self if in_place else copied).
+            """
+            ann=self.getANN()
+            bboxes=list(ann.get("bboxes",[]))
+            scores=list(ann.get("scores",[]))
+            classes=list(ann.get("classes",[]))
+
+            # basic validation
+            n=min(len(bboxes),len(scores),len(classes))
+            bboxes=bboxes[:n];scores=scores[:n];classes=classes[:n]
+
+            keep_idx=[]
+            if(n==0):
+                out_ann=imgLib.BBimgJson.__ann_dict([],[],[])
+            else:
+                # pre-filter
+                cand=list(range(n))
+                if(score_threshold is not None):
+                    st=float(score_threshold)
+                    cand=[i for i in cand if float(scores[i])>=st]
+
+                if(class_aware):
+                    cls2idx={}
+                    for i in cand:
+                        c=int(classes[i])
+                        cls2idx.setdefault(c,[]).append(i)
+                    for c,idxs in cls2idx.items():
+                        keep_idx.extend(imgLib.BBimgJson.__nms_indices(bboxes,scores,idxs,iou_threshold=iou_threshold,max_dets=max_dets))
+                else:
+                    keep_idx=imgLib.BBimgJson.__nms_indices(bboxes,scores,cand,iou_threshold=iou_threshold,max_dets=max_dets)
+
+                # keep order by score desc
+                keep_idx=sorted(set(keep_idx),key=lambda i:float(scores[i]),reverse=True)
+                if(max_dets is not None):
+                    keep_idx=keep_idx[:int(max_dets)]
+
+                out_ann=imgLib.BBimgJson.__ann_dict(
+                    [bboxes[i] for i in keep_idx],
+                    [scores[i] for i in keep_idx],
+                    [classes[i] for i in keep_idx]
+                )
+
+            if(in_place):
+                self.__d["final_ann"]=out_ann
+                return self
+            d=self.getDict()
+            d["final_ann"]=out_ann
+            return imgLib.BBimgJson(d)
+
+        @staticmethod
+        def __nms_indices(
+            bboxes:list,
+            scores:list,
+            idxs:list,
+            iou_threshold:float=0.5,
+            max_dets:Optional[int]=None
+        )->list:
+            """
+            Non-Maximum Suppression (NMS) to get kept indices.
+
+            Args:
+                bboxes (list): List of bounding boxes.
+                scores (list): List of scores.
+                idxs (list): List of candidate indices.
+                iou_threshold (float): IoU threshold for suppression.
+                max_dets (int): Maximum detections kept (None: keep all).
+
+            Returns:
+                list: List of kept indices after NMS.
+            """
+            if(not idxs):
+                return []
+            thr=float(iou_threshold)
+            # sort by score desc
+            order=sorted(list(idxs),key=lambda i:float(scores[i]),reverse=True)
+            keep=[]
+            while(order):
+                i=order.pop(0)
+                keep.append(i)
+                if(max_dets is not None and len(keep)>=int(max_dets)):
+                    break
+                rem=[]
+                bi=bboxes[i]
+                for j in order:
+                    if(imgLib.BBimgJson.__bbox_iou_xyxy(bi,bboxes[j])<thr):
+                        rem.append(j)
+                order=rem
+            return keep
+
+        @staticmethod
+        def __wbf_cluster(
+            bboxes:list,
+            scores:list,
+            classes:list,
+            idxs:list,
+            iou_threshold:float=0.55,
+            score_pow:float=1.0
+        )->tuple[list,float,int,list]:
+            """
+            WBF cluster and fusion for one cluster.
+
+            Args:
+                bboxes (list): List of bounding boxes.
+                scores (list): List of scores.
+                classes (list): List of class numbers.
+                idxs (list): List of candidate indices.
+                iou_threshold (float): IoU threshold for clustering.
+                score_pow (float): Score power for weighting.
+
+            Returns:
+                tuple: fused_bbox, fused_score, fused_class, used_indices
+            """
+            # returns fused_bbox, fused_score, fused_class, used_indices
+            thr=float(iou_threshold)
+            order=sorted(list(idxs),key=lambda i:float(scores[i]),reverse=True)
+            if(not order):
+                return [0.0,0.0,0.0,0.0],0.0,0,[]
+            used=[]
+            seed=order.pop(0)
+            used.append(seed)
+            seed_box=bboxes[seed]
+            # gather cluster
+            cluster=[seed]
+            for j in list(order):
+                if(imgLib.BBimgJson.__bbox_iou_xyxy(seed_box,bboxes[j])>=thr):
+                    cluster.append(j)
+                    order.remove(j)
+            # fuse
+            weights=[]
+            for k in cluster:
+                w=float(scores[k])
+                if(score_pow!=1.0):
+                    w=w**float(score_pow)
+                weights.append(max(0.0,w))
+            sw=sum(weights) if sum(weights)>0.0 else float(len(weights))
+            fused=[0.0,0.0,0.0,0.0]
+            for dim in range(4):
+                fused[dim]=sum(float(bboxes[k][dim])*weights[ii] for ii,k in enumerate(cluster))/float(sw)
+            fused_score=sum(float(scores[k]) for k in cluster)/float(len(cluster))
+            fused_class=int(classes[seed])
+            return fused,fused_score,fused_class,cluster
+
+        def fuseANN_WBF(
+            self,
+            iou_threshold:float=0.55,
+            score_threshold:float|None=None,
+            class_aware:bool=True,
+            score_pow:float=1.0,
+            max_dets:Optional[int]=None,
+            in_place:bool=False
+        ):
+            """
+            Weighted Boxes Fusion (simple implementation) for `final_ann`.
+            For detailed predictions, you should use `imgLib.ensembleModel.procYOLOPredict`.
+
+            Args:
+                iou_threshold: IoU threshold for clustering.
+                score_threshold: filter by score before WBF (None: no filter).
+                class_aware: WBF separately for each class.
+                score_pow: score power for weighting.
+                max_dets: maximum detections kept (None: keep all).
+                in_place: overwrite this instance's final_ann if True.
+
+            Returns:
+                BBimgJson: result instance (self if in_place else copied).
+            """
+            ann=self.getANN()
+            bboxes=list(ann.get("bboxes",[]))
+            scores=list(ann.get("scores",[]))
+            classes=list(ann.get("classes",[]))
+            n=min(len(bboxes),len(scores),len(classes))
+            bboxes=bboxes[:n];scores=scores[:n];classes=classes[:n]
+            cand=list(range(n))
+            if(score_threshold is not None):
+                st=float(score_threshold)
+                cand=[i for i in cand if float(scores[i])>=st]
+
+            fused_b=[];fused_s=[];fused_c=[]
+            thr=float(iou_threshold)
+
+            if(class_aware):
+                cls2idx={}
+                for i in cand:
+                    c=int(classes[i])
+                    cls2idx.setdefault(c,[]).append(i)
+                groups=list(cls2idx.values())
+            else:
+                groups=[cand]
+
+            for idxs in groups:
+                remaining=set(idxs)
+                while(remaining):
+                    idxs2=list(remaining)
+                    fused,fs,fc,used=imgLib.BBimgJson.__wbf_cluster(bboxes,scores,classes,idxs2,iou_threshold=thr,score_pow=score_pow)
+                    for u in used:
+                        if(u in remaining):
+                            remaining.remove(u)
+                    fused_b.append(fused)
+                    fused_s.append(fs)
+                    fused_c.append(fc)
+
+            # sort by score desc
+            order=sorted(range(len(fused_s)),key=lambda i:float(fused_s[i]),reverse=True)
+            if(max_dets is not None):
+                order=order[:int(max_dets)]
+            out_ann=imgLib.BBimgJson.__ann_dict(
+                [fused_b[i] for i in order],
+                [fused_s[i] for i in order],
+                [fused_c[i] for i in order]
+            )
+
+            if(in_place):
+                self.__d["final_ann"]=out_ann
+                return self
+            d=self.getDict()
+            d["final_ann"]=out_ann
+            return imgLib.BBimgJson(d)
+
+        @staticmethod
+        def MergeBBimgJsonList(
+            bb_list:list,
+            method:str="nms",
+            weights:Optional[list]=None,
+            iou_threshold:float=0.55,
+            score_threshold:float|None=None,
+            class_aware:bool=True,
+            max_dets:Optional[int]=None,
+            keep_provenance:bool=True
+        ):
+            """
+            Merge multiple BBimgJson predictions into one BBimgJson (same raw image assumed).
+            For detailed predictions, you should use `imgLib.ensembleModel.procYOLOPredict`.
+
+            method:
+              - "concat": just concat all boxes
+              - "nms"   : concat -> NMS
+              - "wbf"   : concat -> WBF
+
+            weights: optional per-bb weight (score multiplier) for "wbf"/"nms" pre-merge ranking.
+
+            Args:
+                bb_list: list of BBimgJson instances to merge.
+                method: merge method ("concat", "nms", "wbf").
+                weights: optional list of weights (float) for each BBimgJson.
+                iou_threshold: IoU threshold for "nms" or "wbf".
+                score_threshold: score threshold before "nms" or "wbf" (None: no filter).
+                class_aware: class-aware merging for "nms" or "wbf".
+                max_dets: maximum detections kept after merging (None: keep all).
+                keep_provenance: whether to keep provenance info in merge_info.provenance.
+
+            Returns:
+                BBimgJson: merged result.
+            """
+            if(not isinstance(bb_list,list) or len(bb_list)==0):
+                raise ValueError("bb_list must be a non-empty list")
+            base=bb_list[0]
+            if(not isinstance(base,imgLib.BBimgJson)):
+                raise ValueError("bb_list[0] must be a BBimgJson")
+
+            all_b=[];all_s=[];all_c=[]
+            prov=[]
+            wlist=weights if isinstance(weights,list) else None
+            for i,bb in enumerate(bb_list):
+                if(not isinstance(bb,imgLib.BBimgJson)):
+                    continue
+                ann=bb.getANN()
+                bboxes=list(ann.get("bboxes",[]))
+                scores=list(ann.get("scores",[]))
+                classes=list(ann.get("classes",[]))
+                n=min(len(bboxes),len(scores),len(classes))
+                bboxes=bboxes[:n];scores=scores[:n];classes=classes[:n]
+                w=1.0
+                if(wlist is not None and i<len(wlist)):
+                    try:
+                        w=float(wlist[i])
+                    except Exception:
+                        w=1.0
+                for j in range(n):
+                    all_b.append(bboxes[j])
+                    all_s.append(float(scores[j])*w)
+                    all_c.append(classes[j])
+                    if(keep_provenance):
+                        prov.append({"src_index":int(i),"det_index":int(j)})
+
+            d=base.getDict()
+            d.setdefault("merge_info",{})
+            if(not isinstance(d.get("merge_info"),dict)):
+                d["merge_info"]={}
+            d["merge_info"]["method"]=str(method)
+            d["merge_info"]["iou_threshold"]=float(iou_threshold)
+            if(score_threshold is not None):
+                d["merge_info"]["score_threshold"]=float(score_threshold)
+            d["merge_info"]["class_aware"]=bool(class_aware)
+            d["merge_info"]["max_dets"]=None if max_dets is None else int(max_dets)
+            if(keep_provenance):
+                d["merge_info"]["provenance"]=prov
+
+            d["final_ann"]=imgLib.BBimgJson.__ann_dict(all_b,all_s,all_c)
+            out=imgLib.BBimgJson(d)
+
+            method_l=str(method or "").lower()
+            if(method_l=="concat" or method_l==""):
+                return out
+            if(method_l=="nms"):
+                return out.nmsANN(
+                    iou_threshold=iou_threshold,
+                    score_threshold=score_threshold,
+                    max_dets=max_dets,
+                    class_aware=class_aware,
+                    in_place=True
+                )
+            if(method_l=="wbf"):
+                return out.fuseANN_WBF(
+                    iou_threshold=iou_threshold,
+                    score_threshold=score_threshold,
+                    class_aware=class_aware,
+                    max_dets=max_dets,
+                    in_place=True
+                )
+            raise ValueError(f"Unknown merge method: {method}")
+
+        def matchWithGT(
+            self,
+            gt_bb:Optional[object]=None,
+            iou_threshold:float=0.5,
+            class_aware:bool=True,
+            use_gt_from_self_if_none:bool=True,
+            gt_block_key:str="YOLOANN_obj_additional_info",
+            gt_bbox_key:str="ann",
+            gt_cls_key:str="ann_cls_nums"
+        )->dict:
+            """
+            Match prediction boxes (self.final_ann) with GT boxes.
+
+            Args:
+                gt_bb: ground truth BBimgJson or dict; if None and use_gt_from_self_if_none is True, use self's GT.
+                iou_threshold: IoU threshold for matching.
+                class_aware: whether to match only within same class.
+                use_gt_from_self_if_none: whether to use self's GT if gt_bb is None.
+                gt_block_key: key for GT block in dict.
+                gt_bbox_key: key for GT bboxes in dict.
+                gt_cls_key: key for GT classes in dict.
+
+            Returns:
+                dict with keys:
+                  - matches: list of {gt_i,pred_i,iou,gt_cls,pred_cls}
+                  - tp_pred_idx, fp_pred_idx, tp_gt_idx, fn_gt_idx
+                  - tp, fp, fn, precision, recall
+            """
+            # GT extraction
+            if(gt_bb is None and use_gt_from_self_if_none):
+                gt_bboxes,gt_classes=self.__get_gt_from_dict(gt_block_key,gt_bbox_key,gt_cls_key)
+            elif(isinstance(gt_bb,imgLib.BBimgJson)):
+                # prefer gt from its dict if exists; else from its final_ann
+                gt_bboxes,gt_classes=gt_bb.__get_gt_from_dict(gt_block_key,gt_bbox_key,gt_cls_key)
+                if(len(gt_bboxes)==0):
+                    ann=gt_bb.getANN()
+                    gt_bboxes=list(ann.get("bboxes",[]))
+                    gt_classes=list(ann.get("classes",[]))
+            elif(isinstance(gt_bb,dict)):
+                tmp=imgLib.BBimgJson(gt_bb)
+                gt_bboxes,gt_classes=tmp.__get_gt_from_dict(gt_block_key,gt_bbox_key,gt_cls_key)
+                if(len(gt_bboxes)==0):
+                    ann=tmp.getANN()
+                    gt_bboxes=list(ann.get("bboxes",[]))
+                    gt_classes=list(ann.get("classes",[]))
+            else:
+                raise ValueError("gt_bb must be BBimgJson or dict or None")
+
+            # pred extraction
+            ann=self.getANN()
+            pred_b=list(ann.get("bboxes",[]))
+            pred_s=list(ann.get("scores",[]))
+            pred_c=list(ann.get("classes",[]))
+            pn=min(len(pred_b),len(pred_s),len(pred_c))
+            pred_b=pred_b[:pn];pred_s=pred_s[:pn];pred_c=pred_c[:pn]
+
+            gn=min(len(gt_bboxes),len(gt_classes))
+            gt_b=list(gt_bboxes[:gn])
+            gt_c=list(gt_classes[:gn])
+
+            thr=float(iou_threshold)
+
+            # greedy matching: sort preds by score desc
+            pred_order=sorted(range(pn),key=lambda i:float(pred_s[i]),reverse=True)
+            used_gt=set()
+            matches=[]
+            tp_pred_idx=[]
+            tp_gt_idx=[]
+
+            for pi in pred_order:
+                best_gi=None
+                best_iou=0.0
+                pc=int(pred_c[pi])
+                for gi in range(gn):
+                    if(gi in used_gt):
+                        continue
+                    if(class_aware and int(gt_c[gi])!=pc):
+                        continue
+                    iou=imgLib.BBimgJson.__bbox_iou_xyxy(pred_b[pi],gt_b[gi])
+                    if(iou>best_iou):
+                        best_iou=iou
+                        best_gi=gi
+                if(best_gi is not None and best_iou>=thr):
+                    used_gt.add(best_gi)
+                    matches.append({
+                        "gt_i":int(best_gi),
+                        "pred_i":int(pi),
+                        "iou":float(best_iou),
+                        "gt_cls":int(gt_c[best_gi]),
+                        "pred_cls":int(pc),
+                        "pred_score":float(pred_s[pi])
+                    })
+                    tp_pred_idx.append(int(pi))
+                    tp_gt_idx.append(int(best_gi))
+
+            tp_pred_set=set(tp_pred_idx)
+            fp_pred_idx=[int(i) for i in range(pn) if i not in tp_pred_set]
+            fn_gt_idx=[int(i) for i in range(gn) if i not in used_gt]
+
+            tp=len(tp_pred_idx);fp=len(fp_pred_idx);fn=len(fn_gt_idx)
+            precision=float(tp)/float(tp+fp+1e-12)
+            recall=float(tp)/float(tp+fn+1e-12)
+
+            return {
+                "iou_threshold":thr,
+                "class_aware":bool(class_aware),
+                "matches":matches,
+                "tp_pred_idx":tp_pred_idx,
+                "fp_pred_idx":fp_pred_idx,
+                "tp_gt_idx":tp_gt_idx,
+                "fn_gt_idx":fn_gt_idx,
+                "tp":int(tp),
+                "fp":int(fp),
+                "fn":int(fn),
+                "precision":precision,
+                "recall":recall
+            }
+
+        def getCompareImgWithGT(
+            self,
+            gt_bb:Optional[object]=None,
+            iou_threshold:float=0.5,
+            class_aware:bool=True,
+            use_gt_from_self_if_none:bool=True,
+            draw_tp_pred:bool=True,
+            draw_fp_pred:bool=True,
+            draw_fn_gt:bool=True,
+            draw_tp_gt:bool=False,
+            tp_pred_color:tuple=(0,255,0),
+            fp_pred_color:tuple=(0,0,255),
+            fn_gt_color:tuple=(0,255,255),
+            tp_gt_color:tuple=(255,255,0),
+            label_flag:bool=True,
+            label_str_format_pred:str="P:{name_class} {score:.2f}",
+            label_str_format_gt:str="G:{name_class}",
+            draw_rect_args:Optional[dict]=None,
+            label_args:Optional[dict]=None,
+            label_org_function:Optional[callable]=None
+        ):
+            """
+            Create a comparison image overlaying TP/FP/FN boxes.
+
+            - TP/FP are based on matching pred (self.final_ann) to GT.
+            - GT is taken from `gt_bb` or from self's YOLOANN_obj_additional_info.
+
+            Args:
+                gt_bb: ground truth BBimgJson or dict; if None and use_gt_from_self_if_none is True, use self's GT.
+                iou_threshold: IoU threshold for matching.
+                class_aware: whether to match only within same class.
+                use_gt_from_self_if_none: whether to use self's GT if gt_bb is None.
+                draw_tp_pred: whether to draw true positive predictions.
+                draw_fp_pred: whether to draw false positive predictions.
+                draw_fn_gt: whether to draw false negative ground truths.
+                draw_tp_gt: whether to draw true positive ground truths.
+                tp_pred_color: color for true positive predictions (BGR).
+                fp_pred_color: color for false positive predictions (BGR).
+                fn_gt_color: color for false negative ground truths (BGR).
+                tp_gt_color: color for true positive ground truths (BGR).
+                label_flag: whether to draw labels.
+                label_str_format_pred: label format for predictions.
+                label_str_format_gt: label format for ground truths.
+                draw_rect_args: additional args for imgLib.drawRect for rectangles.
+                label_args: additional args for imgLib.drawRect for labels.
+                label_org_function: custom label organization function.
+
+            Returns:
+                np.ndarray: annotated image
+            """
+            if(not IMPORT_OPENCV_FLAG):
+                raise RuntimeError("Error : The opencv package is not installed!")
+
+            match=self.matchWithGT(
+                gt_bb=gt_bb,
+                iou_threshold=iou_threshold,
+                class_aware=class_aware,
+                use_gt_from_self_if_none=use_gt_from_self_if_none
+            )
+
+            # base image (raw or reshaped img)
+            base_img=self.getRawImg()
+            if(not isinstance(base_img,np.ndarray)):
+                base_img=self.getImg(draw_rect_flag=False)
+
+            tmp=base_img.copy()
+
+            if(draw_rect_args is None):
+                draw_rect_args={}
+            else:
+                draw_rect_args=pyExLib.safety_deepcopy(draw_rect_args)
+
+            if(label_args is None):
+                label_args={}
+            else:
+                label_args=pyExLib.safety_deepcopy(label_args)
+
+            # pred data
+            ann=self.getANN()
+            pb=list(ann.get("bboxes",[]))
+            ps=list(ann.get("scores",[]))
+            pc=list(ann.get("classes",[]))
+            pn=min(len(pb),len(ps),len(pc))
+            pb=pb[:pn];ps=ps[:pn];pc=pc[:pn]
+            name_pc=[self.__getClsNameIndex(c) for c in pc]
+
+            # gt data
+            if(gt_bb is None and use_gt_from_self_if_none):
+                gb,gc=self.__get_gt_from_dict()
+            elif(isinstance(gt_bb,imgLib.BBimgJson)):
+                gb,gc=gt_bb.__get_gt_from_dict()
+                if(len(gb)==0):
+                    a=gt_bb.getANN()
+                    gb=list(a.get("bboxes",[]))
+                    gc=list(a.get("classes",[]))
+            elif(isinstance(gt_bb,dict)):
+                tmp_bb=imgLib.BBimgJson(gt_bb)
+                gb,gc=tmp_bb.__get_gt_from_dict()
+                if(len(gb)==0):
+                    a=tmp_bb.getANN()
+                    gb=list(a.get("bboxes",[]))
+                    gc=list(a.get("classes",[]))
+            else:
+                gb=[];gc=[]
+
+            gn=min(len(gb),len(gc))
+            gb=gb[:gn];gc=gc[:gn]
+            name_gc=[self.__getClsNameIndex(c) for c in gc]
+
+            # draw FN GT first (under)
+            if(draw_fn_gt and gn>0):
+                idx=match.get("fn_gt_idx",[])
+                if(idx):
+                    boxes=[gb[i] for i in idx]
+                    labels=[label_str_format_gt.format(cls_num=int(gc[i]),score=1.0,name_class=name_gc[i]) for i in idx] if label_flag else None
+                    tmp=imgLib.drawRect(
+                        tmp,
+                        boxes,
+                        copy_flag=False,
+                        rect_color=fn_gt_color,
+                        point_color=fn_gt_color,
+                        label_flag=bool(label_flag),
+                        label_list=labels,
+                        label_arg=label_args,
+                        label_org_function=label_org_function
+                    )
+
+            if(draw_tp_gt and gn>0):
+                idx=match.get("tp_gt_idx",[])
+                if(idx):
+                    boxes=[gb[i] for i in idx]
+                    labels=[label_str_format_gt.format(cls_num=int(gc[i]),score=1.0,name_class=name_gc[i]) for i in idx] if label_flag else None
+                    tmp=imgLib.drawRect(
+                        tmp,
+                        boxes,
+                        copy_flag=False,
+                        rect_color=tp_gt_color,
+                        point_color=tp_gt_color,
+                        label_flag=bool(label_flag),
+                        label_list=labels,
+                        label_arg=label_args,
+                        label_org_function=label_org_function
+                    )
+
+            # draw TP pred
+            if(draw_tp_pred and pn>0):
+                idx=match.get("tp_pred_idx",[])
+                if(idx):
+                    boxes=[pb[i] for i in idx]
+                    labels=[label_str_format_pred.format(cls_num=int(pc[i]),score=float(ps[i]),name_class=name_pc[i]) for i in idx] if label_flag else None
+                    tmp=imgLib.drawRect(
+                        tmp,
+                        boxes,
+                        copy_flag=False,
+                        rect_color=tp_pred_color,
+                        point_color=tp_pred_color,
+                        label_flag=bool(label_flag),
+                        label_list=labels,
+                        label_arg=label_args,
+                        label_org_function=label_org_function
+                    )
+
+            # draw FP pred
+            if(draw_fp_pred and pn>0):
+                idx=match.get("fp_pred_idx",[])
+                if(idx):
+                    boxes=[pb[i] for i in idx]
+                    labels=[label_str_format_pred.format(cls_num=int(pc[i]),score=float(ps[i]),name_class=name_pc[i]) for i in idx] if label_flag else None
+                    tmp=imgLib.drawRect(
+                        tmp,
+                        boxes,
+                        copy_flag=False,
+                        rect_color=fp_pred_color,
+                        point_color=fp_pred_color,
+                        label_flag=bool(label_flag),
+                        label_list=labels,
+                        label_arg=label_args,
+                        label_org_function=label_org_function
+                    )
+
+            return tmp
+
+        def saveCompareImgWithGT(
+            self,
+            save_path:str,
+            gt_bb:Optional[object]=None,
+            iou_threshold:float=0.5,
+            class_aware:bool=True,
+            use_gt_from_self_if_none:bool=True,
+            **kwargs
+        ):
+            """
+            Save comparison image.
+
+            Args:
+                save_path: path to save the image.
+                gt_bb: ground truth BBimgJson or dict; if None and use_gt_from_self_if_none is True, use self's GT.
+                iou_threshold: IoU threshold for matching.
+                class_aware: whether to match only within same class.
+                use_gt_from_self_if_none: whether to use self's GT if gt_bb is None.
+                **kwargs: additional arguments for getCompareImgWithGT. The dictionary is:
+                    - draw_tp_pred (bool): whether to draw true positive predictions.
+                    - draw_fp_pred (bool): whether to draw false positive predictions.
+                    - draw_fn_gt (bool): whether to draw false negative ground truths.
+                    - draw_tp_gt (bool): whether to draw true positive ground truths.
+                    - tp_pred_color (tuple): color for true positive predictions (BGR).
+                    - fp_pred_color (tuple): color for false positive predictions (BGR).
+                    - fn_gt_color (tuple): color for false negative ground truths (BGR).
+                    - tp_gt_color (tuple): color for true positive ground truths (BGR).
+                    - label_flag (bool): whether to draw labels.
+                    - label_str_format_pred (str): label format for predictions.
+                    - label_str_format_gt (str): label format for ground truths.
+                    - draw_rect_args (dict): additional args for imgLib.drawRect for rectangles.
+                    - label_args (dict): additional args for imgLib.drawRect for labels.
+                    - label_org_function (callable): custom label organization function.
+            """
+            if(not IMPORT_OPENCV_FLAG):
+                raise RuntimeError("Error : The opencv package is not installed!")
+            img=self.getCompareImgWithGT(
+                gt_bb=gt_bb,
+                iou_threshold=iou_threshold,
+                class_aware=class_aware,
+                use_gt_from_self_if_none=use_gt_from_self_if_none,
+                **kwargs
+            )
+            cv2.imwrite(save_path,img)
+            return save_path
 
         DEFAULT_CONFUSION_MATRIX_IOU_THRESHOLD=0.5
         DEFAULT_CONFUSION_MATRIX_BACKGROUND_LABEL="__background__"
