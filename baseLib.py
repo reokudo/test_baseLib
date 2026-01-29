@@ -33861,8 +33861,7 @@ class imgLib:
                 Calculates detection mAP for each model.
 
                 Args:
-                    iou_thresholds (list, optional): IoU thresholds for AP/mAP.
-                        If None, defaults to BBimgJson.DEFAULT_MAP_IOU_THRESHOLDS (0.50..0.95).
+                    iou_thresholds (list, optional): IoU thresholds for AP/mAP. If None, defaults to BBimgJson.DEFAULT_MAP_IOU_THRESHOLDS (0.50..0.95).
                     ap_mode (str, optional): "interp101" or "trapz". If None, uses BBimgJson.DEFAULT_MAP_AP_MODE.
 
                 Returns:
@@ -34534,6 +34533,255 @@ class imgLib:
                     
                 return dfl
 
+            def generateSimpleEvalReport(
+                self,
+                metrics:list|set|tuple=None,
+                topk:int=5,
+                include_mean_iou:bool=False,
+                evaluation_args:dict=None,
+
+                metric_orders:dict=None,
+                
+                candidate_models:list|set|tuple=None,
+                exclude_models:list|set|tuple=None,
+                include_regex:str=None,
+                exclude_regex:str=None,
+
+                rank_method:str="min",
+
+                strict_metrics:bool=True,
+                dropna:bool=True,
+            )->dict:
+                """
+                Generates a simple evaluation report with rankings for specified metrics.
+
+                Args:
+                    metrics (list|set|tuple, optional): List of metric names to include in the report.
+                    topk (int, optional): Number of top models to include for each metric.
+                    include_mean_iou (bool, optional): Whether to include the mean IoU in the DataFrame.
+                    evaluation_args (dict, optional): Additional arguments for evaluation.
+                    metric_orders (dict, optional): Dictionary specifying the order ('asc' or 'desc') for each metric.
+                    candidate_models (list|set|tuple, optional): List of model names to consider.
+                    exclude_models (list|set|tuple, optional): List of model names to exclude.
+                    include_regex (str, optional): Regular expression to filter model names to include.
+                    exclude_regex (str, optional): Regular expression to filter model names to exclude.
+                    rank_method (str, optional): Method for ranking ('min', 'max', 'average', 'first', 'dense').
+                    strict_metrics (bool, optional): Whether to raise an error if specified metrics are missing.
+                    dropna (bool, optional): Whether to drop NaN values when ranking.
+
+                Returns:
+                    dict: A dictionary containing the evaluation report with rankings.
+                """
+                if(evaluation_args is None):
+                    evaluation_args={}
+                else:
+                    evaluation_args=pyExLib.safety_deepcopy(evaluation_args)
+
+                if(metric_orders is None):
+                    metric_orders={}
+                else:
+                    metric_orders=pyExLib.safety_deepcopy(metric_orders)
+
+                topk=int(topk)
+                if(topk<=0):
+                    raise ValueError("topk must be >= 1")
+
+                dfl=self.getEvaluateDataFrames(include_mean_iou=include_mean_iou,evaluation_args=evaluation_args)
+                if(not isinstance(dfl,pyExLib.DataFrameExLib.DataFrameList)):
+                    raise TypeError("Expected DataFrameList from getEvaluateDataFrames()")
+
+                _,all_eval_df,_=dfl.getItemByKey("AllEvaluateData")
+                if(not isinstance(all_eval_df,pd.DataFrame)):
+                    raise TypeError("AllEvaluateData must be a pandas DataFrame")
+
+                if("model_name" not in all_eval_df.columns):
+                    raise KeyError("'model_name' not found in AllEvaluateData")
+
+                df=all_eval_df.copy()
+                df["model_name"]=df["model_name"].astype(str)
+
+                allowed=set(df["model_name"].tolist())
+                if(candidate_models is not None):
+                    allowed &= set([str(x) for x in candidate_models])
+                if(exclude_models is not None):
+                    allowed -= set([str(x) for x in exclude_models])
+
+                if(include_regex is not None):
+                    rx=re.compile(include_regex)
+                    allowed=set([m for m in allowed if rx.search(m)])
+                if(exclude_regex is not None):
+                    rx=re.compile(exclude_regex)
+                    allowed=set([m for m in allowed if not rx.search(m)])
+
+                df=df.loc[df["model_name"].isin(allowed)].reset_index(drop=True)
+
+                if(metrics is None):
+                    default_cols=["accuracy"]
+                    metrics=[c for c in default_cols if c in df.columns]
+                else:
+                    metrics=[str(x) for x in list(metrics)]
+
+                missing=[c for c in metrics if c not in df.columns]
+                if(len(missing)>0):
+                    if(strict_metrics):
+                        raise KeyError(f"metric columns not found in AllEvaluateData: {missing}")
+                    metrics=[c for c in metrics if c in df.columns]
+
+                model_names=df["model_name"].tolist()
+                per_model={m:{"metrics":{}} for m in model_names}
+                topk_by_metric={}
+
+                def _to_py(v):
+                    if(v is None):
+                        return None
+                    if(isinstance(v,float) and (math.isnan(v) or math.isinf(v))):
+                        return None
+                    if(isinstance(v,(pd.Timestamp,))):
+                        return v.isoformat()
+                    return float(v) if isinstance(v,(float,int)) else v
+
+                for metric in metrics:
+                    order=str(metric_orders.get(metric,"desc")).lower()
+                    if(order not in ("asc","desc")):
+                        raise ValueError(f"metric_orders['{metric}'] must be 'asc' or 'desc'")
+
+                    ascending=(order=="asc")
+
+                    s=pd.to_numeric(df[metric],errors="coerce")
+                    s.index=df["model_name"]
+
+                    s_valid=s.dropna() if dropna else s
+
+                    ranks=s.rank(method=rank_method,ascending=ascending)
+
+                    items=[]
+                    cutoff_value=None
+                    if(s_valid.shape[0]>0):
+                        sorted_s=s_valid.sort_values(ascending=ascending)
+
+                        k=min(topk,int(sorted_s.shape[0]))
+                        cutoff_value=float(sorted_s.iloc[k-1])
+
+                        if(ascending):
+                            picked=s_valid.loc[s_valid.le(cutoff_value)]
+                        else:
+                            picked=s_valid.loc[s_valid.ge(cutoff_value)]
+
+                        tmp=pd.DataFrame({
+                            "model_name":picked.index.astype(str),
+                            "value":picked.values,
+                            "rank":ranks.loc[picked.index].values
+                        })
+
+                        tmp=tmp.sort_values(["rank","model_name"],ascending=[True,True]).reset_index(drop=True)
+
+                        for _,row in tmp.iterrows():
+                            rk=row["rank"]
+                            rk=None if (isinstance(rk,float) and math.isnan(rk)) else int(rk)
+                            items.append({
+                                "rank":rk,
+                                "model_name":str(row["model_name"]),
+                                "value":_to_py(row["value"]),
+                            })
+
+                    topk_by_metric[metric]={
+                        "order":order,
+                        "topk":topk,
+                        "cutoff_value":_to_py(cutoff_value),
+                        "items":items,
+                    }
+
+                    for m in model_names:
+                        v=s.get(m,None)
+                        r=ranks.get(m,None)
+                        if(isinstance(v,float) and math.isnan(v)):
+                            v=None
+                        if(isinstance(r,float) and math.isnan(r)):
+                            r=None
+                        per_model[m]["metrics"][metric]={
+                            "rank":(None if r is None else int(r)),
+                            "value":_to_py(v),
+                        }
+
+                return {
+                    "meta":{
+                        "metrics":metrics,
+                        "topk":topk,
+                        "rank_method":rank_method,
+                        "metric_orders":metric_orders,
+                        "filters":{
+                            "candidate_models":(None if candidate_models is None else [str(x) for x in candidate_models]),
+                            "exclude_models":(None if exclude_models is None else [str(x) for x in exclude_models]),
+                            "include_regex":include_regex,
+                            "exclude_regex":exclude_regex,
+                        }
+                    },
+                    "topk_by_metric":topk_by_metric,
+                    "per_model":per_model,
+                }
+            
+            def saveSimpleEvalReportJSON(
+                self,
+                save_path:str|Path,
+                indent:int=None,
+                metrics:list|set|tuple=None,
+                topk:int=5,
+                include_mean_iou:bool=False,
+                evaluation_args:dict=None,
+
+                metric_orders:dict=None,
+                
+                candidate_models:list|set|tuple=None,
+                exclude_models:list|set|tuple=None,
+                include_regex:str=None,
+                exclude_regex:str=None,
+
+                rank_method:str="min",
+
+                strict_metrics:bool=True,
+                dropna:bool=True,
+            ):
+                """
+                Saves a simple evaluation report with rankings for specified metrics to a JSON file.
+
+                Args:
+                    save_path (str|Path): Path to the output JSON file.
+                    indent (int, optional): Indentation level for the JSON output.
+                    metrics (list|set|tuple, optional): List of metric names to include in the report.
+                    topk (int, optional): Number of top models to include for each metric.
+                    include_mean_iou (bool, optional): Whether to include the mean IoU in the DataFrame.
+                    evaluation_args (dict, optional): Additional arguments for evaluation.
+                    metric_orders (dict, optional): Dictionary specifying the order ('asc' or 'desc') for each metric.
+                    candidate_models (list|set|tuple, optional): List of model names to consider.
+                    exclude_models (list|set|tuple, optional): List of model names to exclude.
+                    include_regex (str, optional): Regular expression to filter model names to include.
+                    exclude_regex (str, optional): Regular expression to filter model names to exclude.
+                    rank_method (str, optional): Method for ranking ('min', 'max', 'average', 'first', 'dense').
+                    strict_metrics (bool, optional): Whether to raise an error if specified metrics are missing.
+                    dropna (bool, optional): Whether to drop NaN values when ranking.
+                """
+                if(indent is None):
+                    indent=IOLib.JSONLib.DEFAULT_INDENT
+
+                report=self.generateSimpleEvalReport(
+                    metrics=metrics,
+                    topk=topk,
+                    include_mean_iou=include_mean_iou,
+                    evaluation_args=evaluation_args,
+                    metric_orders=metric_orders,
+                    candidate_models=candidate_models,
+                    exclude_models=exclude_models,
+                    include_regex=include_regex,
+                    exclude_regex=exclude_regex,
+                    rank_method=rank_method,
+                    strict_metrics=strict_metrics,
+                    dropna=dropna,
+                )
+                save_path=Path(save_path)
+                save_path.parent.mkdir(parents=True,exist_ok=True)
+
+                with open(save_path,mode="w",encoding="utf-8") as f:
+                    json.dump(report,f,ensure_ascii=False,indent=indent)
 
             @staticmethod
             def __normalize_model_filter(
@@ -34883,6 +35131,8 @@ class imgLib:
                 cm_fig_title_args:dict=None,
                 cm_fig_include_gt_predict_text:bool=False,
                 cm_fig_gt_predict_label_text_config:dict=None,
+                save_simple_eval_report_json:bool=False,
+                simple_eval_report_args:dict=None,
                 save_selected_models_json:bool=False,
                 selected_models_args:dict=None,
             ):
@@ -34914,6 +35164,8 @@ class imgLib:
                     cm_fig_title_args (dict, optional): Additional arguments for the confusion matrix figure title.
                     cm_fig_include_gt_predict_text (bool, optional): Whether to include ground truth and prediction text in the confusion matrix figure.
                     cm_fig_gt_predict_label_text_config (dict, optional): Configuration for ground truth and prediction label text in the confusion matrix figure.
+                    save_simple_eval_report_json (bool, optional): Whether to save the simple evaluation report JSON.
+                    simple_eval_report_args (dict, optional): Arguments for the simple evaluation report.
                     save_selected_models_json (bool, optional): Whether to save the selected models JSON.
                     selected_models_args (dict, optional): Arguments for selecting models.
 
@@ -35003,6 +35255,18 @@ class imgLib:
                         cm_fig_title_args=cm_fig_title_args,
                         cm_fig_include_gt_predict_text=cm_fig_include_gt_predict_text,
                         cm_fig_gt_predict_label_text_config=cm_fig_gt_predict_label_text_config,
+                    )
+
+                if(save_simple_eval_report_json):
+                    if(simple_eval_report_args is None):
+                        simple_eval_report_args={}
+                    simple_eval_report_args["include_mean_iou"]=include_mean_iou
+                    simple_eval_report_args["evaluation_args"]=evaluation_args
+                    
+                    save_simple_eval_report_json_save_path=output_dir_obj/Path("simple_eval_report.json")
+                    self.saveSimpleEvalReportJSON(
+                        save_simple_eval_report_json_save_path,
+                        **simple_eval_report_args
                     )
 
                 if(save_selected_models_json):
