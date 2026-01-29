@@ -35248,7 +35248,7 @@ class imgLib:
                         iou_threshold=cm_fig_iou_threshold,
                         include_background=cm_fig_include_background,
                         background_label=cm_fig_background_label,
-                        orientationr=cm_fig_orientation,
+                        orientation=cm_fig_orientation,
                         cm_fig_header_index_face_color=cm_fig_header_index_face_color,
                         cm_fig_gradient_cmap=cm_fig_gradient_cmap,
                         cm_fig_include_title=cm_fig_include_title,
