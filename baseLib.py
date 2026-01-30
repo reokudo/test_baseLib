@@ -24668,7 +24668,393 @@ class imgLib:
                 "n_gt_per_class":n_gt_per_class,
                 "n_pred_per_class":n_pred_per_class
             }
-        
+
+    @_protectedClass.fileStoreMyLibRegister
+    class wrapperYOLOANNAll(_FileStore.FileStoreParser):
+        """
+        A wrapper that bundles YOLOANN (GT/image) + YOLOANNResult (inference) + BBimgJson (transfer) per image.
+            - Explicit API: ann / result / bb
+            - Implicit API: Delegates result -> ann -> bb in order via __getattr__
+        """
+
+        def __init__(
+            self,
+            image_path:str|Path=None,
+            label_path:str|Path=None,
+            img_name:str=None,
+            is_auto_img_name:bool=False,
+            auto_img_name_function:callable=None,
+            img_reshape_log:list=None,
+            class_names_txt_path:str=None,
+            ann_file_mode:str=None,
+            img_specific_key_in_coco_data=None,
+            allow_reshape_flag:bool=True,
+            yolo_ann_obj=None,
+        ):
+            """
+            Initialize wrapperYOLOANNAll.
+            
+            Args:
+                image_path (str|Path, optional): Path to the image file.
+                label_path (str|Path, optional): Path to the label file.
+                img_name (str, optional): Image name identifier.
+                is_auto_img_name (bool): Whether to auto-generate image names.
+                auto_img_name_function (callable): Function to auto-generate image names.
+                img_reshape_log (list, optional): Log of image reshaping operations.
+                class_names_txt_path (str, optional): Path to class names text file.
+                ann_file_mode (str, optional): Annotation file mode.
+                img_specific_key_in_coco_data (optional): Specific key for image in COCO data.
+                allow_reshape_flag (bool): Whether to allow image reshaping.
+                yolo_ann_obj (imgLib.YOLOANN, optional): Pre-existing YOLOANN object. If provided, image_path and label_path are ignored.
+            """
+            if(auto_img_name_function is None):
+                auto_img_name_function=imgLib.wrapperYOLOANN.DEFAULT_AUTO_IMG_NAME_FUNCTION
+            if(img_reshape_log is None):
+                img_reshape_log=[]
+            else:
+                img_reshape_log=img_reshape_log.copy()
+
+            self.__wrapper_ann=None
+            self.__ann=None
+
+            if(yolo_ann_obj is not None):
+                if(not isinstance(yolo_ann_obj,imgLib.YOLOANN)):
+                    raise TypeError("yolo_ann_obj must be an instance of imgLib.YOLOANN.")
+                self.__ann=yolo_ann_obj
+            else:
+                if(image_path is None or label_path is None):
+                    raise TypeError("Either yolo_ann_obj or (image_path,label_path) must be specified.")
+                self.__wrapper_ann=imgLib.wrapperYOLOANN(
+                    image_path=image_path,
+                    label_path=label_path,
+                    img_name=img_name,
+                    is_auto_img_name=is_auto_img_name,
+                    auto_img_name_function=auto_img_name_function,
+                    img_reshape_log=img_reshape_log,
+                    class_names_txt_path=class_names_txt_path,
+                    ann_file_mode=ann_file_mode,
+                    img_specific_key_in_coco_data=img_specific_key_in_coco_data,
+                    allow_reshape_flag=allow_reshape_flag,
+                )
+                self.__ann=self.__wrapper_ann.yolo_ann
+
+            self.__results={}
+            self.__active_output_id=None
+
+        @property
+        def ann(self):
+            """
+            Get the YOLOANN object.
+
+            Returns:
+                imgLib.YOLOANN: The YOLOANN object.
+            """
+            return self.__ann
+
+        @property
+        def wrapper_ann(self):
+            """
+            Get the wrapperYOLOANN object.
+
+            Returns:
+                imgLib.wrapperYOLOANN: The wrapperYOLOANN object.
+            """
+            return self.__wrapper_ann
+
+        @property
+        def results(self):
+            """
+            Get a deep copy of the results dictionary.
+
+            Returns:
+                dict: A deep copy of the results dictionary.
+            """
+            return pyExLib.safety_deepcopy(self.__results)
+
+        def getActiveOutputId(self):
+            """
+            Get the active output ID.
+
+            Returns:
+                str|None: The active output ID, or None if not set.
+            """
+            return self.__active_output_id
+
+        def setActiveOutputId(self,output_id:str):
+            """
+            Set the active output ID.
+
+            Args:
+                output_id (str): The output ID to set as active.
+            
+            Raises:
+                KeyError: If the output_id is not found in results.
+            """
+            output_id=str(output_id)
+            if(output_id not in self.__results):
+                raise KeyError(f"output_id not found: {output_id}")
+            self.__active_output_id=output_id
+
+        def getActiveResult(self,allow_none:bool=True):
+            """
+            Get the active YOLOANNResult.
+
+            Args:
+                allow_none (bool): If True, return None when active_output_id is None or not found. If False, raise an error.
+
+            Returns:
+                imgLib.YOLOANNResult|None: The active YOLOANNResult, or None if not found and allow_none is True.
+            """
+            if(self.__active_output_id is None):
+                return None if allow_none else (_ for _ in ()).throw(ValueError("active_output_id is None"))
+            if(self.__active_output_id not in self.__results):
+                return None if allow_none else (_ for _ in ()).throw(KeyError(f"output_id not found: {self.__active_output_id}"))
+            return self.__results[self.__active_output_id]
+
+        def setResult(
+            self,
+            result_obj,
+            output_id:str="final",
+            exist_ok:bool=True,
+            set_active:bool=True
+        ):
+            """
+            Set a YOLOANNResult for a given output ID.
+
+            Args:
+                result_obj (imgLib.YOLOANNResult): The YOLOANNResult object to set.
+                output_id (str): The output ID to associate with the result.
+                exist_ok (bool): If False, raise an error if the output_id already exists.
+                set_active (bool): If True, set this output_id as the active output ID.
+            
+            Raises:
+                TypeError: If result_obj is not an instance of imgLib.YOLOANNResult.
+            """
+            if(not isinstance(result_obj,imgLib.YOLOANNResult)):
+                raise TypeError("result_obj must be an instance of imgLib.YOLOANNResult.")
+            output_id=str(output_id)
+            if((output_id in self.__results) and (not exist_ok)):
+                raise ValueError(f"result for output_id already exists: {output_id}")
+            self.__results[output_id]=result_obj
+            if(set_active):
+                self.__active_output_id=output_id
+
+        def setResultsFromProcReturn(
+            self,
+            r,
+            prefer_output_id:str=None,
+            index:int=0,
+            exist_ok:bool=True,
+            set_active:bool=True
+        ):
+            """
+            Set results from the return value of procYOLOPredict.
+
+            Args:
+                r (list|dict): The return value from procYOLOPredict.
+                prefer_output_id (str, optional): Preferred output ID to set as active.
+                index (int): Index to select from the list of results.
+                exist_ok (bool): If False, raise an error if the output_id already exists.
+                set_active (bool): If True, set the selected output_id as active.
+            
+            Raises:
+                TypeError: If r is not a list or dict.
+            """
+            if(isinstance(r,list)):
+                if(len(r)<=index):
+                    raise IndexError("index out of range for proc result list.")
+                self.setResult(r[index],output_id="final",exist_ok=exist_ok,set_active=set_active)
+                return
+
+            if(isinstance(r,dict)):
+                for k,v in r.items():
+                    if(not isinstance(v,list)):
+                        raise TypeError("proc result dict values must be list.")
+                    if(len(v)<=index):
+                        continue
+                    self.setResult(v[index],output_id=str(k),exist_ok=exist_ok,set_active=False)
+
+                if(set_active):
+                    if(prefer_output_id is not None and str(prefer_output_id) in self.__results):
+                        self.__active_output_id=str(prefer_output_id)
+                    elif(len(self.__results)>0):
+                        self.__active_output_id=list(self.__results.keys())[0]
+                return
+
+            raise TypeError("r must be list or dict returned by procYOLOPredict.")
+
+        def predictAndStore(
+            self,
+            models:list,
+            mode:str,
+            iou_threshold:float=None,
+            multi_class_mode:str=None,
+            gpu_flag:bool=True,
+            ensemble_args:dict=None,
+            yolo_args:dict=None,
+            check_model_names_flag:bool=True,
+            prefer_output_id:str=None,
+            index:int=0,
+        ):
+            """
+            Run prediction using procYOLOPredict and store the result.
+
+            Args:
+                models (list): List of model names or paths.
+                mode (str): Prediction mode.
+                iou_threshold (float, optional): IoU threshold for prediction.
+                multi_class_mode (str, optional): Multi-class handling mode.
+                gpu_flag (bool): Whether to use GPU for prediction.
+                ensemble_args (dict, optional): Arguments for ensemble prediction.
+                yolo_args (dict, optional): Additional YOLO arguments.
+                check_model_names_flag (bool): Whether to check model names.
+                prefer_output_id (str, optional): Preferred output ID to set as active.
+                index (int): Index to select from the list of results.
+
+            Returns:
+                list|dict: The return value from procYOLOPredict.
+            """
+            r=self.__ann.procYOLOPredict(
+                models=models,
+                mode=mode,
+                iou_threshold=iou_threshold,
+                multi_class_mode=multi_class_mode,
+                gpu_flag=gpu_flag,
+                ensemble_args=ensemble_args,
+                yolo_args=yolo_args,
+                check_model_names_flag=check_model_names_flag,
+            )
+            self.setResultsFromProcReturn(r,prefer_output_id=prefer_output_id,index=index,exist_ok=True,set_active=True)
+            return r
+
+        def getGTBBimgJsonObj(
+            self,
+            additional_dict:dict=None,
+            yolo_ann_additional_info_flag:bool=True
+        ):
+            """
+            Get the ground truth BBimgJson object.
+
+            Args:
+                additional_dict (dict, optional): Additional dictionary to include.
+                yolo_ann_additional_info_flag (bool): Whether to include YOLOANN additional info.
+
+            Returns:
+                imgLib.BBimgJson: The ground truth BBimgJson object.
+            """
+            return self.__ann.getBBimgJsonObj(
+                correct_ann_mode=True,
+                final_ann=None,
+                additional_dict=additional_dict,
+                yolo_ann_additional_info_flag=yolo_ann_additional_info_flag,
+            )
+
+        def getResultBBimgJsonObj(
+            self,
+            additional_dict:dict=None,
+            raw_yolo_ann_additional_info_flag:bool=True,
+            iou_args:dict=None
+        ):
+            """
+            Get the result BBimgJson object from the active result.
+
+            Args:
+                additional_dict (dict, optional): Additional dictionary to include.
+                raw_yolo_ann_additional_info_flag (bool): Whether to include raw YOLOANN additional info.
+                iou_args (dict, optional): Arguments for IoU calculation.
+
+            Returns:
+                imgLib.BBimgJson: The result BBimgJson object.
+            """
+            res=self.getActiveResult(allow_none=False)
+            return res.getResultBBimgJsonObj(
+                additional_dict=additional_dict,
+                raw_yolo_ann_additional_info_flag=raw_yolo_ann_additional_info_flag,
+                iou_args=iou_args,
+            )
+
+        def getBBimgJsonObj(self,mode:str="auto",**kwargs):
+            """
+            Get the BBimgJson object based on the specified mode.
+
+            Args:
+                mode (str): Mode to select BBimgJson object. Options are "gt", "result", and "auto".
+                **kwargs: Additional arguments to pass to the respective methods.
+
+            Returns:
+                imgLib.BBimgJson: The BBimgJson object.
+            """
+            mode=str(mode)
+            if(mode=="gt"):
+                return self.getGTBBimgJsonObj(**kwargs)
+            elif(mode=="result"):
+                return self.getResultBBimgJsonObj(**kwargs)
+            elif(mode=="auto"):
+                if(self.getActiveResult(allow_none=True) is None):
+                    return self.getGTBBimgJsonObj(**kwargs)
+                else:
+                    return self.getResultBBimgJsonObj(**kwargs)
+            else:
+                raise ValueError("mode must be 'gt','result','auto'.")
+
+        @classmethod
+        def fromBBimgJson(cls,bb_obj,ann_mode:str="auto",try_result:bool=True):
+            """
+            Create a wrapperYOLOANNAll instance from a BBimgJson object.
+
+            Args:
+                bb_obj (imgLib.BBimgJson): The BBimgJson object to convert.
+                ann_mode (str): Annotation mode for conversion.
+                try_result (bool): Whether to attempt to create a YOLOANNResult from the BBimgJson.
+
+            Returns:
+                wrapperYOLOANNAll: The created wrapperYOLOANNAll instance.
+            """
+            if(not isinstance(bb_obj,imgLib.BBimgJson)):
+                raise TypeError("bb_obj must be an instance of imgLib.BBimgJson.")
+
+            yolo_ann=bb_obj.toYOLOANN(ann_mode=ann_mode)
+            obj=cls(yolo_ann_obj=yolo_ann)
+
+            if(try_result):
+                try:
+                    yolo_res=bb_obj.toYOLOANNResult(ann_mode=ann_mode)
+                    obj.setResult(yolo_res,output_id="final",exist_ok=True,set_active=True)
+                except Exception:
+                    pass
+
+            return obj
+
+        def __getattr__(self,name):
+            """
+            Delegate attribute access to active result, ann, or bb in order.
+
+            Args:
+                name (str): The attribute name to access.
+
+            Returns:
+                Any: The attribute value from the delegated object.
+            
+            Raises:
+                AttributeError: If the attribute is not found in any of the delegated objects.
+            """
+            # priority: active result -> ann -> bb(auto)
+            res=self.getActiveResult(allow_none=True)
+            if(res is not None and hasattr(res,name)):
+                return getattr(res,name)
+
+            if(self.__ann is not None and hasattr(self.__ann,name)):
+                return getattr(self.__ann,name)
+
+            try:
+                bb=self.getBBimgJsonObj(mode="auto")
+                if(bb is not None and hasattr(bb,name)):
+                    return getattr(bb,name)
+            except Exception:
+                pass
+
+            raise AttributeError(name)
+
     @_protectedClass.fileStoreMyLibRegister
     class YOLOANNDataset(_FileStore.FileStoreParser):
         """
