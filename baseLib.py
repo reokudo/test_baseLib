@@ -22151,6 +22151,10 @@ class imgLib:
             - FP: predicted box not matched
             - FN: GT box not matched
 
+            Use cases:
+                - Use this when GT and prediction are available within the same BBimgJson instance (e.g., GT in YOLOANN_obj_additional_info and prediction in final_ann).
+                - If you want to compare this prediction to an external GT BBimgJson/dict, use getCompareImgWithGT() instead.
+
             Args:
                 gt_ann_mode (str): "gt" or "final" or "auto" (same as toYOLOANN).
                 pred_ann_mode (str): "final" or "gt" or "auto".
@@ -22487,6 +22491,10 @@ class imgLib:
         ):
             """
             Saves the compare visualization image (see getCompareImg()).
+
+            Use cases:
+                - Use this when both GT and prediction come from this BBimgJson instance.
+                - If GT is provided separately (another BBimgJson/dict), use saveCompareImgWithGT().
 
             Args:
                 save_path (str): Path to save the image.
@@ -24032,6 +24040,10 @@ class imgLib:
             - TP/FP are based on matching pred (self.final_ann) to GT.
             - GT is taken from `gt_bb` or from self's YOLOANN_obj_additional_info.
 
+            Use cases:
+                - Use this when the GT annotations are stored separately (gt_bb), or when you want to explicitly choose which GT to compare against.
+                - For self-contained comparisons within a single BBimgJson, use getCompareImg().
+
             Args:
                 gt_bb: ground truth BBimgJson or dict; if None and use_gt_from_self_if_none is True, use self's GT.
                 iou_threshold: IoU threshold for matching.
@@ -24198,6 +24210,10 @@ class imgLib:
         ):
             """
             Save comparison image.
+
+            Use cases:
+                - Use this when GT is given as another BBimgJson/dict (gt_bb), or when you want to explicitly control which GT is used.
+                - If GT and prediction are both in this instance, saveCompareImg() is sufficient.
 
             Args:
                 save_path: path to save the image.
