@@ -3284,6 +3284,21 @@ class pyExLib:
             self.__start=None
             self.__stop=None
 
+        def _procStart(self,dt_obj:datetime):
+            """
+            Internal method to start the timer.
+
+            Args:
+                dt_obj (datetime): Datetime object to set as start time.
+            
+            Raises:
+                ValueError: If the timer has already started.
+            """
+            if(self.__start==None):
+                self.__start=dt_obj
+            else:
+                raise ValueError("The timer has already started!")
+
         def start(self):
             """
             Starts the timer.
@@ -3291,11 +3306,23 @@ class pyExLib:
             Raises:
                 ValueError: If the timer has already started.
             """
-            if(self.__start==None):
-                self.__start=datetime.now()
-            else:
-                raise ValueError("The timer has already started!")
+            self._procStart(datetime.now())
         
+        def _procStop(self,dt_obj:datetime):
+            """
+            Internal method to stop the timer.
+
+            Args:
+                dt_obj (datetime): Datetime object to set as stop time.
+
+            Raises:
+                ValueError: If the timer has not started.
+            """
+            if(self.__start!=None and self.__stop==None):
+                self.__stop=dt_obj
+            else:
+                raise ValueError("The timer has not started or has already stopped!")
+
         def stop(self):
             """
             Stops the timer.
@@ -3303,10 +3330,7 @@ class pyExLib:
             Raises:
                 ValueError: If the timer has not started.
             """
-            if(self.__start!=None and self.__stop==None):
-                self.__stop=datetime.now()
-            else:
-                raise ValueError("The timer has not started or has already stopped!")
+            self._procStop(datetime.now())
 
         def sleep(self,sec:float):
             """
@@ -3386,6 +3410,320 @@ class pyExLib:
                 dict: Dictionary containing start, stop, and elapsed time.
             """
             return {"start":self.__start,"stop":self.__stop,"time":self.getTime()}
+
+
+        def to_payload(self):
+            """
+            Converts the processTIme instance to a payload dictionary.
+
+            Returns:
+                dict: Payload dictionary representation of the processTIme instance.
+            """
+            return pyExLib.safety_deepcopy(self.__dict__)
+        
+        @classmethod
+        def from_payload(cls,payload:dict,store:"IOLib.FileStore"):
+            """
+            Creates a processTIme instance from a payload dictionary.
+
+            Args:
+                payload (dict): Payload dictionary representation of a processTIme instance.
+                store (IOLib.FileStore): FileStore instance for loading processTime instances.
+
+            Returns:
+                processTimeContainer: Created processTIme instance.
+            """
+            obj=cls.__new__(cls)
+            obj.__dict__.update(payload)
+            return obj
+
+    @_protectedClass.fileStoreMyLibRegister
+    class processTimeContainer(_FileStore.FileStoreParser):
+        """
+        Container for managing multiple processTime instances.
+        """
+        
+        def __init__(self):
+            """
+            Initializes the processTimeContainer instance.
+            """
+            self.__pt_data={}
+            self.__tag_data={}
+
+        def __len__(self):
+            """
+            Gets the number of processTime instances in the container.
+            
+            Returns:
+                int: Number of processTime instances.
+            """
+            return len(self.__pt_data)
+
+        def __str__(self):
+            """
+            Returns a string representation of the processTimeContainer instance.
+            
+            Returns:
+                str: String representation of the processTimeContainer instance.
+            """
+            rstr="processTimeContainer:\n"
+            for name,pt_info in self.__pt_data.items():
+                rstr+=f"  [{name}]: {pt_info['pt']}\n"
+            return rstr
+
+        def to_payload(self):
+            """
+            Converts the processTimeContainer instance to a payload dictionary.
+
+            Returns:
+                dict: Payload dictionary representation of the processTimeContainer instance.
+            """
+            return pyExLib.safety_deepcopy(self.__dict__)
+        
+        @classmethod
+        def from_payload(cls,payload:dict,store:"IOLib.FileStore"):
+            """
+            Creates a processTimeContainer instance from a payload dictionary.
+
+            Args:
+                payload (dict): Payload dictionary representation of a processTimeContainer instance.
+                store (IOLib.FileStore): FileStore instance for loading processTime instances.
+
+            Returns:
+                processTimeContainer: Created processTimeContainer instance.
+            """
+            obj=cls.__new__(cls)
+            obj.__dict__.update(payload)
+            return obj
+
+        def getNames(self):
+            """
+            Gets the list of processTime instance names in the container.
+
+            Returns:
+                list: List of processTime instance names.
+            """
+            return list(self.__pt_data.keys())
+        
+        def getTagData(self):
+            """
+            Gets the tag data in the container.
+
+            Returns:
+                dict: Tag data.
+            """
+            return pyExLib.safety_deepcopy(self.__tag_data)
+
+        def append(
+            self,
+            name:str=None,
+            tags:list|tuple|set=None,
+        ):
+            """
+            Appends a new processTime instance to the container.
+
+            Args:
+                name (str or None): Name of the processTime instance. If None, a default name is assigned.
+                tags (list, tuple, or set or None): Tags associated with the processTime instance.
+
+            Raises:
+                ValueError: If a processTime with the same name already exists.
+                TypeError: If tags is not a list, tuple, or set.
+            """
+            if(name is None):
+                name=f"processTime_{len(self.__pt_data)}"
+            name=str(name)
+            if(name in self.__pt_data):
+                raise ValueError(f"Process time with name '{name}' already exists.")
+            
+            if(tags is None):
+                tags=[]
+            elif(not isinstance(tags,(list,tuple,set))):
+                raise TypeError("tags must be list, tuple, or set")
+            else:
+                tags=[str(t) for t in tags]
+
+            for tag in tags:
+                if(tag not in self.__tag_data.keys()):
+                    self.__tag_data[tag]={
+                        "tag_name":tag,
+                        "pt_name_list":[name]
+                    }
+                else:
+                    self.__tag_data[tag]["pt_name_list"].append(name)
+                        
+            self.__pt_data[name]={
+                "name":name,
+                "pt":pyExLib.processTime(name=name),
+                "tags":tags,
+            }
+        
+        def getProcessTimeObj(self,name:str):
+            """
+            Gets the processTime instance by name.
+
+            Args:
+                name (str): Name of the processTime instance.
+
+            Returns:
+                processTime: The processTime instance.
+
+            Raises:
+                KeyError: If the processTime with the specified name does not exist.
+                ValueError: If the internal data is invalid.
+            """
+            if(name not in self.__pt_data):
+                raise KeyError(f"Process time with name '{name}' does not exist.")
+            
+            tmp_data=self.__pt_data[name]
+            if(not isinstance(tmp_data,dict)):
+                raise ValueError("Internal error: invalid process time data.")
+            
+            pt_data=tmp_data.get("pt",None)
+            if(not isinstance(pt_data,pyExLib.processTime)):
+                raise ValueError("Internal error: invalid process time object.")
+            
+            return pt_data
+
+        def reset(self,name:str):
+            """
+            Resets the specified processTime instance.
+
+            Args:
+                name (str): Name of the processTime instance.
+
+            Raises:
+                KeyError: If the processTime with the specified name does not exist.
+            """
+            self.getProcessTimeObj(name).reset()
+
+        def start(self,name:str):
+            """
+            Starts the specified processTime instance.
+
+            Args:
+                name (str): Name of the processTime instance.
+
+            Raises:
+                KeyError: If the processTime with the specified name does not exist.
+            """
+            self.getProcessTimeObj(name).start()
+
+        def stop(self,name:str):
+            """
+            Stops the specified processTime instance.
+
+            Args:
+                name (str): Name of the processTime instance.
+
+            Raises:
+                KeyError: If the processTime with the specified name does not exist.
+            """
+            self.getProcessTimeObj(name).stop()
+
+        def sleep(self,sec:float):
+            """
+            Sleeps for a specified time.
+
+            Args:
+                sec (float): Time to sleep in seconds.
+            """
+            time.sleep(sec)
+
+        def msSleep(self,milliseconds:float):
+            """
+            Sleeps for a specified time in milliseconds.
+
+            Args:
+                milliseconds (float): Time to sleep in milliseconds.
+            """
+            self.sleep(milliseconds/1000)
+
+        def getTime(self,name:str):
+            """
+            Gets the elapsed time of the specified processTime instance.
+
+            Args:
+                name (str): Name of the processTime instance.
+
+            Raises:
+                KeyError: If the processTime with the specified name does not exist.
+            """
+            return self.getProcessTimeObj(name).getTime()
+        
+        def getTimeSec(self,name:str):
+            """
+            Gets the elapsed time in seconds of the specified processTime instance.
+
+            Args:
+                name (str): Name of the processTime instance.
+
+            Raises:
+                KeyError: If the processTime with the specified name does not exist.
+            """
+            return self.getProcessTimeObj(name).getTimeSec()
+
+        def __filterTargetNames(
+            self,
+            names:list=None,
+            tags:list=None,
+        ):
+            """
+            Filters target processTime instance names based on provided names and tags.
+
+            Args:
+                names (list or None): List of processTime instance names to filter. If None, all instances are considered.
+                tags (list or None): List of tags to filter processTime instances. If None, no tag filtering is applied.
+
+            Returns:
+                set: Set of filtered processTime instance names.
+            """
+            target_names=None
+            if(names is None):
+                target_names=set(self.getNames())
+            else:
+                target_names=set(names)
+
+            if(tags is not None):
+                for tag in tags:
+                    if(tag in self.__tag_data.keys()):
+                        tag_name_list=set(self.__tag_data[tag]["pt_name_list"])
+                        target_names=target_names.intersection(tag_name_list)
+            return target_names
+
+        def startAll(
+            self,
+            names:list=None,
+            tags:list=None,
+        ):
+            """
+            Starts all or specified processTime instances in the container.
+
+            Args:
+                names (list or None): List of processTime instance names to start. If None, all instances are started.
+                tags (list or None): List of tags to filter processTime instances to start. If None, no tag filtering is applied.
+            """
+            target_names=self.__filterTargetNames(names,tags)
+            now_time=datetime.now()            
+            for name in target_names:
+                self.getProcessTimeObj(name)._procStart(now_time)
+                
+        def stopAll(
+            self,
+            names:list=None,
+            tags:list=None,
+        ):
+            """
+            Stops all or specified processTime instances in the container.
+
+            Args:
+                names (list or None): List of processTime instance names to stop. If None, all instances are stoped.
+                tags (list or None): List of tags to filter processTime instances to stop. If None, no tag filtering is applied.
+            """
+            target_names=self.__filterTargetNames(names,tags)
+            now_time=datetime.now()            
+            for name in target_names:
+                self.getProcessTimeObj(name)._procStop(now_time)
 
     class DataFrameExLib:
         """
