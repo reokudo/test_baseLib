@@ -3691,6 +3691,24 @@ class pyExLib:
                         target_names=target_names.intersection(tag_name_list)
             return target_names
 
+        def generator(
+            self,
+            names:list=None,
+            tags:list=None,
+        ):
+            target_names=self.__filterTargetNames(names,tags)
+            for out_name in target_names:
+                out_info=self.__pt_data[out_name]
+                if(not isinstance(out_info,dict)):
+                    raise ValueError("Internal error: invalid process time data.")
+                    
+                out_tags=out_info.get("tags",[])
+                out_ps_obj=out_info.get("pt",None)
+
+                if(not isinstance(out_ps_obj,pyExLib.processTime)):
+                    raise ValueError("Internal error: invalid process time object.")
+                yield (out_name,out_tags,out_ps_obj)
+
         def startAll(
             self,
             names:list=None,
