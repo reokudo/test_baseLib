@@ -3696,12 +3696,22 @@ class pyExLib:
             names:list=None,
             tags:list=None,
         ):
+            """
+            Generator to iterate over specified processTime instances in the container.
+
+            Args:
+                names (list or None): List of processTime instance names to iterate over. If None, all instances are iterated.
+                tags (list or None): List of tags to filter processTime instances to iterate over. If None, no tag filtering is applied.
+
+            Yields:
+                tuple: Tuple containing (name, tags, processTime instance).
+            """
             target_names=self.__filterTargetNames(names,tags)
             for out_name in target_names:
                 out_info=self.__pt_data[out_name]
                 if(not isinstance(out_info,dict)):
                     raise ValueError("Internal error: invalid process time data.")
-                    
+
                 out_tags=out_info.get("tags",[])
                 out_ps_obj=out_info.get("pt",None)
 
@@ -3721,10 +3731,9 @@ class pyExLib:
                 names (list or None): List of processTime instance names to start. If None, all instances are started.
                 tags (list or None): List of tags to filter processTime instances to start. If None, no tag filtering is applied.
             """
-            target_names=self.__filterTargetNames(names,tags)
-            now_time=datetime.now()            
-            for name in target_names:
-                self.getProcessTimeObj(name)._procStart(now_time)
+            now_time=datetime.now()
+            for item_name,item_tags,item_ps_obj in self.generator(names,tags):
+                item_ps_obj._procStart(now_time)
                 
         def stopAll(
             self,
@@ -3738,10 +3747,30 @@ class pyExLib:
                 names (list or None): List of processTime instance names to stop. If None, all instances are stoped.
                 tags (list or None): List of tags to filter processTime instances to stop. If None, no tag filtering is applied.
             """
-            target_names=self.__filterTargetNames(names,tags)
-            now_time=datetime.now()            
-            for name in target_names:
-                self.getProcessTimeObj(name)._procStop(now_time)
+            now_time=datetime.now()
+            for item_name,item_tags,item_ps_obj in self.generator(names,tags):
+                item_ps_obj._procStop(now_time)
+
+        def getAll(
+            self,
+            names:list=None,
+            tags:list=None,
+        ):
+            """
+
+            Args:
+                names (list or None): List of processTime instance names to stop. If None, all instances are stoped.
+                tags (list or None): List of tags to filter processTime instances to stop. If None, no tag filtering is applied.
+            """
+            r={}
+            for item_name,item_tags,item_ps_obj in self.generator(names,tags):
+                r[item_name]={
+                    "name":item_name,
+                    "tags":item_tags,
+                    "processTime_obj":item_ps_obj,
+                    "processTime":item_ps_obj.get()
+                }
+            return r
 
     class DataFrameExLib:
         """
