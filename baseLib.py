@@ -184,6 +184,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
+import matplotlib.patches as mpatches
 
 __all__=[
     "pyExLib",
@@ -3556,6 +3557,7 @@ class pyExLib:
                 "name":name,
                 "pt":pyExLib.processTime(name=name),
                 "tags":tags,
+                "history_sec":[],
             }
         
         def getProcessTimeObj(self,name:str):
@@ -3771,7 +3773,1009 @@ class pyExLib:
                     "processTime":item_ps_obj.get()
                 }
             return r
+        
+        @staticmethod
+        def __calcStatisticsSec(
+            values:list,
+            percentiles:list|tuple=(0,25,50,75,100),
+            ddof:int=0,
+            round_ndigits:int|None=None,
+        )->dict:
+            """
+            Calculate statistics for a list of seconds (float).
+            Returns dict with count/sum/mean/std/var/min/max/percentiles.
 
+            Args:
+                values (list): List of float values (seconds).
+                percentiles (list or tuple): List of percentiles to calculate.
+                ddof (int): Delta degrees of freedom for std/var calculation.
+                round_ndigits (int or None): Number of digits to round the results. If None, no rounding is applied.
+
+            Returns:
+                dict: Dictionary containing statistics. The dictionary includes:
+                    - count (int): Number of valid samples.
+                    - sum (float or None): Sum of values.
+                    - mean (float or None): Mean of values.
+                    - std (float or None): Standard deviation of values.
+                    - var (float or None): Variance of values.
+                    - min (float or None): Minimum value.
+                    - max (float or None): Maximum value.
+                    - percentiles (dict): Dictionary of calculated percentiles.
+            """
+            if(values is None):
+                values=[]
+            vals=[float(v) for v in values if(v is not None)]
+            n=len(vals)
+            if(n<=0):
+                return {
+                    "count":0,
+                    "sum":None,
+                    "mean":None,
+                    "std":None,
+                    "var":None,
+                    "min":None,
+                    "max":None,
+                    "percentiles":{},
+                }
+
+            arr=np.array(vals,dtype=float)
+            s=float(arr.sum())
+            mn=float(arr.mean())
+            vmin=float(arr.min())
+            vmax=float(arr.max())
+
+            # std/var (avoid invalid ddof)
+            if(ddof is None):
+                ddof=0
+            ddof=int(ddof)
+            if(n-1<ddof):
+                std=None
+                var=None
+            else:
+                std=float(arr.std(ddof=ddof))
+                var=float(arr.var(ddof=ddof))
+
+            # percentiles
+            pmap={}
+            if(percentiles is not None):
+                ps=[float(p) for p in percentiles]
+                try:
+                    qs=np.percentile(arr,ps,method="linear")
+                except TypeError:
+                    qs=np.percentile(arr,ps,interpolation="linear")
+                for p,q in zip(ps,qs):
+                    key=str(int(p)) if(abs(p-int(p))<1e-9) else str(p)
+                    pmap[key]=float(q)
+
+            out={
+                "count":int(n),
+                "sum":s,
+                "mean":mn,
+                "std":std,
+                "var":var,
+                "min":vmin,
+                "max":vmax,
+                "percentiles":pmap,
+            }
+
+            if(round_ndigits is not None):
+                rd=int(round_ndigits)
+                for k in ("sum","mean","std","var","min","max"):
+                    if(out[k] is not None):
+                        out[k]=round(out[k],rd)
+                out["percentiles"]={k:(round(v,rd) if(v is not None) else None) for k,v in out["percentiles"].items()}  # generator
+                out["percentiles"]={k:v for k,v in out["percentiles"].items()}  # realize
+
+            return out
+
+        def __getTimeSecSafe(self,pt_obj:"pyExLib.processTime"):
+            """
+            Returns elapsed seconds or None.
+
+            Args:
+                pt_obj (processTime): processTime instance.
+
+            Returns:
+                float or None: Elapsed seconds or None if not available.
+            """
+            if(not isinstance(pt_obj,pyExLib.processTime)):
+                return None
+            dt=pt_obj.getTime()
+            if(dt is None):
+                return None
+            try:
+                return float(dt.total_seconds())
+            except Exception:
+                return None
+
+        def getTimeSecMap(
+            self,
+            names:list=None,
+            tags:list=None,
+            ignore_none:bool=True,
+        )->dict:
+            """
+            Returns {name:seconds} for current measured times.
+
+            Args:
+                names (list or None): List of processTime instance names to include. If None, all instances are included.
+                tags (list or None): List of tags to filter processTime instances to include. If None, no tag filtering is applied.
+                ignore_none (bool): Whether to ignore instances with None elapsed time.
+
+            Returns:
+                dict: Dictionary mapping processTime instance names to their elapsed seconds. 
+            """
+            r={}
+            for item_name,item_tags,item_ps_obj in self.generator(names,tags):
+                sec=self.__getTimeSecSafe(item_ps_obj)
+                if(sec is None and ignore_none):
+                    continue
+                r[item_name]=sec
+            return r
+
+        def getStatisticsSec(
+            self,
+            names:list=None,
+            tags:list=None,
+            percentiles:list|tuple=(0,25,50,75,100),
+            ddof:int=0,
+            ignore_none:bool=True,
+            include_by_name:bool=False,
+            round_ndigits:int|None=None,
+        )->dict:
+            """
+            Statistics over *current* timers (seconds).
+
+            Args:
+                names (list or None): List of processTime instance names to include. If None, all instances are included.
+                tags (list or None): List of tags to filter processTime instances to include. If None, no tag filtering is applied.
+                percentiles (list or tuple): List of percentiles to calculate.
+                ddof (int): Delta degrees of freedom for std/var calculation.
+                ignore_none (bool): Whether to ignore instances with None elapsed time.
+                include_by_name (bool): Whether to include individual times by name in the output.
+                round_ndigits (int or None): Number of digits to round the results. If None, no rounding is applied.
+
+            Returns:
+                dict: Dictionary containing statistics. The dictionary includes:
+                    - count (int): Number of valid samples.
+                    - sum (float or None): Sum of values.
+                    - mean (float or None): Mean of values.
+                    - std (float or None): Standard deviation of values.
+                    - var (float or None): Variance of values.
+                    - min (float or None): Minimum value.
+                    - max (float or None): Maximum value.
+                    - percentiles (dict): Dictionary of calculated percentiles.
+            """
+            sec_map=self.getTimeSecMap(names,tags,ignore_none=ignore_none)
+            stats=self.__calcStatisticsSec(
+                list(sec_map.values()),
+                percentiles=percentiles,
+                ddof=ddof,
+                round_ndigits=round_ndigits,
+            )
+            if(include_by_name):
+                stats["by_name"]=sec_map
+            return stats
+
+        def getTagStatisticsSec(
+            self,
+            tags:list|tuple|set=None,
+            percentiles:list|tuple=(0,25,50,75,100),
+            ddof:int=0,
+            ignore_none:bool=True,
+            round_ndigits:int|None=None,
+        )->dict:
+            """
+            Statistics by each tag over *current* timers.
+
+            Args:
+                tags (list, tuple, or set or None): List of tags to calculate statistics for. If None, all tags are considered.
+                percentiles (list or tuple): List of percentiles to calculate.
+                ddof (int): Delta degrees of freedom for std/var calculation.
+                ignore_none (bool): Whether to ignore instances with None elapsed time.
+                round_ndigits (int or None): Number of digits to round the results. If None, no rounding is applied.
+            
+            Returns:
+                dict: Dictionary mapping tags to their statistics. Each value is a dictionary containing:
+                    - count (int): Number of valid samples.
+                    - sum (float or None): Sum of values.
+                    - mean (float or None): Mean of values.
+                    - std (float or None): Standard deviation of values.
+                    - var (float or None): Variance of values.
+                    - min (float or None): Minimum value.
+                    - max (float or None): Maximum value.
+                    - percentiles (dict): Dictionary of calculated percentiles.
+            """
+            if(tags is None):
+                tags=list(self.__tag_data.keys())
+            else:
+                tags=[str(t) for t in tags]
+
+            out={}
+            for tag in tags:
+                out[tag]=self.getStatisticsSec(
+                    names=None,
+                    tags=[tag],
+                    percentiles=percentiles,
+                    ddof=ddof,
+                    ignore_none=ignore_none,
+                    include_by_name=False,
+                    round_ndigits=round_ndigits,
+                )
+            return out
+
+        def record(
+            self,
+            name:str,
+            allow_running:bool=True,
+            reset:bool=False,
+        ):
+            """
+            Append current elapsed seconds into history_sec.
+            If allow_running=False, requires stop time to exist.
+
+            Args:
+                name (str): Name of the processTime instance.
+                allow_running (bool): Whether to allow recording while the timer is still running.
+                reset (bool): Whether to reset the timer after recording.
+
+            Returns:
+                float or None: Recorded seconds, or None if time is not available.
+            """
+            name=str(name)
+            if(name not in self.__pt_data):
+                raise KeyError(f"Process time with name '{name}' does not exist.")
+
+            info=self.__pt_data[name]
+            if(not isinstance(info,dict)):
+                raise ValueError("Internal error: invalid process time data.")
+
+            pt_obj=info.get("pt",None)
+            if(not isinstance(pt_obj,pyExLib.processTime)):
+                raise ValueError("Internal error: invalid process time object.")
+
+            g=pt_obj.get()
+            dt=g.get("time",None)
+            if(dt is None):
+                return None
+
+            if((not allow_running) and g.get("stop",None) is None):
+                raise ValueError("The timer is still running. Stop it before recording.")
+
+            sec=float(dt.total_seconds())
+            if("history_sec" not in info or not isinstance(info["history_sec"],list)):
+                info["history_sec"]=[]
+            info["history_sec"].append(sec)
+
+            if(reset):
+                pt_obj.reset()
+            return sec
+
+        def stopAndRecord(
+            self,
+            name:str,
+            reset:bool=False,
+        ):
+            """
+            stop(name) then record(name, allow_running=False).
+
+            Args:
+                name (str): Name of the processTime instance.
+                reset (bool): Whether to reset the timer after recording.
+
+            Returns:
+                float or None: Recorded seconds, or None if time is not available.
+            """
+            self.stop(name)
+            return self.record(name,allow_running=False,reset=reset)
+
+        def recordAll(
+            self,
+            names:list=None,
+            tags:list=None,
+            allow_running:bool=True,
+            reset:bool=False,
+        )->dict:
+            """
+            Record all matched timers into history_sec.
+            Returns {name: recorded_sec_or_None}
+
+            Args:
+                names (list or None): List of processTime instance names to record. If None, all instances are recorded.
+                tags (list or None): List of tags to filter processTime instances to record. If None, no tag filtering is applied.
+                allow_running (bool): Whether to allow recording while the timer is still running.
+                reset (bool): Whether to reset the timer after recording.
+
+            Returns:
+                dict: Dictionary mapping processTime instance names to their recorded seconds or None.
+            """
+            r={}
+            for item_name,item_tags,item_ps_obj in self.generator(names,tags):
+                r[item_name]=self.record(item_name,allow_running=allow_running,reset=reset)
+            return r
+
+        def stopAndRecordAll(
+            self,
+            names:list=None,
+            tags:list=None,
+            reset:bool=False,
+        )->dict:
+            """
+            stopAll(names,tags) then recordAll(names,tags,allow_running=False).
+
+            Args:
+                names (list or None): List of processTime instance names to record. If None, all instances are recorded.
+                tags (list or None): List of tags to filter processTime instances to record. If None, no tag filtering is applied.
+                reset (bool): Whether to reset the timer after recording.
+            
+            Returns:
+                dict: Dictionary mapping processTime instance names to their recorded seconds or None.
+            """
+            self.stopAll(names,tags)
+            return self.recordAll(names,tags,allow_running=False,reset=reset)
+
+        def getHistorySec(self,name:str)->list:
+            """
+            Returns history list (seconds) for a name.
+
+            Args:
+                name (str): Name of the processTime instance.
+
+            Returns:
+                list: List of recorded seconds.
+            """
+            name=str(name)
+            if(name not in self.__pt_data):
+                raise KeyError(f"Process time with name '{name}' does not exist.")
+            info=self.__pt_data[name]
+            h=info.get("history_sec",[])
+            if(not isinstance(h,list)):
+                return []
+            return [float(x) for x in h if(x is not None)]
+
+        def clearHistory(self,name:str):
+            """
+            Clears history_sec for a name.
+
+            Args:
+                name (str): Name of the processTime instance.
+
+            Raises:
+                KeyError: If the processTime with the specified name does not exist.
+            """
+            name=str(name)
+            if(name not in self.__pt_data):
+                raise KeyError(f"Process time with name '{name}' does not exist.")
+            info=self.__pt_data[name]
+            info["history_sec"]=[]
+
+        def getHistoryStatisticsSec(
+            self,
+            name:str,
+            percentiles:list|tuple=(0,25,50,75,100),
+            ddof:int=0,
+            round_ndigits:int|None=None,
+        )->dict:
+            """
+            Statistics over recorded history for one name.
+            
+            Args:
+                name (str): Name of the processTime instance.
+                percentiles (list or tuple): List of percentiles to calculate.
+                ddof (int): Delta degrees of freedom for std/var calculation.
+                round_ndigits (int or None): Number of digits to round the results. If None, no rounding is applied.
+
+            Returns:
+                dict: Dictionary containing statistics. The dictionary includes:
+                    - count (int): Number of valid samples.
+                    - sum (float or None): Sum of values.
+                    - mean (float or None): Mean of values.
+                    - std (float or None): Standard deviation of values.
+                    - var (float or None): Variance of values.
+                    - min (float or None): Minimum value.
+                    - max (float or None): Maximum value.
+                    - percentiles (dict): Dictionary of calculated percentiles.
+            """
+            h=self.getHistorySec(name)
+            return self.__calcStatisticsSec(
+                h,
+                percentiles=percentiles,
+                ddof=ddof,
+                round_ndigits=round_ndigits,
+            )
+
+        def getTagHistoryStatisticsSec(
+            self,
+            tags:list|tuple|set=None,
+            percentiles:list|tuple=(0,25,50,75,100),
+            ddof:int=0,
+            round_ndigits:int|None=None,
+        )->dict:
+            """
+            Statistics by tag over recorded histories (merged samples).
+
+            Args:
+                tags (list, tuple, or set or None): List of tags to calculate statistics for. If None, all tags are considered.
+                percentiles (list or tuple): List of percentiles to calculate.
+                ddof (int): Delta degrees of freedom for std/var calculation.
+                round_ndigits (int or None): Number of digits to round the results. If None, no rounding is applied.
+
+            Returns:
+                dict: Dictionary mapping tags to their statistics. Each value is a dictionary containing:
+                    - count (int): Number of valid samples.
+                    - sum (float or None): Sum of values.
+                    - mean (float or None): Mean of values.
+                    - std (float or None): Standard deviation of values.
+                    - var (float or None): Variance of values.
+                    - min (float or None): Minimum value.
+                    - max (float or None): Maximum value.
+                    - percentiles (dict): Dictionary of calculated percentiles.
+            """
+            if(tags is None):
+                tags=list(self.__tag_data.keys())
+            else:
+                tags=[str(t) for t in tags]
+
+            out={}
+            for tag in tags:
+                secs=[]
+                for item_name,item_tags,item_ps_obj in self.generator(names=None,tags=[tag]):
+                    secs.extend(self.getHistorySec(item_name))
+                out[tag]=self.__calcStatisticsSec(
+                    secs,
+                    percentiles=percentiles,
+                    ddof=ddof,
+                    round_ndigits=round_ndigits,
+                )
+            return out
+        
+        def getAllHistoryStatisticsSec(
+            self,
+            names:list=None,
+            tags:list=None,
+            percentiles:list|tuple=(0,25,50,75,100),
+            ddof:int=0,
+            round_ndigits:int|None=None,
+            include_by_name:bool=False,
+        )->dict:
+            """
+            Statistics over merged histories of all matched timers.
+
+            Args:
+                names (list or None): List of processTime instance names to include. If None,
+                tags (list or None): List of tags to filter processTime instances to include. If None, no tag filtering is applied.
+                percentiles (list or tuple): List of percentiles to calculate.
+                ddof (int): Delta degrees of freedom for std/var calculation.
+                round_ndigits (int or None): Number of digits to round the results. If None, no rounding is applied.
+                include_by_name (bool): Whether to include individual histories by name in the output.
+
+            Returns:
+                dict: Dictionary containing statistics. The dictionary includes:
+                    - count (int): Number of valid samples.
+                    - sum (float or None): Sum of values.
+                    - mean (float or None): Mean of values.
+                    - std (float or None): Standard deviation of values.
+                    - var (float or None): Variance of values.
+                    - min (float or None): Minimum value.
+                    - max (float or None): Maximum value.
+                    - percentiles (dict): Dictionary of calculated percentiles.
+            """
+            secs=[]
+            by_name={}
+            for item_name,item_tags,item_ps_obj in self.generator(names,tags):
+                h=self.getHistorySec(item_name)
+                if(len(h)<=0):
+                    continue
+                secs.extend(h)
+                if(include_by_name):
+                    by_name[item_name]=h
+
+            stats=self.__calcStatisticsSec(
+                secs,
+                percentiles=percentiles,
+                ddof=ddof,
+                round_ndigits=round_ndigits,
+            )
+            if(include_by_name):
+                stats["by_name"]=by_name
+            return stats
+
+        def getMergeHistoryStatisticsSec(
+            self,
+            names:list=None,
+            tags:list=None,
+            percentiles:list|tuple=(0,25,50,75,100),
+            ddof:int=0,
+            round_ndigits:int|None=None,
+            include_by_name:bool=False,
+        )->dict:
+            """
+            Merged history statistics: all / by_name / by_tag.
+            
+            Args:
+                names (list or None): List of processTime instance names to include. If None,
+                tags (list or None): List of tags to filter processTime instances to include. If None, no tag filtering is applied.
+                percentiles (list or tuple): List of percentiles to calculate.
+                ddof (int): Delta degrees of freedom for std/var calculation.
+                round_ndigits (int or None): Number of digits to round the results. If None, no rounding is applied.
+                include_by_name (bool): Whether to include individual histories by name in the output.
+
+            Returns:
+                dict: Dictionary with keys "all", "by_name", and "by_tag", each containing their respective statistics dictionaries.
+            """
+            return {
+                "all":self.getAllHistoryStatisticsSec(
+                    names=names,
+                    tags=tags,
+                    percentiles=percentiles,
+                    ddof=ddof,
+                    round_ndigits=round_ndigits,
+                    include_by_name=include_by_name,
+                ),
+                "by_name":{
+                    k:self.getHistoryStatisticsSec(
+                        k,
+                        percentiles=percentiles,
+                        ddof=ddof,
+                        round_ndigits=round_ndigits,
+                    ) for k in (names if(names is not None) else self.getNames())
+                },
+                "by_tag":self.getTagHistoryStatisticsSec(
+                    tags=tags,
+                    percentiles=percentiles,
+                    ddof=ddof,
+                    round_ndigits=round_ndigits,
+                ),
+            }
+        
+        def getHistorySecMap(
+            self,
+            names:list=None,
+            tags:list=None,
+        )->dict:
+            """
+            Returns history map:
+                - `{name:[sec,...]}` (history)
+            
+            Args:
+                names (list or None): List of processTime instance names to include. If None, all instances are included.
+                tags (list or None): List of tags to filter processTime instances to include. If None, no tag filtering is applied.
+
+            Returns:
+                dict: Dictionary mapping processTime instance names to their list of recorded seconds.                
+            """
+            r={}
+            for item_name,item_tags,item_ps_obj in self.generator(names,tags):
+                h=self.getHistorySec(item_name)
+                if(len(h)<=0):
+                    continue
+                r[item_name]=h
+            return r
+
+        def getTagHistorySecMap(
+            self,
+            names:list=None,
+            tags:list=None,
+        )->dict:
+            """
+            Returns tag history map:
+                - `{tag:[sec,...]}` (history)
+
+            - If a timer has multiple tags, its history is added to each tag list.
+            - If tags is not None, only those tags are returned.
+            
+            Args:
+                names (list or None): List of processTime instance names to include. If None, all instances are included.
+                tags (list or None): List of tags to filter processTime instances to include. If None, no tag filtering is applied.
+
+            Returns:
+                dict: Dictionary mapping tags to their list of recorded seconds.                
+            """
+            tag_filter=None
+            if(tags is not None):
+                tag_filter=set([str(t) for t in tags])
+
+            r={}
+            for item_name,item_tags,item_ps_obj in self.generator(names,None):
+                h=self.getHistorySec(item_name)
+                if(len(h)<=0):
+                    continue
+
+                for t in item_tags:
+                    ts=str(t)
+                    if(tag_filter is not None and ts not in tag_filter):
+                        continue
+                    if(ts not in r):
+                        r[ts]=[]
+                    r[ts].extend(h)
+            return r
+
+        def plotCurrentByNameBar(
+            self,
+            names:list=None,
+            tags:list=None,
+            title:str="process time (current)",
+            ylabel:str="seconds",
+            save_path:str|None=None,
+            show:bool=True,
+            figsize:tuple=(10,4),
+        ):
+            """
+            Plots current elapsed times by name as a bar chart.
+
+            Args:
+                names (list or None): List of processTime instance names to include. If None, all instances are included.
+                tags (list or None): List of tags to filter processTime instances to include. If None, no tag filtering is applied.
+                title (str): Title of the plot.
+                ylabel (str): Label for the Y-axis.
+                save_path (str or None): Path to save the plot image. If None, the plot is not saved.
+                show (bool): Whether to display the plot.
+                figsize (tuple): Figure size (width, height).
+            
+            Returns:
+                matplotlib.figure.Figure: The created figure object.
+            """
+            sec_map=self.getTimeSecMap(names,tags,ignore_none=True)
+            keys=list(sec_map.keys())
+            vals=[sec_map[k] for k in keys]
+
+            fig=plt.figure(figsize=figsize)
+            ax=fig.add_subplot(111)
+            ax.bar(keys,vals)
+            ax.set_title(title)
+            ax.set_ylabel(ylabel)
+            ax.tick_params(axis="x",rotation=45)
+
+            fig.tight_layout()
+            if(save_path is not None):
+                fig.savefig(save_path,dpi=150,bbox_inches="tight")
+            if(show):
+                plt.show()
+            return fig
+
+        def plotHistoryByNameBox(
+            self,
+            names:list=None,
+            tags:list=None,
+            title:str="process time (history by name)",
+            ylabel:str="seconds",
+            save_path:str|None=None,
+            show:bool=True,
+            figsize:tuple=(10,4),
+        ):
+            """
+            Plots recorded history times by name as a box plot.
+
+            Args:
+                names (list or None): List of processTime instance names to include. If None, all instances are included.
+                tags (list or None): List of tags to filter processTime instances to include. If None, no tag filtering is applied.
+                title (str): Title of the plot.
+                ylabel (str): Label for the Y-axis.
+                save_path (str or None): Path to save the plot image. If None, the plot is not saved.
+                show (bool): Whether to display the plot.
+                figsize (tuple): Figure size (width, height).
+
+            Returns:
+                matplotlib.figure.Figure: The created figure object.
+            """
+            hmap=self.getHistorySecMap(names=names,tags=tags)
+            keys=list(hmap.keys())
+            data=[hmap[k] for k in keys]
+
+            fig=plt.figure(figsize=figsize)
+            ax=fig.add_subplot(111)
+            ax.boxplot(data,labels=keys,showfliers=True)
+            ax.set_title(title)
+            ax.set_ylabel(ylabel)
+            ax.tick_params(axis="x",rotation=45)
+
+            fig.tight_layout()
+            if(save_path is not None):
+                fig.savefig(save_path,dpi=150,bbox_inches="tight")
+            if(show):
+                plt.show()
+            return fig        
+        
+        def plotHistoryByTagBox(
+            self,
+            names:list=None,
+            tags:list=None,
+            title:str="process time (history by tag)",
+            ylabel:str="seconds",
+            save_path:str|None=None,
+            show:bool=True,
+            figsize:tuple=(10,4),
+        ):
+            """
+            Plots recorded history times by tag as a box plot.
+
+            Args:
+                names (list or None): List of processTime instance names to include. If None, all instances are included.
+                tags (list or None): List of tags to filter processTime instances to include. If None, no tag filtering is applied.
+                title (str): Title of the plot.
+                ylabel (str): Label for the Y-axis.
+                save_path (str or None): Path to save the plot image. If None, the plot is not saved.
+                show (bool): Whether to display the plot.
+                figsize (tuple): Figure size (width, height).
+            
+            Returns:
+                matplotlib.figure.Figure: The created figure object.
+            """
+            tmap=self.getTagHistorySecMap(names=names,tags=tags)
+            keys=list(tmap.keys())
+            data=[tmap[k] for k in keys]
+
+            fig=plt.figure(figsize=figsize)
+            ax=fig.add_subplot(111)
+            ax.boxplot(data,labels=keys,showfliers=True)
+            ax.set_title(title)
+            ax.set_ylabel(ylabel)
+            ax.tick_params(axis="x",rotation=45)
+
+            fig.tight_layout()
+            if(save_path is not None):
+                fig.savefig(save_path,dpi=150,bbox_inches="tight")
+            if(show):
+                plt.show()
+            return fig
+
+        def plotHistoryMeanByTagBar(
+            self,
+            names:list=None,
+            tags:list=None,
+            title:str="process time (history mean by tag)",
+            ylabel:str="seconds",
+            save_path:str|None=None,
+            show:bool=True,
+            figsize:tuple=(10,4),
+        ):
+            """
+            Plots mean of recorded history times by tag as a bar chart.
+
+            Args:
+                names (list or None): List of processTime instance names to include. If None, all instances are included.
+                tags (list or None): List of tags to filter processTime instances to include. If None, no tag filtering is applied.
+                title (str): Title of the plot.
+                ylabel (str): Label for the Y-axis.
+                save_path (str or None): Path to save the plot image. If None, the plot is not saved.
+                show (bool): Whether to display the plot.
+                figsize (tuple): Figure size (width, height).
+
+            Returns:
+                matplotlib.figure.Figure: The created figure object.
+            """
+            tmap=self.getTagHistorySecMap(names=names,tags=tags)
+            keys=list(tmap.keys())
+            means=[]
+            for k in keys:
+                arr=np.array(tmap[k],dtype=float)
+                means.append(float(arr.mean()) if(arr.size>0) else 0.0)
+
+            fig=plt.figure(figsize=figsize)
+            ax=fig.add_subplot(111)
+            ax.bar(keys,means)
+            ax.set_title(title)
+            ax.set_ylabel(ylabel)
+            ax.tick_params(axis="x",rotation=45)
+
+            fig.tight_layout()
+            if(save_path is not None):
+                fig.savefig(save_path,dpi=150,bbox_inches="tight")
+            if(show):
+                plt.show()
+            return fig
+        
+        def getTagNameHistorySecMap(self,names:list=None,tags:list=None)->dict:
+            """
+            Returns a dictionary mapping tags to names and their corresponding history times in seconds.
+                - `{tag:{name:[sec,...]}}`
+
+            Args:
+                names (list or None): List of processTime instance names to include. If None, all instances are included.
+                tags (list or None): List of tags to filter processTime instances to include. If None, no tag filtering is applied.
+
+            Returns:
+                dict: Dictionary mapping tags to names and their list of recorded seconds.
+            """
+            tag_filter=None
+            if(tags is not None):
+                tag_filter=set([str(t) for t in tags])
+
+            r={}
+            for item_name,item_tags,item_ps_obj in self.generator(names,None):
+                h=self.getHistorySec(item_name)
+                if(len(h)<=0):
+                    continue
+                for t in item_tags:
+                    ts=str(t)
+                    if(tag_filter is not None and ts not in tag_filter):
+                        continue
+                    if(ts not in r):
+                        r[ts]={}
+                    r[ts][item_name]=h
+            return r
+
+        def getNameTagHistorySecMap(self,names:list=None,tags:list=None)->dict:
+            """
+            Returns a dictionary mapping names to tags and their corresponding history times in seconds.
+                - `{name:{tag:[sec,...]}}`
+
+            Args:
+                names (list or None): List of processTime instance names to include. If None, all instances are included.
+                tags (list or None): List of tags to filter processTime instances to include. If None, no tag filtering is applied.
+
+            Returns:
+                dict: Dictionary mapping names to tags and their list of recorded seconds.
+            """
+            tag_filter=None
+            if(tags is not None):
+                tag_filter=set([str(t) for t in tags])
+
+            r={}
+            for item_name,item_tags,item_ps_obj in self.generator(names,None):
+                h=self.getHistorySec(item_name)
+                if(len(h)<=0):
+                    continue
+                for t in item_tags:
+                    ts=str(t)
+                    if(tag_filter is not None and ts not in tag_filter):
+                        continue
+                    if(item_name not in r):
+                        r[item_name]={}
+                    r[item_name][ts]=h
+            return r
+
+        def plotHistoryGroupedBox(
+            self,
+            group_by:str="tag",      # "tag" or "name"  (x-axis groups)
+            compare_by:str="name",   # "name" or "tag"  (color groups)
+            names:list=None,
+            tags:list=None,
+            title:str="process time (grouped boxplot)",
+            ylabel:str="seconds",
+            showfliers:bool=True,
+            save_path:str|None=None,
+            show:bool=True,
+            figsize:tuple=(12,4),
+        ):
+            """
+            Plots recorded history times as grouped box plots.
+
+            Args:
+                group_by (str): Criterion for grouping on the x-axis. Must be "tag" or "name".
+                compare_by (str): Criterion for color grouping. Must be "name" or "tag".
+                names (list or None): List of processTime instance names to include. If None, all instances are included.
+                tags (list or None): List of tags to filter processTime instances to include. If None, no tag filtering is applied.
+                title (str): Title of the plot.
+                ylabel (str): Label for the Y-axis.
+                showfliers (bool): Whether to show outliers in the box plots.
+                save_path (str or None): Path to save the plot image. If None, the plot is not saved.
+                show (bool): Whether to display the plot.
+                figsize (tuple): Figure size (width, height).
+
+            Returns:
+                matplotlib.figure.Figure: The created figure object.
+            """
+            group_by=str(group_by)
+            compare_by=str(compare_by)
+            if(group_by not in ["tag","name"]):
+                raise ValueError("group_by must be 'tag' or 'name'.")
+            if(compare_by not in ["tag","name"]):
+                raise ValueError("compare_by must be 'tag' or 'name'.")
+            if(group_by==compare_by):
+                raise ValueError("group_by and compare_by must be different.")
+
+            # build map
+            if(group_by=="tag" and compare_by=="name"):
+                gmap=self.getTagNameHistorySecMap(names=names,tags=tags)   # {tag:{name:[...]}}
+            elif(group_by=="name" and compare_by=="tag"):
+                gmap=self.getNameTagHistorySecMap(names=names,tags=tags)   # {name:{tag:[...]}}
+            else:
+                raise ValueError("invalid combination.")
+
+            group_keys=list(gmap.keys())
+            if(len(group_keys)<=0):
+                raise ValueError("No history data to plot.")
+
+            # collect compare keys (legend/color categories)
+            compare_keys=[]
+            compare_set=set()
+            for gk in group_keys:
+                for ck in gmap[gk].keys():
+                    if(ck not in compare_set):
+                        compare_set.add(ck)
+                        compare_keys.append(ck)
+
+            if(len(compare_keys)<=0):
+                raise ValueError("No compare categories found.")
+
+            # color map (stable)
+            cmap=plt.get_cmap("tab10")
+            color_map={}
+            for i,ck in enumerate(compare_keys):
+                color_map[ck]=cmap(i%10)
+
+            n_compare=len(compare_keys)
+            box_width=min(0.8/max(n_compare,1),0.25)
+
+            data_all=[]
+            pos_all=[]
+            color_all=[]
+
+            # group centers at 1..N
+            for gi,gk in enumerate(group_keys):
+                center=gi+1
+                for ci,ck in enumerate(compare_keys):
+                    if(ck not in gmap[gk]):
+                        continue
+                    vals=gmap[gk][ck]
+                    if(vals is None or len(vals)<=0):
+                        continue
+                    # offset around center
+                    offset=(ci-(n_compare-1)/2.0)*box_width*1.6
+                    data_all.append(vals)
+                    pos_all.append(center+offset)
+                    color_all.append(color_map[ck])
+
+            if(len(data_all)<=0):
+                raise ValueError("No plottable history samples (all empty).")
+
+            fig=plt.figure(figsize=figsize)
+            ax=fig.add_subplot(111)
+
+            bp=ax.boxplot(
+                data_all,
+                positions=pos_all,
+                widths=box_width,
+                patch_artist=True,
+                showfliers=showfliers,
+            )
+
+            for patch,c in zip(bp["boxes"],color_all):
+                patch.set_facecolor(c)
+
+            ax.set_title(title)
+            ax.set_ylabel(ylabel)
+            ax.set_xticks([i+1 for i in range(len(group_keys))])
+            ax.set_xticklabels(group_keys,rotation=45,ha="right")
+
+            # legend
+            handles=[]
+            for ck in compare_keys:
+                handles.append(mpatches.Patch(facecolor=color_map[ck],label=str(ck)))
+            ax.legend(handles=handles,loc="best")
+
+            fig.tight_layout()
+            if(save_path is not None):
+                fig.savefig(save_path,dpi=150,bbox_inches="tight")
+            if(show):
+                plt.show()
+            return fig
+        
+        def plotHistoryCompareNamesInTagsBox(self,**kwargs):
+            """
+            Shortcut for plotHistoryGroupedBox with group_by="tag" and compare_by="name".
+
+            Args:
+                **kwargs: Additional keyword arguments to pass to plotHistoryGroupedBox.
+
+            Returns:
+                matplotlib.figure.Figure: The created figure object.
+            """
+            return self.plotHistoryGroupedBox(group_by="tag",compare_by="name",**kwargs)
+
+        def plotHistoryCompareTagsInNamesBox(self,**kwargs):
+            """
+            Shortcut for plotHistoryGroupedBox with group_by="name" and compare_by="tag".
+
+            Args:
+                **kwargs: Additional keyword arguments to pass to plotHistoryGroupedBox.
+
+            Returns:
+                matplotlib.figure.Figure: The created figure object.
+            """
+            return self.plotHistoryGroupedBox(group_by="name",compare_by="tag",**kwargs)
+    
     class DataFrameExLib:
         """
         Library for pandas DataFrame-related utility functions.
@@ -37387,6 +38391,34 @@ class imgLib:
                 model_names=df["model_name"].tolist()
                 per_model={m:{"metrics":{}} for m in model_names}
                 topk_by_metric={}
+
+                # --- attach execution args for each model (ensemble config etc.) ---
+                try:
+                    _model_cfg_dict=self.getModelDict(exclude_class_names=True)
+                except Exception:
+                    _model_cfg_dict=None
+
+                if(isinstance(_model_cfg_dict,dict)):
+                    for _mn in model_names:
+                        _cfg=_model_cfg_dict.get(str(_mn),None)
+                        if(isinstance(_cfg,dict)):
+                            per_model[str(_mn)]["execute_args"]={
+                                # 1) models : readYOLOModelList information（yolo_model_config["model_list"]）
+                                "models":pyExLib.safety_deepcopy(_cfg.get("model_list",None)),
+                                # 2) mode
+                                "mode":_cfg.get("ensemble_mode",None),
+                                # 3) iou_threshold
+                                "iou_threshold":_cfg.get("iou_threshold",None),
+                                # 4) multi_class_mode
+                                "multi_class_mode":_cfg.get("multi_class_mode",None),
+                                # 5) ensemble_args
+                                "ensemble_args":pyExLib.safety_deepcopy(_cfg.get("ensemble_args",None)),
+                            }
+                        else:
+                            per_model[str(_mn)]["execute_args"]=None
+                else:
+                    for _mn in model_names:
+                        per_model[str(_mn)]["execute_args"]=None
 
                 def _to_py(v):
                     if(v is None):
