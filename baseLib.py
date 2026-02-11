@@ -53,6 +53,7 @@ from fnmatch import fnmatch
 import smtplib
 from email.message import EmailMessage
 import atexit
+import functools
 
 # ultralytics
 IMPORT_ULTRALYTICS_FLAG=True
@@ -4775,7 +4776,362 @@ class pyExLib:
                 matplotlib.figure.Figure: The created figure object.
             """
             return self.plotHistoryGroupedBox(group_by="name",compare_by="tag",**kwargs)
-    
+        
+        def __normalize_tags(self,tags:list|tuple|set|None):
+            """
+            Normalize tags to a list of strings.
+
+            Args:
+                tags (list, tuple, set, or None): Tags to normalize.
+            
+            Returns:
+                list: Normalized list of tag strings.
+            """
+            if(tags is None):
+                return []
+            if(not isinstance(tags,(list,tuple,set))):
+                raise TypeError("tags must be list, tuple, or set")
+            return [str(t) for t in tags]
+
+        def __ensure_timer(self,name:str|None,tags:list|tuple|set|None,auto_append:bool):
+            """
+            Ensure that a timer with the given name exists.
+
+            Args:
+                name (str or None): Name of the timer. If None, a default name is generated.
+                tags (list, tuple, set, or None): Tags to associate with the timer.
+                auto_append (bool): Whether to automatically append the timer if it does not exist.
+
+            Returns:
+                str: The name of the ensured timer.
+            """
+            if(name is None):
+                name=f"processTime_{len(self)}"
+            name=str(name)
+            if(name not in self.getNames()):
+                if(not auto_append):
+                    raise KeyError(f"Process time with name '{name}' does not exist.")
+                self.append(name=name,tags=tags)
+            else:
+                norm_tags=self.__normalize_tags(tags)
+                if(len(norm_tags)>0):
+                    info=self.__pt_data.get(name,None)
+                    if(isinstance(info,dict)):
+                        cur=set([str(t) for t in info.get("tags",[]) if t is not None])
+                        add=[t for t in norm_tags if t not in cur]
+                        if(len(add)>0):
+                            info["tags"]=list(cur.union(set(add)))
+                            for tag in add:
+                                if(tag not in self.__tag_data):
+                                    self.__tag_data[tag]={"tag_name":tag,"pt_name_list":[name]}
+                                else:
+                                    if(name not in self.__tag_data[tag].get("pt_name_list",[])):
+                                        self.__tag_data[tag]["pt_name_list"].append(name)
+            return name
+
+        @contextmanager
+        def measure(
+            self,
+            name:str|None,
+            tags:list|tuple|set|None=None,
+            auto_append:bool=True,
+            before_reset:bool=True,
+            record:bool=True,
+            after_reset:bool=False,
+        ):
+            """
+            Context manager to measure execution time of a code block.
+
+            Args:
+                name (str or None): Name of the timer. If None, a default name is generated.
+                tags (list, tuple, set, or None): Tags to associate with the timer.
+                auto_append (bool): Whether to automatically append the timer if it does not exist.
+                before_reset (bool): Whether to reset the timer before starting.
+                record (bool): Whether to record the elapsed time after stopping.
+                after_reset (bool): Whether to reset the timer after recording.
+
+            Yields:
+                str: The name of the timer being measured.
+            """
+            name=self.__ensure_timer(name,tags=tags,auto_append=auto_append)
+
+            if(before_reset):
+                self.reset(name)
+
+            self.start(name)
+            try:
+                yield name
+            finally:
+                if(record):
+                    try:
+                        self.stopAndRecord(name,reset=after_reset)
+                    except Exception:
+                        try:
+                            self.stop(name)
+                        except Exception:
+                            pass
+                else:
+                    try:
+                        self.stop(name)
+                    except Exception:
+                        pass
+
+        @contextmanager
+        def measureAll(
+            self,
+            names:list|None=None,
+            tags:list|None=None,
+            before_reset:bool=True,
+            record:bool=True,
+            after_reset:bool=False,
+        ):
+            """
+            Context manager to measure execution time of a code block for multiple timers.
+
+            Args:
+                names (list or None): List of timer names to measure. If None, all timers are included.
+                tags (list or None): List of tags to filter timers to measure. If None, no tag filtering is applied.
+                before_reset (bool): Whether to reset the timers before starting.
+                record (bool): Whether to record the elapsed times after stopping.
+                after_reset (bool): Whether to reset the timers after recording.
+
+            Yields:
+                list: List of timer names being measured.
+            """
+            target=[n for n,_,_ in self.generator(names,tags)]
+            if(before_reset):
+                for n in target:
+                    self.reset(n)
+
+            self.startAll(names,tags)
+            try:
+                yield target
+            finally:
+                if(record):
+                    self.stopAndRecordAll(names,tags,reset=after_reset)
+                else:
+                    self.stopAll(names,tags)
+
+        def getHistoryRecords(
+            self,
+            names:list|None=None,
+            tags:list|None=None,
+            include_tags:bool=True,
+        )->list:
+            """
+            Returns history records as a list of dictionaries.
+
+            Args:
+                names (list or None): List of processTime instance names to include. If None, all instances are included.
+                tags (list or None): List of tags to filter processTime instances to include. If None, no tag filtering is applied.
+                include_tags (bool): Whether to include tags in the output records.
+
+            Returns:
+                list: List of dictionaries, each containing:
+                    - name (str): Name of the processTime instance.
+                    - idx (int): Index of the recorded sample.
+                    - sec (float): Recorded time in seconds.
+                    - tags (list, optional): List of tags associated with the instance (included if include_tags is True).
+            """
+            rows=[]
+            for item_name,item_tags,item_ps_obj in self.generator(names,tags):
+                h=self.getHistorySec(item_name)
+                for i,sec in enumerate(h):
+                    r={"name":item_name,"idx":int(i),"sec":float(sec)}
+                    if(include_tags):
+                        r["tags"]=list(item_tags)
+                    rows.append(r)
+            return rows
+
+        def toHistoryDataFrame(
+            self,
+            names:list|None=None,
+            tags:list|None=None,
+            include_tags:bool=True,
+        ):
+            """
+            Converts history records to a pandas DataFrame.
+
+            Args:
+                names (list or None): List of processTime instance names to include. If None, all instances are included.
+                tags (list or None): List of tags to filter processTime instances to include. If None, no tag filtering is applied.
+                include_tags (bool): Whether to include tags in the output records.
+
+            Returns:
+                pandas.DataFrame: DataFrame containing the history records.
+            """
+            return pd.DataFrame(self.getHistoryRecords(names=names,tags=tags,include_tags=include_tags))
+
+        def toSummaryDataFrame(
+            self,
+            names:list|None=None,
+            tags:list|None=None,
+            percentiles:list|tuple=(0,25,50,75,100),
+            ddof:int=0,
+            round_ndigits:int|None=None,
+        ):
+            """
+            Converts summary statistics to a pandas DataFrame.
+
+            Args:
+                names (list or None): List of processTime instance names to include. If None, all instances are included.
+                tags (list or None): List of tags to filter processTime instances to include. If None, no tag filtering is applied.
+                percentiles (list or tuple): List of percentiles to calculate.
+                ddof (int): Delta degrees of freedom for std/var calculation.
+                round_ndigits (int or None): Number of digits to round the results. If None, no rounding is applied.
+
+            Returns:
+                pandas.DataFrame: DataFrame containing the summary statistics.
+            """
+            rows=[]
+            for item_name,item_tags,item_ps_obj in self.generator(names,tags):
+                st=self.getHistoryStatisticsSec(
+                    item_name,
+                    percentiles=percentiles,
+                    ddof=ddof,
+                    round_ndigits=round_ndigits,
+                )
+                r={"name":item_name,"tags":list(item_tags)}
+                for k in ["count","sum","mean","std","var","min","max"]:
+                    r[k]=st.get(k,None)
+                p=st.get("percentiles",{}) if isinstance(st,dict) else {}
+                if(isinstance(p,dict)):
+                    for pk,pv in p.items():
+                        r[f"p{pk}"]=pv
+                rows.append(r)
+            return pd.DataFrame(rows)
+
+        def exportHistoryCsv(
+            self,
+            filepath:str,
+            names:list|None=None,
+            tags:list|None=None,
+            include_tags:bool=True,
+            index:bool=False,
+            encoding:str="utf-8",
+        )->str:
+            """
+            Exports history records to a CSV file.
+
+            Args:
+                filepath (str): Path to the output CSV file.
+                names (list or None): List of processTime instance names to include. If None, all instances are included.
+                tags (list or None): List of tags to filter processTime instances to include. If None, no tag filtering is applied.
+                include_tags (bool): Whether to include tags in the output records.
+                index (bool): Whether to include the DataFrame index in the CSV file.
+                encoding (str): Encoding for the CSV file.
+
+            Returns:
+                str: Path to the output CSV file.
+            """
+            df=self.toHistoryDataFrame(names=names,tags=tags,include_tags=include_tags)
+            df.to_csv(filepath,index=index,encoding=encoding)
+            return filepath
+
+        def exportSummaryCsv(
+            self,
+            filepath:str,
+            names:list|None=None,
+            tags:list|None=None,
+            index:bool=False,
+            encoding:str="utf-8",
+            percentiles:list|tuple=(0,25,50,75,100),
+            ddof:int=0,
+            round_ndigits:int|None=None,
+        )->str:
+            """
+            Exports summary statistics to a CSV file.
+
+            Args:
+                filepath (str): Path to the output CSV file.
+                names (list or None): List of processTime instance names to include. If None, all instances are included.
+                tags (list or None): List of tags to filter processTime instances to include. If None, no tag filtering is applied.
+                index (bool): Whether to include the DataFrame index in the CSV file.
+                encoding (str): Encoding for the CSV file.
+                percentiles (list or tuple): List of percentiles to calculate.
+                ddof (int): Delta degrees of freedom for std/var calculation.
+                round_ndigits (int or None): Number of digits to round the results. If None, no rounding is applied.
+
+            Returns:
+                str: Path to the output CSV file.
+            """
+            df=self.toSummaryDataFrame(
+                names=names,
+                tags=tags,
+                percentiles=percentiles,
+                ddof=ddof,
+                round_ndigits=round_ndigits,
+            )
+            df.to_csv(filepath,index=index,encoding=encoding)
+            return filepath
+
+        def exportHistoryJson(
+            self,
+            filepath:str,
+            names:list|None=None,
+            tags:list|None=None,
+            include_tags:bool=True,
+            ensure_ascii:bool=False,
+            indent:int=4,
+        )->str:
+            """
+            Exports history records to a JSON file.
+
+            Args:
+                filepath (str): Path to the output JSON file.
+                names (list or None): List of processTime instance names to include. If None, all instances are included.
+                tags (list or None): List of tags to filter processTime instances to include. If None, no tag filtering is applied.
+                include_tags (bool): Whether to include tags in the output records.
+                ensure_ascii (bool): Whether to escape non-ASCII characters in the JSON file.
+                indent (int): Number of spaces for indentation in the JSON file.
+
+            Returns:
+                str: Path to the output JSON file.
+            """
+            rows=self.getHistoryRecords(names=names,tags=tags,include_tags=include_tags)
+            with open(filepath,"w",encoding="utf-8") as f:
+                json.dump(rows,f,ensure_ascii=ensure_ascii,indent=indent)
+            return filepath
+
+        def timed(
+            self,
+            name:str|None=None,
+            tags:list|tuple|set|None=None,
+            auto_append:bool=True,
+            before_reset:bool=True,
+            record:bool=True,
+            after_reset:bool=False,
+        ):
+            """
+            Decorator to measure execution time of a function.
+
+            Args:
+                name (str or None): Name of the timer. If None, a default name is generated.
+                tags (list, tuple, set, or None): Tags to associate with the timer.
+                auto_append (bool): Whether to automatically append the timer if it does not exist.
+                before_reset (bool): Whether to reset the timer before starting.
+                record (bool): Whether to record the elapsed time after stopping.
+                after_reset (bool): Whether to reset the timer after recording.
+
+            Returns:
+                function: Decorated function with timing measurement.
+            """
+            def _decorator(func):
+                timer_name=name if name is not None else getattr(func,"__qualname__",str(func))
+                @functools.wraps(func)
+                def _wrapper(*args,**kwargs):
+                    with self.measure(
+                        timer_name,
+                        tags=tags,
+                        auto_append=auto_append,
+                        before_reset=before_reset,
+                        record=record,
+                        after_reset=after_reset,
+                    ):
+                        return func(*args,**kwargs)
+                return _wrapper
+            return _decorator
+
     class DataFrameExLib:
         """
         Library for pandas DataFrame-related utility functions.
