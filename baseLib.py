@@ -5131,6 +5131,210 @@ class pyExLib:
                         return func(*args,**kwargs)
                 return _wrapper
             return _decorator
+        
+        def __normalizeTags(self,tags):
+            """
+            Normalize tags to a unique list of strings.
+
+            Args:
+                tags (list, tuple, set, or None): Tags to normalize.
+
+            Returns:
+                list: Normalized list of unique tag strings.
+            """
+            if(tags is None):
+                return []
+            if(not isinstance(tags,(list,tuple,set))):
+                raise TypeError("tags must be list, tuple, or set")
+            # unique (keep order)
+            out=[]
+            seen=set()
+            for t in tags:
+                ts=str(t)
+                if(ts not in seen):
+                    out.append(ts)
+                    seen.add(ts)
+            return out
+
+        def __uniqueName(self,base:str):
+            base=str(base)
+            if(base not in self.__pt_data):
+                return base
+            i=1
+            while True:
+                cand=f"{base}__{i}"
+                if(cand not in self.__pt_data):
+                    return cand
+                i+=1
+
+        def __rebuildTagData(self):
+            """
+            Rebuild __tag_data from __pt_data (tags are the source of truth).
+            This keeps tag filtering consistent. :contentReference[oaicite:4]{index=4}
+            """
+            self.__tag_data={}
+            for name,info in self.__pt_data.items():
+                if(not isinstance(info,dict)):
+                    continue
+                tags=self.__normalizeTags(info.get("tags",[]))
+                info["tags"]=tags
+                for tag in tags:
+                    if(tag not in self.__tag_data):
+                        self.__tag_data[tag]={"tag_name":tag,"pt_name_list":[name]}
+                    else:
+                        lst=self.__tag_data[tag].get("pt_name_list",[])
+                        if(not isinstance(lst,list)):
+                            self.__tag_data[tag]["pt_name_list"]=[name]
+                        else:
+                            if(name not in lst):
+                                lst.append(name)
+
+        def mergeFrom(
+            self,
+            other:"pyExLib.processTimeContainer",
+            prefix:str|None=None,
+            on_conflict:str="merge",
+            merge_history:str="extend",
+            add_tags:list|tuple|set|None=None,
+            rebuild_tag_data:bool=True,
+        )->dict:
+            """
+            Merge another processTimeContainer into self.
+
+            Args:
+                other: source container
+                prefix: if not None, destination name becomes prefix+src_name
+                on_conflict:
+                    - "merge"    : merge into existing name (union tags + history)
+                    - "rename"   : if name exists, auto rename to unique (base__1, base__2, ...)
+                    - "overwrite": overwrite tags/history for the existing name
+                    - "error"    : raise if name exists
+                merge_history:
+                    - "extend"   : dst_history += src_history
+                    - "overwrite": dst_history  = src_history
+                    - "ignore"   : do not import history
+                add_tags: extra tags added to all imported timers
+                rebuild_tag_data: rebuild tag index at the end
+
+            Returns:
+                dict: mapping {src_name: dst_name}
+            """
+            if(not isinstance(other,pyExLib.processTimeContainer)):
+                raise TypeError("other must be processTimeContainer")
+
+            on_conflict=str(on_conflict or "merge").lower()
+            merge_history=str(merge_history or "extend").lower()
+            if(on_conflict not in ["merge","rename","overwrite","error"]):
+                raise ValueError("on_conflict must be merge|rename|overwrite|error")
+            if(merge_history not in ["extend","overwrite","ignore"]):
+                raise ValueError("merge_history must be extend|overwrite|ignore")
+
+            pfx="" if prefix is None else str(prefix)
+            extra_tags=self.__normalizeTags(add_tags)
+
+            name_map={}
+            for src_name,src_tags,_ in other.generator():
+                src_name=str(src_name)
+                dst_name=f"{pfx}{src_name}"
+
+                if(dst_name in self.__pt_data):
+                    if(on_conflict=="error"):
+                        raise ValueError(f"Name conflict: '{dst_name}' already exists.")
+                    if(on_conflict=="rename"):
+                        dst_name=self.__uniqueName(dst_name)
+
+                # create or overwrite base entry
+                if(dst_name not in self.__pt_data):
+                    # append creates processTime + history_sec list :contentReference[oaicite:5]{index=5}
+                    tags_merged=self.__normalizeTags(list(src_tags)+extra_tags)
+                    self.append(name=dst_name,tags=tags_merged)
+                else:
+                    if(on_conflict=="overwrite"):
+                        tags_merged=self.__normalizeTags(list(src_tags)+extra_tags)
+                        info=self.__pt_data.get(dst_name,{})
+                        if(not isinstance(info,dict)):
+                            info={}
+                            self.__pt_data[dst_name]=info
+                        info["name"]=dst_name
+                        info["pt"]=pyExLib.processTime(name=dst_name)
+                        info["tags"]=tags_merged
+                        info["history_sec"]=[]
+                    else:
+                        # merge tags into existing
+                        info=self.__pt_data.get(dst_name,{})
+                        if(isinstance(info,dict)):
+                            cur=self.__normalizeTags(info.get("tags",[]))
+                            add=self.__normalizeTags(list(src_tags)+extra_tags)
+                            # union keep order: cur then new
+                            seen=set(cur)
+                            for t in add:
+                                if(t not in seen):
+                                    cur.append(t)
+                                    seen.add(t)
+                            info["tags"]=cur
+
+                # merge history
+                if(merge_history!="ignore"):
+                    src_hist=other.getHistorySec(src_name)  # list[float] :contentReference[oaicite:6]{index=6}
+                    info=self.__pt_data.get(dst_name,{})
+                    if(not isinstance(info,dict)):
+                        info={}
+                        self.__pt_data[dst_name]=info
+                    if(merge_history=="overwrite"):
+                        info["history_sec"]=list(src_hist)
+                    else:
+                        if("history_sec" not in info or not isinstance(info["history_sec"],list)):
+                            info["history_sec"]=[]
+                        info["history_sec"].extend(list(src_hist))
+
+                name_map[src_name]=dst_name
+
+            if(rebuild_tag_data):
+                self.__rebuildTagData()
+            return name_map
+
+        @staticmethod
+        def MergeProcessTimeContainerList(
+            ptc_list:list,
+            prefixes:list|None=None,
+            on_conflict:str="merge",
+            merge_history:str="extend",
+            add_src_tag:bool=False,
+        )->"pyExLib.processTimeContainer":
+            """
+            Create a new container merged from a list of containers.
+
+            Args:
+                ptc_list: list of processTimeContainer
+                prefixes: list of prefixes (same length) or None
+                add_src_tag: if True, add tag like "src_0", "src_1", ...
+
+            Returns:
+                processTimeContainer: merged container
+            """
+            if(not isinstance(ptc_list,list) or len(ptc_list)==0):
+                raise ValueError("ptc_list must be a non-empty list")
+
+            if(prefixes is not None):
+                if((not isinstance(prefixes,list)) or len(prefixes)!=len(ptc_list)):
+                    raise ValueError("prefixes must be None or a list with the same length as ptc_list")
+
+            out=pyExLib.processTimeContainer()
+            for i,ptc in enumerate(ptc_list):
+                p=None if(prefixes is None) else prefixes[i]
+                t=None
+                if(add_src_tag):
+                    t=[f"src_{i}"]
+                out.mergeFrom(
+                    ptc,
+                    prefix=p,
+                    on_conflict=on_conflict,
+                    merge_history=merge_history,
+                    add_tags=t,
+                    rebuild_tag_data=False,
+                )
+            out.__rebuildTagData()
+            return out
 
     class DataFrameExLib:
         """
