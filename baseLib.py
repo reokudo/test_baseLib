@@ -30816,6 +30816,8 @@ class imgLib:
                 Concatenates detections from all inputs without merging.
             - `ENSEMBLE_MODE_PIPELINE` ("PipeLine"):
                 Runs a multi-stage ensemble pipeline (each stage is an ensemble op). (Pipeline cannot be nested.)
+            - `ENSEMBLE_MODE_DYNAMIC` ("Dynamic"):
+                Chooses an ensemble strategy dynamically per image based on input detections and `ensemble_args` rules.
             - `ENSEMBLE_MODE_CUSTOM` ("Custom"):
                 Calls a registered custom ensemble function (`imgLib.ensembleModel.registerCustomEnsembleFunc`) with normalized inputs and validates its output.
 
@@ -30909,7 +30911,55 @@ class imgLib:
                     - When any multi-output option is used, the return type becomes `dict[str, list[dict]]`.
                     - If you keep single-output behavior, use `final_id` (or omit it to use the last stage).
                     - (Recommended) Make `final_id` mutually exclusive with multi-output options.
+            
+            - Dynamic ("Dynamic"):
+                Select the ensemble mode dynamically *per image* (branching).
+                Provide a callable selector via `ensemble_args["selector"]` (alias: `select_func`).
 
+                Required:
+                * `selector` (callable):
+                    Called once per image to choose the next ensemble mode and its args.
+
+                    Signature:
+                        selector(
+                            yolo_result_list=...,          # list of per-model raw YOLO results for this image
+                            yolo_result_list_norm=...,     # lightweight normalized view (see below)
+                            iou_threshold=...,
+                            multi_class_mode=...,
+                            **selector_kwargs
+                        ) -> selection
+
+                    `yolo_result_list_norm` is a list[dict] aligned with models, each dict contains:
+                        {
+                            "bboxes":  list[[x1,y1,x2,y2]],   # xyxy
+                            "scores":  list[float],
+                            "classes": list[int],
+                            "class_names": dict[int,str] | None,
+                            "img_wh": (w,h) | None,
+                        }
+
+                Optional:
+                * `selector_kwargs` (dict):
+                    Extra keyword arguments forwarded into the selector.
+
+                Selector return formats:
+                - "NMS"                                  # mode string
+                - ("WBF", {"skip_box_thr": 0.001})        # (mode, ensemble_args)
+                - ("Filter", {"min_score": 0.25}, 0.65, "EachClass")
+                    # (mode, ensemble_args, iou_threshold override, multi_class_mode override)
+                - {
+                      "mode": "ORNMS",
+                      "ensemble_args": {...},
+                      "iou_threshold": 0.6,               # optional override
+                      "multi_class_mode": "EachClass",    # optional override
+                      "in_ids": [0, 2],                   # optional: restrict inputs by model index
+                  }
+                  # `in_ids` can also be given as `input_ids` or `select_ids`.
+
+                Notes:
+                - The selector must not return "Dynamic" (to avoid recursion).
+                - The selector must not return "PipeLine"; use PipeLine directly if you need a fixed multi-stage flow.
+                    
             - Custom ("Custom"):
                 * `custom_id` (str, required): ID of a function registered via `imgLib.ensembleModel.registerCustomEnsembleFunc(custom_id, func)`.
                 * `custom_args` (dict, optional): forwarded to the registered function as `**custom_args`.
@@ -31101,6 +31151,7 @@ class imgLib:
         ENSEMBLE_MODE_FILTER="Filter"
         ENSEMBLE_MODE_IOU_FILTER="IoUFilter"
         ENSEMBLE_MODE_CONCAT="Concat"
+        ENSEMBLE_MODE_DYNAMIC="Dynamic"
         ENSEMBLE_MODE_CUSTOM="Custom"
 
         ENSEMBLE_MULTI_CLASS_MODE_EACH_CLASS="EachClass"
@@ -31490,6 +31541,109 @@ class imgLib:
                 return imgLib.ensembleModel._ensemblePipeline(
                     yolo_result_list,
                     yolo_ensemble_argv
+                )
+
+            elif(mode==imgLib.ensembleModel.ENSEMBLE_MODE_DYNAMIC):
+                selector=yolo_ensemble_argv.get("selector",None)
+                if(selector is None):
+                    selector=yolo_ensemble_argv.get("select_func",None)
+                if(not callable(selector)):
+                    raise ValueError("In Dynamic mode, you must provide a callable selector via ensemble_args['selector'] (or 'select_func').")
+
+                selector_kwargs=yolo_ensemble_argv.get("selector_kwargs",None)
+                if(selector_kwargs is None):
+                    selector_kwargs={}
+                if(not isinstance(selector_kwargs,dict)):
+                    raise ValueError("In Dynamic mode, selector_kwargs must be a dict.")
+
+                yolo_result_list_sel=yolo_result_list
+            
+                # normalized (lightweight) view for selector decisions
+                yolo_result_list_norm=[]
+                for yri in yolo_result_list:
+                    b,s,c,names=imgLib.ensembleModel.__extractXyxyConfCls(yri,1.0)
+                    yolo_result_list_norm.append({
+                        "bboxes":b,
+                        "scores":s,
+                        "classes":c,
+                        "class_names":names,
+                        "img_wh":imgLib.ensembleModel._extractImgWh(yri),
+                    })
+
+                selected=selector(
+                    yolo_result_list=yolo_result_list_sel,
+                    yolo_result_list_norm=yolo_result_list_norm,
+                    iou_threshold=iou_threshold,
+                    multi_class_mode=multi_class_mode,
+                    **selector_kwargs
+                )
+
+                chosen_mode=None
+                chosen_args={}
+                chosen_iou=iou_threshold
+                chosen_mcm=multi_class_mode
+
+                if(isinstance(selected,str)):
+                    chosen_mode=str(selected)
+                elif(isinstance(selected,tuple) and (len(selected)>=1)):
+                    chosen_mode=selected[0]
+                    if(len(selected)>=2 and (selected[1] is not None)):
+                        chosen_args=selected[1]
+                    if(len(selected)>=3 and (selected[2] is not None)):
+                        chosen_iou=float(selected[2])
+                    if(len(selected)>=4 and (selected[3] is not None)):
+                        chosen_mcm=str(selected[3])
+                elif(isinstance(selected,dict)):
+                    chosen_mode=selected.get("mode",None)
+                    chosen_args=selected.get("ensemble_args",{}) or {}
+                    if("iou_threshold" in selected and (selected["iou_threshold"] is not None)):
+                        chosen_iou=float(selected["iou_threshold"])
+                    if("multi_class_mode" in selected and (selected["multi_class_mode"] is not None)):
+                        chosen_mcm=str(selected["multi_class_mode"])
+                else:
+                    raise TypeError("In Dynamic mode, selector must return str / tuple / dict.")
+
+                if(chosen_mode is None):
+                    raise ValueError("In Dynamic mode, selector returned no mode.")
+                if(chosen_mode==imgLib.ensembleModel.ENSEMBLE_MODE_DYNAMIC):
+                    raise ValueError("In Dynamic mode, selector must not return Dynamic (to avoid recursion).")
+                if(chosen_mode==imgLib.ensembleModel.ENSEMBLE_MODE_PIPELINE):
+                    raise ValueError("In Dynamic mode, selector must not return PipeLine. Use PipeLine directly if needed.")
+
+                if(not isinstance(chosen_args,dict)):
+                    raise TypeError("In Dynamic mode, ensemble_args returned by selector must be a dict.")
+                
+                # Optional: selector can choose a subset of inputs (e.g. pick a single model)
+                select_ids=None
+                if(isinstance(selected,dict)):
+                    select_ids=selected.get("in_ids",None)
+                    if(select_ids is None):
+                        select_ids=selected.get("input_ids",None)
+                    if(select_ids is None):
+                        select_ids=selected.get("select_ids",None)
+
+                yolo_result_list_sel=yolo_result_list
+                if(select_ids is not None):
+                    if(isinstance(select_ids,int)):
+                        select_ids=[select_ids]
+                    elif(isinstance(select_ids,(tuple,list))):
+                        select_ids=list(select_ids)
+                    else:
+                        raise TypeError("In Dynamic mode, in_ids/input_ids/select_ids must be int or list[int].")
+
+                    for sid in select_ids:
+                        if(not isinstance(sid,int)):
+                            raise TypeError("In Dynamic mode, in_ids/input_ids/select_ids must be int or list[int].")
+                        if(sid<0 or sid>=len(yolo_result_list)):
+                            raise ValueError("In Dynamic mode, selected input id is out of range.")
+                    yolo_result_list_sel=[yolo_result_list[sid] for sid in select_ids]
+
+                return imgLib.ensembleModel.EnsembleFunc4YOLOResult(
+                    mode=chosen_mode,
+                    yolo_result_list=yolo_result_list_sel,
+                    iou_threshold=chosen_iou,
+                    multi_class_mode=chosen_mcm,
+                    **chosen_args
                 )
             
             elif(mode==imgLib.ensembleModel.ENSEMBLE_MODE_FILTER):
