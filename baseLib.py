@@ -28,6 +28,7 @@ import re
 import copy
 import csv
 import importlib
+from importlib import metadata as importlib_metadata
 from pathlib import Path
 from pathlib import PurePosixPath
 from collections.abc import Iterable, Mapping, Sequence
@@ -54,6 +55,7 @@ import smtplib
 from email.message import EmailMessage
 import atexit
 import functools
+import platform
 
 # ultralytics
 IMPORT_ULTRALYTICS_FLAG=True
@@ -7908,6 +7910,920 @@ class pyExLib:
                 return out
 
             return out.get(class_name,{"class": [],"instance":[]})
+        
+    class envInformation:
+        """
+        Execution environment information exporter.
+        """
+
+        class envRow:
+            """
+            Represents a row of environment information.
+            """
+            
+            def __init__(
+                self,
+                section:str,
+                item:str,
+                value:str
+            ):
+                """
+                Initializes an envRow instance.
+
+                Args:
+                    section (str): The section of the environment information.
+                    item (str): The item name.
+                    value (str): The value of the item.
+                """
+                self.__section=section
+                self.__item=item
+                self.__value=value
+
+            @property
+            def section(self)->str:
+                """
+                Gets the section of the environment information.
+
+                Returns:
+                    str: The section name.
+                """
+                return self.__section
+
+            @property
+            def item(self)->str:
+                """
+                Gets the item name.
+
+                Returns:
+                    str: The item name.
+                """
+                return self.__item
+
+            @property
+            def value(self)->str:
+                """
+                Gets the value of the item.
+
+                Returns:
+                    str: The item value.
+                """
+                return self.__value
+
+        class envNote:
+            """
+            Represents a note in the environment information.
+            """
+
+            def __init__(self,kind:str,text:Any):
+                """
+                Initializes an envNote instance.
+
+                Args:
+                    kind (str): The kind of note.
+                    text (Any): The text of the note.
+                """
+                self.__kind=kind
+                self.__text=text
+
+            @property
+            def kind(self)->str:
+                """
+                Gets the kind of note.
+
+                Returns:
+                    str: The kind of note.
+                """
+                return self.__kind
+
+            @property
+            def text(self)->Any:
+                """
+                Gets the text of the note.
+
+                Returns:
+                    Any: The text of the note.
+                """
+                return self.__text
+
+        class envReport:
+            """
+            Represents an environment information report.
+            """
+
+            def __init__(
+                self,
+                rows:List["pyExLib.envInformation.envRow"],
+                notes:List["pyExLib.envInformation.envNote"],
+                meta:Dict[str,Any]
+            ):
+                """
+                Initializes an envReport instance.
+
+                Args:
+                    rows (List[envRow]): The list of environment information rows.
+                    notes (List[envNote]): The list of environment information notes.
+                    meta (Dict[str, Any]): The metadata dictionary.
+                """
+                self.__rows=rows
+                self.__notes=notes
+                self.__meta=meta
+
+            @property
+            def rows(self)->List["pyExLib.envInformation.envRow"]:
+                """
+                Gets the list of environment information rows.
+
+                Returns:
+                    List[envRow]: The list of environment information rows.
+                """
+                return self.__rows
+
+            @property
+            def notes(self)->List["pyExLib.envInformation.envNote"]:
+                """
+                Gets the list of environment information notes.
+
+                Returns:
+                    List[envNote]: The list of environment information notes.
+                """
+                return self.__notes
+
+            @property
+            def meta(self)->Dict[str,Any]:
+                """
+                Gets the metadata dictionary.
+
+                Returns:
+                    Dict[str, Any]: The metadata dictionary.
+                """
+                return self.__meta
+
+        class envExporter:
+            """
+            Collect execution environment information (generic exporter).
+            """
+
+            def __init__(
+                self,
+                profile:str="standard",
+                include_freeze:bool=False,
+                freeze_max_lines:int=80,
+                extra_packages:Optional[Sequence[str]]=None,
+                probe_packages:Optional[Sequence[str]]=None,
+                include_git:bool=True,
+                include_time:bool=True,
+                include_notes:bool=True,
+                collectors=None,
+            ):
+                """
+                Initializes an envExporter instance.
+
+                Args:
+                    profile (str): The profile of information to collect ("minimal", "standard", "full").
+                    include_freeze (bool): Whether to include pip freeze output.
+                    freeze_max_lines (int): The maximum number of lines for pip freeze output.
+                    extra_packages (Optional[Sequence[str]]): Additional packages to probe.
+                    probe_packages (Optional[Sequence[str]]): Specific packages to probe.
+                    include_git (bool): Whether to include Git repository information.
+                    include_time (bool): Whether to include the collection time.
+                    include_notes (bool): Whether to include notes in the report.
+                    collectors (Optional[Sequence[Callable]]): Custom collector functions.
+                """
+                self.__profile=profile
+                self.__include_freeze=include_freeze
+                self.__freeze_max_lines=int(freeze_max_lines)
+                self.__extra_packages=list(extra_packages) if(extra_packages is not None) else []
+                self.__probe_packages=list(probe_packages) if(probe_packages is not None) else None
+                self.__include_git=include_git
+                self.__include_time=include_time
+                self.__include_notes=include_notes
+                self.__collectors=list(collectors) if(collectors is not None) else None
+
+            def collect(self)->"pyExLib.envInformation.envReport":
+                """
+                Collects the environment information and returns an envReport.
+
+                Returns:
+                    envReport: The collected environment information report.
+                """
+                rows:List[pyExLib.envInformation.envRow]=[]
+                notes:List[pyExLib.envInformation.envNote]=[]
+                meta:Dict[str,Any]={}
+
+                if(self.__include_time):
+                    rows.append(pyExLib.envInformation.envRow(section="Meta",item="Generated",value=datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+
+                if(self.__collectors is not None):
+                    for fn in self.__collectors:
+                        try:
+                            r,n=fn(self)
+                            rows.extend(r)
+                            notes.extend(n)
+                        except Exception as e:
+                            if(self.__include_notes):
+                                notes.append(pyExLib.envInformation.envNote(kind="error",text=f"Collector error: {e}"))
+                    if(not self.__include_notes):
+                        notes=[]
+                    meta["profile"]=self.__profile
+                    return pyExLib.envInformation.envReport(rows=rows,notes=notes,meta=meta)
+
+                minimal=(self.__profile=="minimal")
+                full=(self.__profile=="full")
+
+                rows.extend(self.__collectSystemRows(minimal=minimal))
+                rows.extend(self.__collectPythonRows(minimal=minimal))
+
+                torch_rows,torch_notes=self.__collectTorchRows(minimal=minimal)
+                rows.extend(torch_rows)
+                notes.extend(torch_notes)
+
+                pkg_rows,pkg_notes=self.__collectPackageRows(minimal=minimal)
+                rows.extend(pkg_rows)
+                notes.extend(pkg_notes)
+
+                if(self.__include_git):
+                    rows.extend(self.__collectGitRows())
+
+                if(self.__include_freeze and (not minimal)):
+                    freeze_lines=self.__getPipFreezeLines()
+                    if(freeze_lines is not None):
+                        notes.append(pyExLib.envInformation.envNote(kind="pip_freeze",text=freeze_lines))
+
+                meta["profile"]=self.__profile
+                meta["full"]=full
+
+                if(not self.__include_notes):
+                    notes=[]
+
+                return pyExLib.envInformation.envReport(rows=rows,notes=notes,meta=meta)
+
+            def toCsvText(
+                self,
+                include_notes:bool=True,
+                notes_as_rows:bool=True,
+                dialect:str="excel"
+            )->str:
+                """
+                Converts the environment information report to CSV text.
+
+                Args:
+                    include_notes (bool): Whether to include notes in the CSV output.
+                    notes_as_rows (bool): Whether to include notes as separate rows.
+                    dialect (str): The CSV dialect to use.
+                
+                Returns:
+                    str: The CSV text representation of the environment information report.
+                """
+                report=self.collect()
+                buf=io.StringIO()
+                writer=csv.writer(buf,dialect=dialect)
+
+                writer.writerow(["section","item","value"])
+                for r in report.rows:
+                    writer.writerow([r.section,r.item,r.value])
+
+                if(include_notes and self.__include_notes and (len(report.notes)>0)):
+                    if(notes_as_rows):
+                        for i,n in enumerate(report.notes):
+                            writer.writerow(["Notes",f"{n.kind}[{i}]",self.__noteToText(n)])
+                    else:
+                        writer.writerow([])
+                        writer.writerow(["notes_kind","notes_text"])
+                        for n in report.notes:
+                            writer.writerow([n.kind,self.__noteToText(n)])
+
+                return buf.getvalue()
+
+            def writeCsv(
+                self,
+                out_path:str,
+                encoding:str="utf-8",
+                include_notes:bool=True
+            )->None:
+                """
+                Writes the environment information report to a CSV file.
+
+                Args:
+                    out_path (str): The path to the output CSV file.
+                    encoding (str): The encoding to use for the CSV file.
+                    include_notes (bool): Whether to include notes in the CSV output.
+                """
+                txt=self.toCsvText(include_notes=include_notes,notes_as_rows=True)
+                with open(out_path,mode="w",encoding=encoding,newline="") as f:
+                    f.write(txt)
+
+            def toJsonDict(self)->Dict[str,Any]:
+                """
+                Converts the environment information report to a JSON-compatible dictionary.
+
+                Returns:
+                    Dict[str, Any]: The JSON-compatible dictionary representation of the environment information report.
+                """
+                report=self.collect()
+                return {
+                    "meta":report.meta,
+                    "rows":[{"section":r.section,"item":r.item,"value":r.value} for r in report.rows],
+                    "notes":[{"kind":n.kind,"text":self.__noteToText(n)} for n in report.notes] if(self.__include_notes) else [],
+                }
+
+            def writeJson(
+                self,
+                out_path:str,
+                encoding:str="utf-8"
+            )->None:
+                """
+                Writes the environment information report to a JSON file.
+
+                Args:
+                    out_path (str): The path to the output JSON file.
+                    encoding (str): The encoding to use for the JSON file.
+                """
+                obj=self.toJsonDict()
+                with open(out_path,mode="w",encoding=encoding) as f:
+                    json.dump(obj,f,ensure_ascii=False,indent=2)
+
+            def toDataFrame(
+                self,
+                include_notes:bool=True,
+                notes_as_rows:bool=True
+            )->pd.DataFrame:
+                """
+                Converts the environment information report to a pandas DataFrame.
+
+                Args:
+                    include_notes (bool): Whether to include notes in the DataFrame.
+                    notes_as_rows (bool): Whether to include notes as separate rows.
+
+                Returns:
+                    pd.DataFrame: The pandas DataFrame representation of the environment information report.
+                """
+                report=self.collect()
+                rec=[{"section":r.section,"item":r.item,"value":r.value} for r in report.rows]
+                if(include_notes and self.__include_notes and (len(report.notes)>0)):
+                    if(notes_as_rows):
+                        for i,n in enumerate(report.notes):
+                            rec.append({"section":"Notes","item":f"{n.kind}[{i}]","value":self.__noteToText(n)})
+                    else:
+                        for n in report.notes:
+                            rec.append({"section":"Notes","item":n.kind,"value":self.__noteToText(n)})
+                return pd.DataFrame(rec)
+
+            def __collectSystemRows(
+                self,
+                minimal:bool=False
+            )->List["pyExLib.envInformation.envRow"]:
+                """
+                out:List[envRow]: The list of system environment information rows.
+
+                Args:
+                    minimal (bool): Whether to collect minimal information.
+
+                Returns:
+                    List[envRow]: The list of system environment information rows.
+                """
+                out:List[pyExLib.envInformation.envRow]=[]
+                uname=platform.uname()
+                os_line=f"{uname.system} {uname.release} ({uname.version})"
+                out.append(pyExLib.envInformation.envRow(section="System",item="OS",value=os_line))
+
+                if(not minimal):
+                    machine=f"{uname.machine}"
+                    proc=uname.processor if(uname.processor) else "N/A"
+                    out.append(pyExLib.envInformation.envRow(section="System",item="Machine",value=machine))
+                    out.append(pyExLib.envInformation.envRow(section="System",item="Processor",value=proc))
+
+                conda_env=os.environ.get("CONDA_DEFAULT_ENV","")
+                mamba_env=os.environ.get("MAMBA_DEFAULT_ENV","")
+                venv=os.environ.get("VIRTUAL_ENV","")
+                if(conda_env!=""):
+                    out.append(pyExLib.envInformation.envRow(section="System",item="CondaEnv",value=conda_env))
+                if(mamba_env!=""):
+                    out.append(pyExLib.envInformation.envRow(section="System",item="MambaEnv",value=mamba_env))
+                if(venv!=""):
+                    out.append(pyExLib.envInformation.envRow(section="System",item="Venv",value=venv))
+
+                return out
+
+            def __collectPythonRows(
+                self,
+                minimal:bool=False
+            )->List["pyExLib.envInformation.envRow"]:
+                """
+                Collects Python environment information rows.
+
+                Args:
+                    minimal (bool): Whether to collect minimal information.
+
+                Returns:
+                    List[envRow]: The list of Python environment information rows.
+                """
+                out:List[pyExLib.envInformation.envRow]=[]
+                out.append(pyExLib.envInformation.envRow(section="Python",item="Python",value=sys.version.replace("\n"," ")))
+                if(not minimal):
+                    out.append(pyExLib.envInformation.envRow(section="Python",item="PythonExe",value=sys.executable))
+                    pip_ver=self.__runCmd([sys.executable,"-m","pip","--version"])
+                    if(pip_ver is not None):
+                        out.append(pyExLib.envInformation.envRow(section="Python",item="pip",value=pip_ver.strip()))
+                return out
+
+            def __collectTorchRows(
+                self,
+                minimal:bool=False
+            )->Tuple[List["pyExLib.envInformation.envRow"],List["pyExLib.envInformation.envNote"]]:
+                """
+                Collects PyTorch environment information rows.
+
+                Args:
+                    minimal (bool): Whether to collect minimal information.
+                
+                Returns:
+                    Tuple[List[envRow], List[envNote]]: The list of PyTorch environment information rows and notes.
+                """
+                rows:List[pyExLib.envInformation.envRow]=[]
+                notes:List[pyExLib.envInformation.envNote]=[]
+
+                torch_ver=self.__getPkgVer("torch")
+                if(torch_ver is None):
+                    rows.append(pyExLib.envInformation.envRow(section="PyTorch",item="torch",value="Not installed"))
+                    return rows,notes
+
+                rows.append(pyExLib.envInformation.envRow(section="PyTorch",item="torch",value=torch_ver))
+
+                if(not minimal):
+                    tv=self.__getPkgVer("torchvision")
+                    ta=self.__getPkgVer("torchaudio")
+                    if(tv is not None):
+                        rows.append(pyExLib.envInformation.envRow(section="PyTorch",item="torchvision",value=tv))
+                    if(ta is not None):
+                        rows.append(pyExLib.envInformation.envRow(section="PyTorch",item="torchaudio",value=ta))
+
+                try:
+                    import torch  # type: ignore
+
+                    cuda_built=getattr(torch.version,"cuda",None)
+                    rows.append(pyExLib.envInformation.envRow(section="PyTorch",item="CUDA (torch build)",value=str(cuda_built) if(cuda_built is not None) else "None"))
+
+                    cudnn_ver=str(torch.backends.cudnn.version()) if(torch.backends.cudnn.is_available()) else "None"
+                    rows.append(pyExLib.envInformation.envRow(section="PyTorch",item="cuDNN",value=cudnn_ver))
+
+                    cuda_available=torch.cuda.is_available()
+                    rows.append(pyExLib.envInformation.envRow(section="PyTorch",item="CUDA available",value=str(cuda_available)))
+
+                    if(cuda_available):
+                        device_count=torch.cuda.device_count()
+                        rows.append(pyExLib.envInformation.envRow(section="PyTorch",item="GPU count",value=str(device_count)))
+                        try:
+                            name=torch.cuda.get_device_name(0)
+                            cap=torch.cuda.get_device_capability(0)
+                            rows.append(pyExLib.envInformation.envRow(section="PyTorch",item="GPU[0]",value=f"{name} (cc {cap[0]}.{cap[1]})"))
+                        except Exception:
+                            pass
+
+                        if((not minimal) and self.__include_notes):
+                            gpu_list=[]
+                            for i in range(device_count):
+                                try:
+                                    gpu_list.append(f"{i}:{torch.cuda.get_device_name(i)}")
+                                except Exception:
+                                    gpu_list.append(f"{i}:Unknown")
+                            notes.append(pyExLib.envInformation.envNote(kind="gpu_list",text=", ".join(gpu_list)))
+
+                except Exception as e:
+                    if(self.__include_notes):
+                        notes.append(pyExLib.envInformation.envNote(kind="torch_probe_error",text=str(e)))
+
+                if(not minimal):
+                    nvcc=self.__runCmd(["nvcc","--version"])
+                    if(nvcc is not None):
+                        m=re.search(r"release\\s+([0-9]+\\.[0-9]+)",nvcc)
+                        if(m):
+                            rows.append(pyExLib.envInformation.envRow(section="CUDA",item="nvcc",value=m.group(1)))
+                        else:
+                            rows.append(pyExLib.envInformation.envRow(section="CUDA",item="nvcc",value=nvcc.strip()))
+
+                    smi=self.__runCmd(["nvidia-smi","--query-gpu=driver_version","--format=csv,noheader"])
+                    if(smi is not None):
+                        rows.append(pyExLib.envInformation.envRow(section="CUDA",item="NVIDIA driver",value=smi.strip().splitlines()[0]))
+
+                return rows,notes
+
+            def __collectPackageRows(
+                self,
+                minimal:bool=False
+            )->Tuple[List["pyExLib.envInformation.envRow"],List["pyExLib.envInformation.envNote"]]:
+                """
+                Collects information about installed packages.
+
+                Args:
+                    minimal (bool): If True, collect minimal package information.
+
+                Returns:
+                    Tuple[List[envRow], List[envNote]]: The list of package environment information rows and notes.
+                """
+                rows:List[pyExLib.envInformation.envRow]=[]
+                notes:List[pyExLib.envInformation.envNote]=[]
+
+                if(self.__probe_packages is None):
+                    if(minimal):
+                        important=["ultralytics"]
+                    else:
+                        important=[
+                            "ultralytics",
+                            "yolov5",
+                            "opencv-python",
+                            "numpy",
+                            "scipy",
+                            "pandas",
+                            "matplotlib",
+                            "scikit-learn",
+                            "tqdm",
+                            "Pillow",
+                            "onnx",
+                            "onnxruntime",
+                        ]
+                else:
+                    important=list(self.__probe_packages)
+
+                for p in self.__extra_packages:
+                    if(p not in important):
+                        important.append(p)
+
+                found=[]
+                for pkg in important:
+                    ver=self.__getPkgVer(pkg)
+                    if(ver is not None):
+                        found.append((pkg,ver))
+
+                found_sorted=[]
+                priority=["ultralytics","yolov5"]
+                for p in priority:
+                    for k,v in found:
+                        if(k==p):
+                            found_sorted.append((k,v))
+                for k,v in found:
+                    if(k in priority):
+                        continue
+                    found_sorted.append((k,v))
+
+                for k,v in found_sorted:
+                    rows.append(pyExLib.envInformation.envRow(section="Packages",item=k,value=v))
+
+                if(self.__include_notes and (self.__which("yolo") is not None)):
+                    yolo_ver=self.__runCmd(["yolo","--version"])
+                    if(yolo_ver is not None):
+                        notes.append(pyExLib.envInformation.envNote(kind="yolo_cli_version",text=yolo_ver.strip()))
+
+                return rows,notes
+
+            def __collectGitRows(self)->List["pyExLib.envInformation.envRow"]:
+                """
+                Collects Git repository information rows.
+
+                Returns:
+                    List[envRow]: The list of Git repository information rows.
+                """
+                rows:List[pyExLib.envInformation.envRow]=[]
+                if(self.__which("git") is None):
+                    return rows
+
+                is_repo=self.__runCmd(["git","rev-parse","--is-inside-work-tree"])
+                if(is_repo is None or is_repo.strip()!="true"):
+                    return rows
+
+                head=self.__runCmd(["git","rev-parse","HEAD"])
+                if(head is not None):
+                    rows.append(pyExLib.envInformation.envRow(section="Git",item="commit",value=head.strip()))
+
+                status=self.__runCmd(["git","status","--porcelain"])
+                if(status is not None):
+                    dirty_count=len([ln for ln in status.splitlines() if(ln.strip()!="")])
+                    rows.append(pyExLib.envInformation.envRow(section="Git",item="dirty",value=str(dirty_count)))
+
+                return rows
+
+            def __noteToText(
+                self,
+                note:"pyExLib.envInformation.envNote"
+            )->str:
+                """
+                Converts an envNote to text.
+
+                Args:
+                    note (envNote): The envNote to convert.
+
+                Returns:
+                    str: The text representation of the envNote.
+                """
+                if(note.text is None):
+                    return ""
+                if(isinstance(note.text,list)):
+                    return "\n".join([str(x) for x in note.text])
+                return str(note.text)
+
+            def __getPkgVer(
+                self,
+                pkg_name:str
+            )->Optional[str]:
+                """
+                Gets the version of a package.
+
+                Args:
+                    pkg_name (str): The name of the package.
+
+                Returns:
+                    Optional[str]: The version of the package, or None if not found.
+                """
+                try:
+                    return importlib_metadata.version(pkg_name)
+                except Exception:
+                    return None
+
+            def __which(
+                self,
+                cmd:str
+            )->Optional[str]:
+                """
+                Finds the path of a command.
+
+                Args:
+                    cmd (str): The command to find.
+
+                Returns:
+                    Optional[str]: The path of the command, or None if not found.
+                """
+                return shutil.which(cmd)
+
+            def __runCmd(
+                self,
+                cmd_list:Sequence[str]
+            )->Optional[str]:
+                """
+                Runs a command and returns its output.
+
+                Args:
+                    cmd_list (Sequence[str]): The command and its arguments.
+
+                Returns:
+                    Optional[str]: The output of the command, or None if an error occurs.
+                """
+                try:
+                    p=subprocess.run(list(cmd_list),stdout=subprocess.PIPE,stderr=subprocess.STDOUT,check=False,text=True)
+                    out=p.stdout
+                    if(out is None):
+                        return None
+                    out=out.strip()
+                    if(out==""):
+                        return None
+                    return out
+                except Exception:
+                    return None
+
+            def __getPipFreezeLines(self)->Optional[List[str]]:
+                """
+                Gets the lines from pip freeze output.
+
+                Returns:
+                    Optional[List[str]]: The lines from pip freeze, or None if an error occurs.
+                """
+                out=self.__runCmd([sys.executable,"-m","pip","list","--format=freeze"])
+                if(out is None):
+                    return None
+                lines=[ln for ln in out.splitlines() if(ln.strip()!="")]
+                max_lines=max(1,int(self.__freeze_max_lines))
+                return lines[:max_lines]
+
+
+        class envTexExporter:
+            """
+            Convert pyExLib.envInformation.envExporter report into a LaTeX table.
+            """
+
+            def __init__(
+                self,
+                exporter:Optional["pyExLib.envInformation.envExporter"]=None,
+                profile:str="standard",
+                include_freeze:bool=False,
+                freeze_max_lines:int=80,
+                extra_packages:Optional[Sequence[str]]=None,
+                probe_packages:Optional[Sequence[str]]=None,
+                include_git:bool=True,
+                include_time:bool=True,
+                include_notes:bool=True,
+                collectors=None,
+                plain_table:bool=False,
+                use_threeparttable:bool=True,
+                caption:str="Execution Environment",
+                label:str="tab:execution_environment",
+                with_section:bool=False,
+            ):
+                """
+                Initializes an envTexExporter instance.
+
+                Args:
+                    exporter (Optional[envExporter]): Custom envExporter instance.
+                    profile (str): The profile of information to collect ("minimal", "standard", "full").
+                    include_freeze (bool): Whether to include pip freeze output.
+                    freeze_max_lines (int): The maximum number of lines for pip freeze output.
+                    extra_packages (Optional[Sequence[str]]): Additional packages to probe.
+                    probe_packages (Optional[Sequence[str]]): Specific packages to probe.
+                    include_git (bool): Whether to include Git repository information.
+                    include_time (bool): Whether to include the collection time.
+                    include_notes (bool): Whether to include notes in the report.
+                    collectors (Optional[Sequence[Callable]]): Custom collector functions.
+                    plain_table (bool): Whether to use plain table style (without booktabs).
+                    use_threeparttable (bool): Whether to use threeparttable environment for notes.
+                    caption (str): The caption for the LaTeX table.
+                    label (str): The label for the LaTeX table.
+                    with_section (bool): Whether to include the section column.
+                """
+                self.__exporter=exporter if(exporter is not None) else pyExLib.envInformation.envExporter(
+                    profile=profile,
+                    include_freeze=include_freeze,
+                    freeze_max_lines=freeze_max_lines,
+                    extra_packages=extra_packages,
+                    probe_packages=probe_packages,
+                    include_git=include_git,
+                    include_time=include_time,
+                    include_notes=include_notes,
+                    collectors=collectors,
+                )
+                self.__plain_table=plain_table
+                self.__use_threeparttable=use_threeparttable
+                self.__caption=caption
+                self.__label=label
+                self.__with_section=with_section
+
+            def run(self)->str:
+                """
+                Generates the LaTeX table representation of the environment information report.
+                
+                Returns:
+                    str: The LaTeX table as a string.
+                """
+                report=self.__exporter.collect()
+
+                if(self.__with_section):
+                    header=["Section","Item","Value"]
+                    body_rows=[[r.section,r.item,r.value] for r in report.rows]
+                else:
+                    header=["Item","Value"]
+                    body_rows=[[r.item,r.value] for r in report.rows]
+
+                notes_tex=[]
+                for n in report.notes:
+                    if(n.kind=="pip_freeze"):
+                        lines=n.text if(isinstance(n.text,list)) else [str(n.text)]
+                        escaped=[self.__escapeTex(x) for x in lines]
+                        notes_tex.append("pip freeze (top):\\newline\\ttfamily "+("\\newline ".join(escaped)))
+                    else:
+                        notes_tex.append(self.__escapeTex(self.__noteToText(n)))
+
+                return self.__buildLatexTable(header=header,rows=body_rows,notes=notes_tex)
+
+            def __noteToText(
+                self,
+                note:"pyExLib.envInformation.envNote"
+            )->str:
+                """
+                Converts an envNote to text.
+
+                Args:
+                    note (envNote): The envNote to convert.
+
+                Returns:
+                    str: The text representation of the envNote.
+                """
+                if(note.text is None):
+                    return ""
+                if(isinstance(note.text,list)):
+                    return "\n".join([str(x) for x in note.text])
+                return str(note.text)
+
+            def __escapeTex(
+                self,
+                s:Any
+            )->str:
+                """
+                Escapes special LaTeX characters in a string.
+
+                Args:
+                    s (Any): The input string.
+
+                Returns:
+                    str: The escaped string.
+                """
+                s=str(s)
+                replace_map={
+                    "\\":"\\textbackslash{}",
+                    "&":"\\&",
+                    "%":"\\%",
+                    "$":"\\$",
+                    "#":"\\#",
+                    "_":"\\_",
+                    "{":"\\{",
+                    "}":"\\}",
+                    "~":"\\textasciitilde{}",
+                    "^":"\\textasciicircum{}",
+                }
+                out=[]
+                for ch in s:
+                    if(ch in replace_map):
+                        out.append(replace_map[ch])
+                    else:
+                        out.append(ch)
+                return "".join(out)
+
+            def __buildLatexTable(
+                self,
+                header:List[str],
+                rows:List[List[str]],
+                notes:List[str]
+            )->str:
+                """
+                Builds the LaTeX table string.
+
+                Args:
+                    header (List[str]): The list of header column names.
+                    rows (List[List[str]]): The list of table rows.
+                    notes (List[str]): The list of notes to include.
+
+                Returns:
+                    str: The LaTeX table as a string.
+                """
+                if(self.__plain_table):
+                    top="\\hline"
+                    mid="\\hline"
+                    bot="\\hline"
+                else:
+                    top="\\toprule"
+                    mid="\\midrule"
+                    bot="\\bottomrule"
+
+                col_spec="l"*len(header)
+
+                header_line=" & ".join([self.__escapeTex(x) for x in header])+" \\\\"
+                body=[]
+                for r in rows:
+                    esc=[self.__escapeTex(x) for x in r]
+                    body.append(" & ".join(esc)+" \\\\"
+                    )
+                body_str="\n".join(body)
+
+                use_notes=(len(notes)>0)
+                use_threeparttable=(self.__use_threeparttable and use_notes)
+
+                notes_str=""
+                if(use_notes):
+                    items=[]
+                    for n in notes:
+                        items.append("\\item "+n)
+                    items_str="\n".join(items)
+                    notes_str=(
+                        "\\begin{tablenotes}[flushleft]\n"
+                        "\\footnotesize\n"
+                        f"{items_str}\n"
+                        "\\end{tablenotes}\n"
+                    )
+
+                if(use_threeparttable):
+                    tex=(
+                        "% ---- Auto-generated environment table ----\n"
+                        "% Required packages (recommended): booktabs, threeparttable\n"
+                        "\\begin{table}[htbp]\n"
+                        "\\centering\n"
+                        f"\\caption{{{self.__escapeTex(self.__caption)}}}\n"
+                        f"\\label{{{self.__escapeTex(self.__label)}}}\n"
+                        "\\begin{threeparttable}\n"
+                        f"\\begin{{tabular}}{{{col_spec}}}\n"
+                        f"{top}\n"
+                        f"{header_line}\n"
+                        f"{mid}\n"
+                        f"{body_str}\n"
+                        f"{bot}\n"
+                        "\\end{tabular}\n"
+                        f"{notes_str}"
+                        "\\end{threeparttable}\n"
+                        "\\end{table}\n"
+                    )
+                else:
+                    tex=(
+                        "% ---- Auto-generated environment table ----\n"
+                        "% Required packages (recommended): booktabs\n"
+                        "\\begin{table}[htbp]\n"
+                        "\\centering\n"
+                        f"\\caption{{{self.__escapeTex(self.__caption)}}}\n"
+                        f"\\label{{{self.__escapeTex(self.__label)}}}\n"
+                        f"\\begin{{tabular}}{{{col_spec}}}\n"
+                        f"{top}\n"
+                        f"{header_line}\n"
+                        f"{mid}\n"
+                        f"{body_str}\n"
+                        f"{bot}\n"
+                        "\\end{tabular}\n"
+                        "\\end{table}\n"
+                    )
+
+                return tex
 
 class IOLib:
     """
