@@ -22,6 +22,7 @@ import pickle
 import tempfile
 import tarfile
 from contextlib import contextmanager
+import contextlib
 import io
 import glob
 import re
@@ -24770,6 +24771,7 @@ class imgLib:
             multi_class_mode:str=None,
             gpu_flag:bool=True,
             ensemble_args:dict=None,
+            yolo_args:dict=None,
             yolo_additional_args:dict=None,
             check_model_names_flag:bool=True
         ):
@@ -32168,14 +32170,22 @@ class imgLib:
                 if(yolo_args is None):
                     yolo_args={}
 
+                #### `yolo_additional_args`
                 """
-                !TODO `yolo_additional_args` is for future extension.
+                TODO: `yolo_additional_args` is for future extension.
                 I'm currently planning to add options like:
                     - parallel processing of multiple models (if GPU memory allows)
                 """
                 if(yolo_additional_args is None):
                     yolo_additional_args={}
+                if(not isinstance(yolo_additional_args,dict)):
+                    raise ValueError("Error : yolo_additional_args must be a dict!")
                     
+                inference_mode=yolo_additional_args.get("inference_mode",True)
+                if(not isinstance(inference_mode,bool)):
+                    raise ValueError("Error : yolo_additional_args[\"inference_mode\"] must be a bool!")
+                ####
+
                 # Normalize yolo_args into either a shared dict or per-model list[dict]
                 _shared_args=None
                 _per_model_args=None
@@ -32196,15 +32206,22 @@ class imgLib:
 
                 ns=None
                 all_results=[]
-
+                
                 for _i,model in enumerate(models):
                     _args=_shared_args if (_per_model_args is None) else _per_model_args[_i]
-                    if(gpu_flag):
-                        with torch.cuda.amp.autocast():
-                            results=model.predict(predict_data,**_args)
+
+                    if(inference_mode and hasattr(torch,"inference_mode")):
+                        _infer_cm=torch.inference_mode()
                     else:
-                        results=model.predict(predict_data,**_args)
-                
+                        _infer_cm=contextlib.nullcontext()
+                        
+                    with _infer_cm:
+                        if(gpu_flag):
+                            with torch.cuda.amp.autocast():
+                                results=model.predict(predict_data,**_args)
+                        else:
+                            results=model.predict(predict_data,**_args)
+                    
                     if(ns==None):  
                         ns=len(results)
                     elif(ns!=len(results)):
