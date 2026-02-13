@@ -4393,6 +4393,280 @@ class pyExLib:
                     r[ts].extend(h)
             return r
 
+        def __formatProcessTimePlotValue(self,v,value_fmt:str="{:.3g}")->str:
+            """
+            Formats a value for process time plot annotation.
+
+            Args:
+                v (float): Value to format.
+                value_fmt (str): Format string or format specifier.
+            
+            Returns:
+                str: Formatted value as string.
+            """
+            if(value_fmt is None):
+                return str(v)
+            try:
+                return value_fmt.format(v)
+            except Exception:
+                try:
+                    return f"{v:{value_fmt}}"
+                except Exception:
+                    return str(v)
+
+        def __calcProcessTimePlotStat(self,vals,stat:str):
+            """
+            Calculate statistic from vals.
+
+            Args:
+                vals (list, tuple, np.ndarray, or scalar): Input values.
+                stat (str): Statistic to calculate. Options: "value", "mean", "avg", "median", "p50", "sum", "min", "max", "std", "count", "n".
+
+            Returns:
+                float or int or None: Calculated statistic value.
+            """
+            stat=str(stat) if(stat is not None) else "value"
+            if(vals is None):
+                if(stat in ["count","n"]):
+                    return 0
+                return None
+
+            # scalar
+            if(not isinstance(vals,(list,tuple,np.ndarray))):
+                try:
+                    v=float(vals)
+                except Exception:
+                    v=None
+                if(stat in ["count","n"]):
+                    return 1 if(v is not None) else 0
+                return v
+
+            arr=np.array(vals,dtype=float)
+            arr=arr[~np.isnan(arr)]
+            if(stat in ["count","n"]):
+                return int(arr.size)
+            if(arr.size<=0):
+                return None
+
+            if(stat in ["value","mean","avg"]):
+                return float(arr.mean())
+            if(stat in ["median","p50"]):
+                return float(np.median(arr))
+            if(stat in ["sum"]):
+                return float(arr.sum())
+            if(stat in ["min"]):
+                return float(arr.min())
+            if(stat in ["max"]):
+                return float(arr.max())
+            if(stat in ["std"]):
+                return float(arr.std(ddof=0))
+            return float(arr.mean())
+
+        def __applyProcessTimePlotOrderAndSort(
+            self,
+            keys:list,
+            vals:list,
+            order:list|None=None,
+            sort_by:str|None=None,
+            sort_ascending:bool=True,
+        ):
+            """
+            Apply order and sort to process time plot data.
+
+            Args:
+                keys (list): List of keys (names).
+                vals (list): List of values (data).
+                order (list or None): External order of keys. If None, no external order is applied.
+                sort_by (str or None): Sort by criteria. Options: "name", "key", "label" (alpha sort), "value", "mean", "median", "p50", "sum", "min", "max", "std", "count", "n" (numeric sort). If None, no sorting is applied.
+                sort_ascending (bool): Whether to sort in ascending order.
+
+            Returns:
+                tuple: (new_keys, new_vals) after applying order and sort.
+            """
+            keys=list(keys) if(keys is not None) else []
+            vals=list(vals) if(vals is not None) else []
+            if(len(keys)!=len(vals)):
+                raise ValueError("keys and vals length mismatch.")
+
+            # external order has priority
+            if(order is not None):
+                order=[str(x) for x in order]
+                key_to_idx={str(k):i for i,k in enumerate(keys)}
+                used=set()
+                new_keys=[]
+                new_vals=[]
+                for ok in order:
+                    if(ok in key_to_idx):
+                        i=key_to_idx[ok]
+                        used.add(i)
+                        new_keys.append(keys[i])
+                        new_vals.append(vals[i])
+                for i,(k,v) in enumerate(zip(keys,vals)):
+                    if(i in used):
+                        continue
+                    new_keys.append(k)
+                    new_vals.append(v)
+                return new_keys,new_vals
+
+            if(sort_by is None):
+                return keys,vals
+
+            sort_by=str(sort_by)
+            # alpha sort
+            if(sort_by in ["name","key","label"]):
+                pairs=sorted(zip(keys,vals),key=lambda kv:str(kv[0]),reverse=not sort_ascending)
+                return [p[0] for p in pairs],[p[1] for p in pairs]
+
+            # numeric sort (scalar -> value, list -> stat)
+            def metric(v):
+                m=self.__calcProcessTimePlotStat(v,sort_by)
+                empty=(m is None)
+                return (empty,m if(m is not None) else 0.0)
+
+            pairs=sorted(
+                zip(keys,vals),
+                key=lambda kv: metric(kv[1]),
+                reverse=not sort_ascending,
+            )
+            return [p[0] for p in pairs],[p[1] for p in pairs]
+
+        def __annotateProcessTimeBars(
+            self,
+            ax,
+            bars,
+            values:list,
+            value_fmt:str="{:.3g}",
+            y_offset_ratio:float=0.01,
+            fontsize:int=8,
+        ):
+            """
+            Annotate bar chart with values.
+
+            Args:
+                ax: Matplotlib Axes object.
+                bars: Matplotlib BarContainer object.
+                values (list): List of values corresponding to bars.
+                value_fmt (str): Format string for values.
+                y_offset_ratio (float): Ratio of Y-axis height to offset text vertically.
+                fontsize (int): Font size for annotation text.
+            """
+            if(ax is None or bars is None):
+                return
+            if(values is None):
+                return
+            y0,y1=ax.get_ylim()
+            dy=(y1-y0)*float(y_offset_ratio)
+            for rect,v in zip(bars,values):
+                try:
+                    h=float(v)
+                except Exception:
+                    continue
+                x=rect.get_x()+rect.get_width()/2.0
+                y=h+dy
+                ax.text(
+                    x,
+                    y,
+                    self.__formatProcessTimePlotValue(h,value_fmt=value_fmt),
+                    ha="center",
+                    va="bottom",
+                    fontsize=fontsize,
+                )
+
+        def __annotateProcessTimeBoxplot(
+            self,
+            ax,
+            bp:dict,
+            data:list,
+            value_kind:str="median",
+            value_fmt:str="{:.3g}",
+            y_offset_ratio:float=0.01,
+            fontsize:int=8,
+        ):
+            """
+            Annotate box plot with statistic values.
+
+            Args:
+                ax: Matplotlib Axes object.
+                bp (dict): Boxplot dictionary returned by ax.boxplot().
+                data (list): List of data arrays corresponding to boxplot.
+                value_kind (str): Statistic to annotate. Options: "median", "mean", "p50", "min", "max", "std", "count", "n".
+                value_fmt (str): Format string for values.
+                y_offset_ratio (float): Ratio of Y-axis height to offset text vertically.
+                fontsize (int): Font size for annotation text.
+            """
+            if(ax is None or bp is None or data is None):
+                return
+            value_kind=str(value_kind) if(value_kind is not None) else "median"
+            y0,y1=ax.get_ylim()
+            dy=(y1-y0)*float(y_offset_ratio)
+
+            # Use median line positions as x reference
+            medians=bp.get("medians",[])
+            for i,(mline,vals) in enumerate(zip(medians,data)):
+                if(mline is None):
+                    continue
+                xdata=mline.get_xdata()
+                ydata=mline.get_ydata()
+                if(xdata is None or len(xdata)<=0 or ydata is None or len(ydata)<=0):
+                    continue
+                x=float(np.mean(xdata))
+                if(value_kind in ["median","p50"]):
+                    y=float(ydata[0])
+                    v=y
+                else:
+                    v=self.__calcProcessTimePlotStat(vals,value_kind)
+                    if(v is None):
+                        continue
+                    y=float(v)
+                ax.text(
+                    x,
+                    y+dy,
+                    self.__formatProcessTimePlotValue(v,value_fmt=value_fmt),
+                    ha="center",
+                    va="bottom",
+                    fontsize=fontsize,
+                )
+
+        def __annotateProcessTimeGroupedBoxplot(
+            self,
+            ax,
+            positions:list,
+            data_all:list,
+            value_kind:str="median",
+            value_fmt:str="{:.3g}",
+            y_offset_ratio:float=0.01,
+            fontsize:int=8,
+        ):
+            """
+            Annotate grouped box plot with statistic values.
+
+            Args:
+                ax: Matplotlib Axes object.
+                positions (list): List of x positions for each group.
+                data_all (list): List of data arrays corresponding to each group.
+                value_kind (str): Statistic to annotate. Options: "median", "mean", "p50", "min", "max", "std", "count", "n".
+                value_fmt (str): Format string for values.
+                y_offset_ratio (float): Ratio of Y-axis height to offset text vertically.
+                fontsize (int): Font size for annotation text.
+            """
+            if(ax is None or positions is None or data_all is None):
+                return
+            value_kind=str(value_kind) if(value_kind is not None) else "median"
+            y0,y1=ax.get_ylim()
+            dy=(y1-y0)*float(y_offset_ratio)
+            for x,vals in zip(positions,data_all):
+                v=self.__calcProcessTimePlotStat(vals,value_kind)
+                if(v is None):
+                    continue
+                ax.text(
+                    float(x),
+                    float(v)+dy,
+                    self.__formatProcessTimePlotValue(v,value_fmt=value_fmt),
+                    ha="center",
+                    va="bottom",
+                    fontsize=fontsize,
+                )
+
         def plotCurrentByNameBar(
             self,
             names:list=None,
@@ -4402,6 +4676,11 @@ class pyExLib:
             save_path:str|None=None,
             show:bool=True,
             figsize:tuple=(10,4),
+            order:list|None=None,
+            sort_by:str|None=None,
+            sort_ascending:bool=True,
+            show_values:bool=False,
+            value_fmt:str="{:.3g}",
         ):
             """
             Plots current elapsed times by name as a bar chart.
@@ -4414,6 +4693,11 @@ class pyExLib:
                 save_path (str or None): Path to save the plot image. If None, the plot is not saved.
                 show (bool): Whether to display the plot.
                 figsize (tuple): Figure size (width, height).
+                order (list or None): External order of names. If None, no external order is applied.
+                sort_by (str or None): Sort by criteria. Options: "name", "key", "label" (alpha sort), "value", "mean", "median", "p50", "sum", "min", "max", "std", "count", "n" (numeric sort). If None, no sorting is applied.
+                sort_ascending (bool): Whether to sort in ascending order.
+                show_values (bool): Whether to annotate bars with values.
+                value_fmt (str): Format string for annotated values.
             
             Returns:
                 matplotlib.figure.Figure: The created figure object.
@@ -4422,9 +4706,19 @@ class pyExLib:
             keys=list(sec_map.keys())
             vals=[sec_map[k] for k in keys]
 
+            keys,vals=self.__applyProcessTimePlotOrderAndSort(
+                keys,
+                vals,
+                order=order,
+                sort_by=sort_by,
+                sort_ascending=sort_ascending,
+            )
+
             fig=plt.figure(figsize=figsize)
             ax=fig.add_subplot(111)
-            ax.bar(keys,vals)
+            bars=ax.bar(keys,vals)
+            if(show_values):
+                self.__annotateProcessTimeBars(ax,bars,vals,value_fmt=value_fmt)
             ax.set_title(title)
             ax.set_ylabel(ylabel)
             ax.tick_params(axis="x",rotation=45)
@@ -4445,6 +4739,13 @@ class pyExLib:
             save_path:str|None=None,
             show:bool=True,
             figsize:tuple=(10,4),
+            showfliers:bool=True,
+            order:list|None=None,
+            sort_by:str|None=None,
+            sort_ascending:bool=True,
+            show_values:bool=False,
+            value_kind:str="median",
+            value_fmt:str="{:.3g}",
         ):
             """
             Plots recorded history times by name as a box plot.
@@ -4457,6 +4758,13 @@ class pyExLib:
                 save_path (str or None): Path to save the plot image. If None, the plot is not saved.
                 show (bool): Whether to display the plot.
                 figsize (tuple): Figure size (width, height).
+                showfliers (bool): Whether to show outliers in the box plot.
+                order (list or None): External order of names. If None, no external order is applied.
+                sort_by (str or None): Sort by criteria. Options: "name", "key", "label" (alpha sort), "value", "mean", "median", "p50", "sum", "min", "max", "std", "count", "n" (numeric sort). If None, no sorting is applied.
+                sort_ascending (bool): Whether to sort in ascending order.
+                show_values (bool): Whether to annotate boxes with values.
+                value_kind (str): Statistic to annotate. Options: "median", "mean", "p50", "min", "max", "std", "count", "n".
+                value_fmt (str): Format string for annotated values.
 
             Returns:
                 matplotlib.figure.Figure: The created figure object.
@@ -4465,9 +4773,19 @@ class pyExLib:
             keys=list(hmap.keys())
             data=[hmap[k] for k in keys]
 
+            keys,data=self.__applyProcessTimePlotOrderAndSort(
+                keys,
+                data,
+                order=order,
+                sort_by=sort_by,
+                sort_ascending=sort_ascending,
+            )
+
             fig=plt.figure(figsize=figsize)
             ax=fig.add_subplot(111)
-            ax.boxplot(data,labels=keys,showfliers=True)
+            bp=ax.boxplot(data,labels=keys,showfliers=showfliers)
+            if(show_values):
+                self.__annotateProcessTimeBoxplot(ax,bp,data,value_kind=value_kind,value_fmt=value_fmt)
             ax.set_title(title)
             ax.set_ylabel(ylabel)
             ax.tick_params(axis="x",rotation=45)
@@ -4477,7 +4795,7 @@ class pyExLib:
                 fig.savefig(save_path,dpi=150,bbox_inches="tight")
             if(show):
                 plt.show()
-            return fig        
+            return fig
         
         def plotHistoryByTagBox(
             self,
@@ -4488,6 +4806,13 @@ class pyExLib:
             save_path:str|None=None,
             show:bool=True,
             figsize:tuple=(10,4),
+            showfliers:bool=True,
+            order:list|None=None,
+            sort_by:str|None=None,
+            sort_ascending:bool=True,
+            show_values:bool=False,
+            value_kind:str="median",
+            value_fmt:str="{:.3g}",
         ):
             """
             Plots recorded history times by tag as a box plot.
@@ -4500,6 +4825,13 @@ class pyExLib:
                 save_path (str or None): Path to save the plot image. If None, the plot is not saved.
                 show (bool): Whether to display the plot.
                 figsize (tuple): Figure size (width, height).
+                showfliers (bool): Whether to show outliers in the box plot.
+                order (list or None): External order of tags. If None, no external order is applied.
+                sort_by (str or None): Sort by criteria. Options: "name", "key", "label" (alpha sort), "value", "mean", "median", "p50", "sum", "min", "max", "std", "count", "n" (numeric sort). If None, no sorting is applied.
+                sort_ascending (bool): Whether to sort in ascending order.
+                show_values (bool): Whether to annotate boxes with values.
+                value_kind (str): Statistic to annotate. Options: "median", "mean", "p50", "min", "max", "std", "count", "n".
+                value_fmt (str): Format string for annotated values.
             
             Returns:
                 matplotlib.figure.Figure: The created figure object.
@@ -4508,9 +4840,19 @@ class pyExLib:
             keys=list(tmap.keys())
             data=[tmap[k] for k in keys]
 
+            keys,data=self.__applyProcessTimePlotOrderAndSort(
+                keys,
+                data,
+                order=order,
+                sort_by=sort_by,
+                sort_ascending=sort_ascending,
+            )
+
             fig=plt.figure(figsize=figsize)
             ax=fig.add_subplot(111)
-            ax.boxplot(data,labels=keys,showfliers=True)
+            bp=ax.boxplot(data,labels=keys,showfliers=showfliers)
+            if(show_values):
+                self.__annotateProcessTimeBoxplot(ax,bp,data,value_kind=value_kind,value_fmt=value_fmt)
             ax.set_title(title)
             ax.set_ylabel(ylabel)
             ax.tick_params(axis="x",rotation=45)
@@ -4531,6 +4873,11 @@ class pyExLib:
             save_path:str|None=None,
             show:bool=True,
             figsize:tuple=(10,4),
+            order:list|None=None,
+            sort_by:str|None=None,
+            sort_ascending:bool=True,
+            show_values:bool=False,
+            value_fmt:str="{:.3g}",
         ):
             """
             Plots mean of recorded history times by tag as a bar chart.
@@ -4543,6 +4890,11 @@ class pyExLib:
                 save_path (str or None): Path to save the plot image. If None, the plot is not saved.
                 show (bool): Whether to display the plot.
                 figsize (tuple): Figure size (width, height).
+                order (list or None): External order of tags. If None, no external order is applied.
+                sort_by (str or None): Sort by criteria. Options: "name", "key", "label" (alpha sort), "value", "mean", "median", "p50", "sum", "min", "max", "std", "count", "n" (numeric sort). If None, no sorting is applied.
+                sort_ascending (bool): Whether to sort in ascending order.
+                show_values (bool): Whether to annotate bars with values.
+                value_fmt (str): Format string for annotated values.
 
             Returns:
                 matplotlib.figure.Figure: The created figure object.
@@ -4554,9 +4906,19 @@ class pyExLib:
                 arr=np.array(tmap[k],dtype=float)
                 means.append(float(arr.mean()) if(arr.size>0) else 0.0)
 
+            keys,means=self.__applyProcessTimePlotOrderAndSort(
+                keys,
+                means,
+                order=order,
+                sort_by=sort_by if(sort_by is not None) else None,
+                sort_ascending=sort_ascending,
+            )
+
             fig=plt.figure(figsize=figsize)
             ax=fig.add_subplot(111)
-            ax.bar(keys,means)
+            bars=ax.bar(keys,means)
+            if(show_values):
+                self.__annotateProcessTimeBars(ax,bars,means,value_fmt=value_fmt)
             ax.set_title(title)
             ax.set_ylabel(ylabel)
             ax.tick_params(axis="x",rotation=45)
@@ -4568,7 +4930,11 @@ class pyExLib:
                 plt.show()
             return fig
         
-        def getTagNameHistorySecMap(self,names:list=None,tags:list=None)->dict:
+        def getTagNameHistorySecMap(
+            self,
+            names:list=None,
+            tags:list=None
+        )->dict:
             """
             Returns a dictionary mapping tags to names and their corresponding history times in seconds.
                 - `{tag:{name:[sec,...]}}`
@@ -4598,7 +4964,11 @@ class pyExLib:
                     r[ts][item_name]=h
             return r
 
-        def getNameTagHistorySecMap(self,names:list=None,tags:list=None)->dict:
+        def getNameTagHistorySecMap(
+            self,
+            names:list=None,
+            tags:list=None
+        )->dict:
             """
             Returns a dictionary mapping names to tags and their corresponding history times in seconds.
                 - `{name:{tag:[sec,...]}}`
@@ -4640,6 +5010,15 @@ class pyExLib:
             save_path:str|None=None,
             show:bool=True,
             figsize:tuple=(12,4),
+            group_order:list|None=None,
+            group_sort_by:str|None=None,
+            group_sort_ascending:bool=True,
+            compare_order:list|None=None,
+            compare_sort_by:str|None=None,
+            compare_sort_ascending:bool=True,
+            show_values:bool=False,
+            value_kind:str="median",
+            value_fmt:str="{:.3g}",
         ):
             """
             Plots recorded history times as grouped box plots.
@@ -4655,6 +5034,15 @@ class pyExLib:
                 save_path (str or None): Path to save the plot image. If None, the plot is not saved.
                 show (bool): Whether to display the plot.
                 figsize (tuple): Figure size (width, height).
+                group_order (list or None): External order of groups on the x-axis. If None, no external order is applied.
+                group_sort_by (str or None): Sort by criteria for groups on the x-axis. Options: "name", "key", "label" (alpha sort), "value", "mean", "median", "p50", "sum", "min", "max", "std", "count", "n" (numeric sort). If None, no sorting is applied.
+                group_sort_ascending (bool): Whether to sort groups on the x-axis in ascending order.
+                compare_order (list or None): External order of comparison categories (colors). If None, no external order is applied.
+                compare_sort_by (str or None): Sort by criteria for comparison categories (colors). Options: "name", "key", "label" (alpha sort), "value", "mean", "median", "p50", "sum", "min", "max", "std", "count", "n" (numeric sort). If None, no sorting is applied.
+                compare_sort_ascending (bool): Whether to sort comparison categories (colors) in ascending order.
+                show_values (bool): Whether to annotate boxes with values.
+                value_kind (str): Statistic to annotate. Options: "median", "mean", "p50", "min", "max", "std", "count", "n".
+                value_fmt (str): Format string for annotated values.
 
             Returns:
                 matplotlib.figure.Figure: The created figure object.
@@ -4680,6 +5068,33 @@ class pyExLib:
             if(len(group_keys)<=0):
                 raise ValueError("No history data to plot.")
 
+            # group order / sort (x-axis)
+            if(group_order is not None):
+                group_order=[str(x) for x in group_order]
+                used=set()
+                new_group_keys=[]
+                for ok in group_order:
+                    if(ok in gmap):
+                        used.add(ok)
+                        new_group_keys.append(ok)
+                for gk in group_keys:
+                    if(gk in used):
+                        continue
+                    new_group_keys.append(gk)
+                group_keys=new_group_keys
+            elif(group_sort_by is not None):
+                sby=str(group_sort_by)
+                def gmetric(gk):
+                    all_vals=[]
+                    for vv in gmap[gk].values():
+                        if(vv is None):
+                            continue
+                        all_vals.extend(vv)
+                    m=self.__calcProcessTimePlotStat(all_vals,sby)
+                    empty=(m is None)
+                    return (empty,m if(m is not None) else 0.0)
+                group_keys=sorted(group_keys,key=gmetric,reverse=not group_sort_ascending)
+
             # collect compare keys (legend/color categories)
             compare_keys=[]
             compare_set=set()
@@ -4691,6 +5106,36 @@ class pyExLib:
 
             if(len(compare_keys)<=0):
                 raise ValueError("No compare categories found.")
+
+            # compare order / sort (legend)
+            if(compare_order is not None):
+                compare_order=[str(x) for x in compare_order]
+                used=set()
+                new_compare_keys=[]
+                for ok in compare_order:
+                    if(ok in compare_set):
+                        used.add(ok)
+                        new_compare_keys.append(ok)
+                for ck in compare_keys:
+                    if(ck in used):
+                        continue
+                    new_compare_keys.append(ck)
+                compare_keys=new_compare_keys
+            elif(compare_sort_by is not None):
+                sby=str(compare_sort_by)
+                def cmetric(ck):
+                    all_vals=[]
+                    for gk in group_keys:
+                        if(ck not in gmap[gk]):
+                            continue
+                        vv=gmap[gk][ck]
+                        if(vv is None):
+                            continue
+                        all_vals.extend(vv)
+                    m=self.__calcProcessTimePlotStat(all_vals,sby)
+                    empty=(m is None)
+                    return (empty,m if(m is not None) else 0.0)
+                compare_keys=sorted(compare_keys,key=cmetric,reverse=not compare_sort_ascending)
 
             # color map (stable)
             cmap=plt.get_cmap("tab10")
@@ -4733,6 +5178,9 @@ class pyExLib:
                 patch_artist=True,
                 showfliers=showfliers,
             )
+
+            if(show_values):
+                self.__annotateProcessTimeGroupedBoxplot(ax,pos_all,data_all,value_kind=value_kind,value_fmt=value_fmt)
 
             for patch,c in zip(bp["boxes"],color_all):
                 patch.set_facecolor(c)
