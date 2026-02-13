@@ -192,7 +192,6 @@ import matplotlib.patches as mpatches
 __all__=[
     "pyExLib",
     "IOLib",
-    "TuringMachine",
     "mathLib",
     "imgLib",
     "videoLib",
@@ -5546,6 +5545,9 @@ class pyExLib:
             round_ndigits:int|None=None,
             group_by:str="name",
             group_tags:list|None=None,
+            columns:list|tuple|None=None,
+            float_ndigits:int|None=None,
+            float_format:str|None=None,
         )->str:
             """
             Exports summary statistics to a CSV file.
@@ -5563,6 +5565,9 @@ class pyExLib:
                     - "name" (default): One row per processTime name (existing behavior).
                     - "tag": One row per tag. History samples from all names having the tag are pooled.
                 group_tags (list or None): When group_by is "tag", restrict output rows to these tags. If None, all tags found in selected instances are used.
+                columns (list/tuple or None): Columns to export (and their order). If None, exports all columns.
+                float_ndigits (int or None): Decimal places for float output. If None, falls back to round_ndigits. If both are None, no forced float formatting is applied.
+                float_format (str or None): Explicit float format string for pandas.DataFrame.to_csv (e.g., "%.3f"). If provided, overrides float_ndigits/round_ndigits.
 
             Returns:
                 str: Path to the output CSV file.
@@ -5576,7 +5581,162 @@ class pyExLib:
                 group_by=group_by,
                 group_tags=group_tags,
             )
-            df.to_csv(filepath,index=index,encoding=encoding)
+
+            if(columns is not None):
+                cols=list(columns)
+                missing=[c for c in cols if c not in df.columns]
+                if(len(missing)>0):
+                    raise ValueError(f"Unknown columns: {missing}. Available columns: {list(df.columns)}")
+                df=df.loc[:,cols]
+
+            _float_format=float_format
+            nd=float_ndigits
+            if(nd is None):
+                nd=round_ndigits
+            if((_float_format is None) and (nd is not None)):
+                _float_format=f"%.{int(nd)}f"
+
+            df.to_csv(filepath,index=index,encoding=encoding,float_format=_float_format)
+            return filepath
+
+        def exportSummaryTex(
+            self,
+            filepath:str,
+            names:list|None=None,
+            tags:list|None=None,
+            index:bool=False,
+            encoding:str="utf-8",
+            percentiles:list|tuple=(0,25,50,75,100),
+            ddof:int=0,
+            round_ndigits:int|None=None,
+            group_by:str="name",
+            group_tags:list|None=None,
+            caption:str|None=None,
+            label:str|None=None,
+            position:str|None="htbp",
+            escape:bool=True,
+            bold_rows:bool=False,
+            column_format:str|None=None,
+            longtable:bool=False,
+            multicolumn:bool|None=True,
+            multirow:bool|None=True,
+            float_format=None,
+            columns:list|tuple|None=None,
+            float_ndigits:int|None=None,
+        )->str:
+            """
+            Exports summary statistics to a LaTeX file.
+
+            Args:
+                filepath (str): Path to the output TeX file.
+                names (list or None): List of processTime instance names to include. If None, all instances are included.
+                tags (list or None): List of tags to filter processTime instances to include (AND condition). If None, no tag filtering is applied.
+                index (bool): Whether to include the DataFrame index in the output.
+                encoding (str): Encoding for the TeX file.
+                percentiles (list or tuple): Percentiles to calculate.
+                ddof (int): Delta degrees of freedom for std/var calculation.
+                round_ndigits (int or None): Number of digits to round the results. If None, no rounding is applied.
+                group_by (str): Grouping mode passed to toSummaryDataFrame. ("name" or "tag")
+                group_tags (list or None): Tag whitelist when group_by=="tag".
+                caption (str or None): LaTeX caption for the table.
+                label (str or None): LaTeX label for the table.
+                position (str or None): LaTeX float position (e.g., "htbp"). Used when longtable is False.
+                escape (bool): Whether to escape LaTeX special characters.
+                bold_rows (bool): Whether to bold the row labels.
+                column_format (str or None): LaTeX column format string (e.g., "lrrr").
+                longtable (bool): Whether to use the longtable environment.
+                multicolumn (bool or None): Whether to use multicolumn for column headers (if supported by pandas).
+                multirow (bool or None): Whether to use multirow for row headers (if supported by pandas).
+                float_format (callable/str or None): Formatter for floats (if supported by pandas). If a string is provided, it is treated as either a printf-style (e.g., "%.3f") or a python format-spec (e.g., ".3f").
+                columns (list/tuple or None): Columns to export (and their order). If None, exports all columns.
+                float_ndigits (int or None): Decimal places for float output when float_format is None. If None, falls back to round_ndigits.
+
+            Returns:
+                str: Path to the output TeX file.
+            """
+            df=self.toSummaryDataFrame(
+                names=names,
+                tags=tags,
+                percentiles=percentiles,
+                ddof=ddof,
+                round_ndigits=round_ndigits,
+                group_by=group_by,
+                group_tags=group_tags,
+            )
+
+            if(columns is not None):
+                cols=list(columns)
+                missing=[c for c in cols if c not in df.columns]
+                if(len(missing)>0):
+                    raise ValueError(f"Unknown columns: {missing}. Available columns: {list(df.columns)}")
+                df=df.loc[:,cols]
+
+            _float_format=float_format
+            if(_float_format is None):
+                nd=float_ndigits
+                if(nd is None):
+                    nd=round_ndigits
+                if(nd is not None):
+                    n=int(nd)
+                    def _fmt(x,_n=n):
+                        try:
+                            return f"{x:.{_n}f}"
+                        except Exception:
+                            return str(x)
+                    _float_format=_fmt
+            elif(isinstance(_float_format,str)):
+                s=_float_format
+                if("%" in s):
+                    def _fmt(x,_s=s):
+                        try:
+                            return _s % x
+                        except Exception:
+                            return str(x)
+                    _float_format=_fmt
+                else:
+                    def _fmt(x,_s=s):
+                        try:
+                            return format(x,_s)
+                        except Exception:
+                            return str(x)
+                    _float_format=_fmt
+
+            kwargs={
+                "index":index,
+                "caption":caption,
+                "label":label,
+                "escape":escape,
+                "bold_rows":bold_rows,
+            }
+            if((position is not None) and (not longtable)):
+                kwargs["position"]=position
+            if(column_format is not None):
+                kwargs["column_format"]=column_format
+            if(longtable):
+                kwargs["longtable"]=True
+            if(multicolumn is not None):
+                kwargs["multicolumn"]=multicolumn
+            if(multirow is not None):
+                kwargs["multirow"]=multirow
+            if(_float_format is not None):
+                kwargs["float_format"]=_float_format
+
+            try:
+                import inspect
+                sig=inspect.signature(df.to_latex)
+                for k in list(kwargs.keys()):
+                    if(k not in sig.parameters):
+                        kwargs.pop(k,None)
+            except Exception:
+                pass
+
+            latex_str=df.to_latex(**kwargs)
+
+            with open(filepath,"w",encoding=encoding) as f:
+                f.write(latex_str)
+                if(not latex_str.endswith("\n")):
+                    f.write("\n")
+
             return filepath
 
         def exportHistoryJson(
@@ -15696,794 +15856,6 @@ class IOLib:
 
             return cls(IOLib.FileAsset(db_path),read_only=False,pragmas=pragmas or {})
 
-@_protectedClass.fileStoreMyLibRegister
-class TuringMachine(_FileStore.FileStoreParser):
-    """
-    Turing Machine class.
-    """
-
-    def __init__(
-            self,
-            blank:str=None,
-            Q:set=None,
-            Sigma:set=None,
-            Gamma:set=None,
-            delta:callable=None,
-            q_init:str=None,
-            q_accept:str=None,
-            q_reject:str=None,
-            num_tapes:int=1
-        ):
-        """
-        Initializes the Turing Machine with the given parameters.
-
-        Args:
-            blank (str): Blank alphabet.
-            Q (set): Set of states.
-            Sigma (set): Input alphabet.
-            Gamma (set): Tape alphabet.
-            delta (callable): Transition function.
-            q_init (str): Initial state.
-            q_accept (str): Accept state.
-            q_reject (str): Reject state.
-            num_tapes (int): Number of tapes.
-        """
-        self.__machine_parameter={}
-        self.__num_tapes=num_tapes
-
-        self.__tapes=[[] for _ in range(self.__num_tapes)]
-        self.__tapes_q=[0]*self.__num_tapes
-        
-        self.__createMachineList(blank=blank,Q=Q,Sigma=Sigma,Gamma=Gamma,delta=delta,q_init=q_init,q_accept=q_accept,q_reject=q_reject,num_tapes=num_tapes)
-        
-    def __createMachineList(
-            self,
-            blank:str=None,
-            Q:set=None,
-            Sigma:set=None,
-            Gamma:set=None,
-            delta:callable=None,
-            q_init:str=None,
-            q_accept:str=None,
-            q_reject:str=None,
-            num_tapes:int=None
-        ):
-        """
-        Creates the machine list with the given parameters.
-
-        Args:
-            blank (str): Blank alphabet [string].
-            Q (set): Set of states [set].
-            Sigma (set): Input alphabet [set].
-            Gamma (set): Tape alphabet [set].
-            delta (callable): Transition function [function].
-            q_init (str): Initial state [string].
-            q_accept (str): Accept state [string].
-            q_reject (str): Reject state [string].
-            num_tapes (int): Number of tapes [int > 0].
-        
-        Raises:
-            TypeError: If any argument is of incorrect type.
-            ValueError: If any argument violates the conditions.
-        """
-        #Type evaluation
-        if(not(type(blank) is str)):
-            raise TypeError("blank argument must be a string,not '"+type(blank).__name__+"'")
-        if(not(type(Q) is set)):
-            raise TypeError("Q argument must be a set,not '"+type(Q).__name__+"'")
-        if(not(type(Sigma) is set)):
-            raise TypeError("Sigma argument must be a set, not '"+type(Sigma).__name__+"'")
-        if(not(type(Gamma) is set)):
-            raise TypeError("Gamma argument must be a set, not '"+type(Gamma).__name__+"'")
-        if(not(callable(delta))):
-            raise TypeError("delta argument must be a function, not '"+type(delta).__name__+"'")
-        if(not(type(q_init) is str)):
-            raise TypeError("q_init argument must be a string, not '"+type(q_init).__name__+"'")
-        if(not(type(q_accept) is str)):
-            raise TypeError("q_accept argument must be a string, not '"+type(q_accept).__name__+"'")
-        if(not(type(q_reject) is str)):
-            raise TypeError("q_reject argument must be a string, not '"+type(q_reject).__name__+"'")
-        if(not(type(num_tapes) is int)):
-            raise TypeError("num_tapes argument must be a integer, not '"+type(num_tapes).__name__+"'")
-        
-        #Conditions
-        if(blank in Sigma):
-            raise ValueError("Sigma contain blank : '"+blank+"'")
-        if(not(blank in Gamma and Sigma <= Gamma)):
-            raise ValueError("Sigma is not a subset of Gamma")
-        if(not(q_init in Q)):
-            raise ValueError("Q don't contain '"+q_init+"' (q_init)")
-        if(not(q_accept in Q)):
-            raise ValueError("Q don't contain '"+q_accept+"' (q_accept)")
-        if(not(q_reject in Q)):
-            raise ValueError("Q don't contain '"+q_reject+"' (q_reject)")
-        if(q_accept==q_reject):
-            raise ValueError("q_accept and q_reject are the same")
-        if(num_tapes<=0):
-            raise ValueError("num_tapes isn't more than 0 : '"+num_tapes+"'")
-            
-        self.__blank=blank
-        self.__machine_parameter["Q"]=Q
-        self.__machine_parameter["Sigma"]=Sigma
-        self.__machine_parameter["Gamma"]=Gamma
-        self.__machine_parameter["delta"]=delta
-        self.__machine_parameter["q_init"]=q_init
-        self.__machine_parameter["q_accept"]=q_accept
-        self.__machine_parameter["q_reject"]=q_reject
-        self.__machine_parameter["num_tapes"]=num_tapes
-    
-    def getMachineParameter(self):
-        """
-        Returns the machine parameters.
-
-        Returns:
-            dict: Machine parameters.
-        """
-        return pyExLib.safety_deepcopy(self.__machine_parameter)
-    
-    def getTapes(self,qFlag:bool=True):
-        """
-        Returns the tapes.
-
-        Args:
-            qFlag (bool): If True, includes the state in the tapes.
-
-        Returns:
-            list: List of tapes.
-        """
-        tapes_copy=[tape.copy() for tape in self.__tapes]
-        if(not qFlag):
-            for i in range(self.__num_tapes):
-                tapes_copy[i].pop(self.__tapes_q[i])
-        return tapes_copy
-    
-    def getNumTapes(self):
-        """
-        Returns the number of tapes.
-
-        Returns:
-            int: Number of tapes.
-        """
-        return self.__num_tapes
-
-    def init(self,inputs:list):
-        """
-        Initializes the tapes with the given inputs.
-
-        Args:
-            inputs (list): List of input tapes.
-
-        Raises:
-            ValueError: If the number of inputs does not match the number of tapes or if any symbol is not in Gamma.
-        """
-        def trimInput(inputs:list,blank_str:str):
-            return [list(dropwhile(lambda x:x==blank_str,input_tape)) for input_tape in inputs]
-
-        if(len(inputs)!=self.__num_tapes):
-            raise ValueError("Number of inputs must match the number of tapes")
-        
-        inputs=trimInput(inputs,self.__blank)
-        for i,input_tape in enumerate(inputs):
-            if(not all(symbol in self.__machine_parameter["Gamma"] for symbol in input_tape)):
-                raise ValueError(f"Gamma does not contain some symbols in tape {i}")
-            
-            self.__tapes[i]=[self.__machine_parameter["q_init"]]+input_tape
-            self.__tapes_q[i]=0
-    
-    def next(self):
-        """
-        Executes the next step of the Turing Machine.
-
-        Raises:
-            ValueError: If any condition is violated during the transition.
-        """
-        qi=self.__tapes[0][self.__tapes_q[0]]
-        gi=[]
-        for i in range(self.__num_tapes):
-            if(self.__tapes_q[i]+1>=len(self.__tapes[i])):
-                self.__tapes[i].append(self.__blank)
-            gi.append(self.__tapes[i][self.__tapes_q[i]+1])
-
-        qo,go,d=self.__machine_parameter["delta"](qi,gi)
-
-        if(qo not in self.__machine_parameter["Q"]):
-            raise ValueError(f"Q does not contain '{qo}'")
-        if(not all(symbol in self.__machine_parameter["Gamma"] for symbol in go)):
-            raise ValueError(f"Gamma does not contain some symbols in go : {go}")
-        if(not all(d in ("R","L","N") for d in d)):
-            raise ValueError("Directions must be 'R', 'L', or 'N'")
-
-        for i in range(self.__num_tapes):
-            self.__tapes[i][self.__tapes_q[i]]=qo
-            self.__tapes[i][self.__tapes_q[i]+1]=go[i]
-            dn=0
-
-            if(d[i]=="R"):
-                dn=1
-                if(self.__tapes_q[i]>=len(self.__tapes[i])):
-                    self.__tapes[i].append(self.__blank)
-            elif(d[i]=="L"):
-                dn=-1
-                if(self.__tapes_q[i]+dn<0):
-                    self.__tapes[i].insert(0,self.__blank)
-                    self.__tapes_q[i]+=1
-            if(dn!=0):
-                self.__tapes[i][self.__tapes_q[i]],self.__tapes[i][self.__tapes_q[i]+dn]=self.__tapes[i][self.__tapes_q[i]+dn],self.__tapes[i][self.__tapes_q[i]]
-                self.__tapes_q[i]+=dn
-    
-    def run(self,inputs:list,display:bool=True,qFlag:bool=True):
-        """
-        Runs the Turing Machine with the given inputs.
-
-        Args:
-            inputs (list): List of input tapes.
-            display (bool): If True, displays the tapes at each step.
-            qFlag (bool): If True, includes the state in the tapes.
-
-        Returns:
-            tuple: (bool, list) - Accept status and final tapes.
-        """
-        self.init(inputs=inputs)
-        if(display):
-            print(self.getTapes(qFlag))
-        while(self.__tapes[0][self.__tapes_q[0]]!=self.__machine_parameter["q_accept"] and self.__tapes[0][self.__tapes_q[0]]!=self.__machine_parameter["q_reject"]):
-            self.next()
-            if(display):
-                print(self.getTapes(qFlag))
-        return self.__tapes[0][self.__tapes_q[0]]==self.__machine_parameter["q_accept"],self.__tapes
-
-    @_protectedClass.fileStoreMyLibRegister
-    class TMdelta(_FileStore.FileStoreParser):
-        """
-        Transition function class.
-        """
-
-        def __init__(self,settings:dict):
-            """
-            Initializes the transition function with the given settings.
-
-            Args:
-                settings (dict): Settings for the transition function.
-            """
-            self.__settings=pyExLib.safety_deepcopy(settings)
-
-            self.convDeltaList()
-            self.__init_qo=settings["delta"]["qo"]
-            self.__init_go=settings["delta"]["go"]
-            self.__init_d=settings["delta"]["d"]
-
-        def convDeltaList(self):
-            """
-            Converts the delta list from the settings to a dictionary.
-            """
-            self.__delta={}
-            for data in self.__settings["delta"]["list"]:
-                delta_key=tuple([data[0][0],tuple(data[0][1])])
-                self.__delta[delta_key]=data[1]
-
-        def f(self,qi:str,gi:list):
-            """
-            Transition function.
-
-            Args:
-                qi (str): Current state.
-                gi (list): Current symbols on the tapes.
-
-            Returns:
-                tuple: (qo, go, d) - Next state, next symbols, and directions.
-            """
-            qo=self.__init_qo
-            go=self.__init_go
-            d=self.__init_d
-            key=tuple([qi,tuple(gi)])
-            if(key in self.__delta.keys()):
-                x=self.__delta[key]
-                qo=x[0]
-                go=x[1]
-                d=x[2]
-            return qo,go,d
-
-    @_protectedClass.fileStoreMyLibRegister
-    class TMLib(_FileStore.FileStoreParser):
-        """
-        Turing Machine library class.
-        """
-
-        def __init__(self,settings:dict):
-            """
-            Initializes the Turing Machine library with the given settings.
-
-            Args:
-                settings (dict): Settings for the Turing Machine.
-            """
-            self.__settings=pyExLib.safety_deepcopy(settings)
-
-            if(isinstance(self.__settings,dict) and self.__checkSettings()):
-                blank=self.__settings["blank"]
-                Q=self.__settings["Q"]
-                Sigma=self.__settings["Sigma"]
-                Gamma=self.__settings["Gamma"]
-                tmdelta=TuringMachine.TMdelta(self.__settings)
-                delta=tmdelta.f
-                q_init=self.__settings["q_init"]
-                q_accept=self.__settings["q_accept"]
-                q_reject=self.__settings["q_reject"]
-                num_tapes=self.__settings["num_tapes"]
-                self.__TM=TuringMachine(blank=blank,Q=Q,Sigma=Sigma,Gamma=Gamma,delta=delta,q_init=q_init,q_accept=q_accept,q_reject=q_reject,num_tapes=num_tapes)
-            else:
-                raise ValueError("settings is error : '"+str(settings))
-
-        @staticmethod
-        def __checkSettingsRejectFunc():
-            """
-            Reject function for settings check.
-
-            Returns:
-                bool: Always False.
-            """
-            return False
-
-        def __checkSettings(self):
-            """
-            Checks the settings for validity.
-
-            Returns:
-                bool: True if settings are valid, False otherwise.
-
-            Raises:
-                ValueError: If any setting is invalid.
-            """
-            rflag=True
-            sk=dict(self.__settings).keys()
-                
-            if("blank" not in sk):
-                rflag=TuringMachine.TMLib.__checkSettingsRejectFunc()
-
-            if("Q" not in sk):
-                rflag=TuringMachine.TMLib.__checkSettingsRejectFunc()
-
-            if("Sigma" not in sk):
-                rflag=TuringMachine.TMLib.__checkSettingsRejectFunc()
-
-            if("Gamma" not in sk):
-                rflag=TuringMachine.TMLib.__checkSettingsRejectFunc()
-
-            if("delta" not in sk):
-                rflag=TuringMachine.TMLib.__checkSettingsRejectFunc()
-            else:
-                skd=dict(self.__settings["delta"]).keys()
-                if("list" not in skd):
-                    rflag=TuringMachine.TMLib.__checkSettingsRejectFunc()
-                
-                if("qo" not in skd):
-                    rflag=TuringMachine.TMLib.__checkSettingsRejectFunc()
-                
-                if("go" not in skd):
-                    rflag=TuringMachine.TMLib.__checkSettingsRejectFunc()
-                elif(len(self.__settings["delta"]["go"])!=self.__settings["num_tapes"]):
-                        raise ValueError(f"'go' length and 'num_tapes' are different => len(go) = {len(self.__settings['delta']['go'])}, num_tapes = {self.__settings['num_tapes']}")
-                
-                if("d" not in skd):
-                    rflag=TuringMachine.TMLib.__checkSettingsRejectFunc()
-                elif(len(self.__settings["delta"]["d"])!=self.__settings["num_tapes"]):
-                        raise ValueError(f"'d' length and 'num_tapes' are different => len(d) = {len(self.__settings['delta']['d'])}, num_tapes = {self.__settings['num_tapes']}")
-            
-            if("q_init" not in sk):
-                rflag=TuringMachine.TMLib.__checkSettingsRejectFunc()
-            
-            if("q_accept" not in sk):
-                rflag=TuringMachine.TMLib.__checkSettingsRejectFunc()
-            
-            if("q_reject" not in sk):
-                rflag=TuringMachine.TMLib.__checkSettingsRejectFunc()
-
-            if("num_tapes" not in sk):
-                rflag=TuringMachine.TMLib.__checkSettingsRejectFunc()
-            return rflag
-
-        def getTapes(self,qFlag:bool=True):
-            """
-            Returns the tapes.
-
-            Args:
-                qFlag (bool): If True, includes the state in the tapes.
-
-            Returns:
-                list: List of tapes.
-            """
-            return self.__TM.getTapes(qFlag)
-        
-        def getNumTapes(self):
-            """
-            Returns the number of tapes.
-
-            Returns:
-                int: Number of tapes.
-            """
-            return self.__TM.getNumTapes()
-        
-        def next(self):
-            """
-            Executes the next step of the Turing Machine.
-            """
-            return self.__TM.next()
-
-        def run(self,inputs:list,display:bool=True,qFlag:bool=True):
-            """
-            Runs the Turing Machine with the given inputs.
-
-            Args:
-                inputs (list): List of input tapes.
-                display (bool): If True, displays the tapes at each step.
-                qFlag (bool): If True, includes the state in the tapes.
-
-            Returns:
-                tuple: (bool, list) - Accept status and final tapes.
-            """
-            return self.__TM.run(inputs=inputs,display=display,qFlag=qFlag)
-
-    @_protectedClass.fileStoreMyLibRegister
-    class TMJson(_FileStore.FileStoreParser):
-        """
-        Turing Machine JSON class.
-        """
-
-        @_protectedClass.fileStoreMyLibRegister
-        class TMJsonNullError(_FileStore.FileStoreParser):
-            """
-            Exception raised when the Turing Machine is not specified.
-            """
-            pass
-
-        OBJ_MODE_PATH="PATH"
-        OBJ_MODE_DICT="DICT"
-
-        DEFAULT_TM_KEY="TM"
-        
-        RUN_MODE_NORMAL="NORMAL"
-        RUN_MODE_PROGRAM="PROGRAM"
-
-        PROGRAM_IN_ID_BLANK_LIST="b"
-        PROGRAM_OUT_ID_DUMP_LIST="d"
-
-        PROGRAM_AR_MODE_PROCESS="p"
-        PROGRAM_AR_MODE_QUIT="q"
-        PROGRAM_AR_MODE_QUIT_REJECT="r"
-
-        @staticmethod
-        def __getNextProgramIndex(now_index:int,arg,PROGRAM_LABEL_DICT:dict=None):
-            """
-            Determines the next program index based on the current index and argument.
-
-            Args:
-                now_index (int): Current program index.
-                arg (int or str): Argument for determining the next index.
-                PROGRAM_LABEL_DICT (dict): Dictionary mapping labels to indices.
-
-            Returns:
-                tuple: (bool, int) - Process flag and next program index.
-
-            Raises:
-                ValueError: If the argument is invalid.
-            """
-            if(PROGRAM_LABEL_DICT is None):
-                PROGRAM_LABEL_DICT={}
-            else:
-                PROGRAM_LABEL_DICT=pyExLib.safety_deepcopy(PROGRAM_LABEL_DICT)
-
-            if(isinstance(arg,int)):
-                return True,arg
-            elif(isinstance(arg,str)):
-                try:
-                    return True,int(arg)
-                except:
-                    if(arg==TuringMachine.TMJson.PROGRAM_AR_MODE_PROCESS):
-                        return True,now_index+1
-                    elif(arg==TuringMachine.TMJson.PROGRAM_AR_MODE_QUIT):
-                        return False,now_index
-                    elif(arg==TuringMachine.TMJson.PROGRAM_AR_MODE_QUIT_REJECT):
-                        return False,-1
-                    elif(arg in PROGRAM_LABEL_DICT):
-                        return True,PROGRAM_LABEL_DICT[arg]
-            raise ValueError("Error : Invalid program index!")
-
-        def __MemoryTMInputInProgramMode(self,memory_input_keys:list):
-            """
-            Retrieves the input tapes from memory based on the given keys.
-
-            Args:
-                memory_input_keys (list): List of memory input keys.
-
-            Returns:
-                list: List of input tapes.
-
-            Raises:
-                ValueError: If any input key is invalid.
-            """
-            inputs=[]
-            for in_key in memory_input_keys:
-                tmp_list=None
-                try:
-                    in_key=int(in_key)
-                except:
-                    pass
-
-                if(isinstance(in_key,int)):
-                    if(0<=in_key<len(self.__memory)):
-                        tmp_list=self.__memory[in_key]
-                    else:
-                        raise ValueError(f"Error : 'in_id' number is invalid => in_id:{memory_input_keys}, memory length : {len(self.__memory)}")
-                elif(isinstance(in_key,str)):
-                    if(in_key==TuringMachine.TMJson.PROGRAM_IN_ID_BLANK_LIST):
-                        tmp_list=[]
-                
-                if(tmp_list!=None):
-                    inputs.append(tmp_list)
-                else:
-                    raise ValueError(f"Error : 'in_id' is invalid => in_id:{memory_input_keys}")
-            return inputs
-        
-        def __MemoryTMOutputInProgramMode(self,memory_output_keys:list,tapes:list):
-            """
-            Stores the output tapes to memory based on the given keys.
-            
-            Args:
-                memory_output_keys (list): List of memory output keys.
-                tapes (list): List of output tapes.
-            
-            Raises:
-                ValueError: If any output key is invalid or if the number of output keys does not match the number of tapes.
-            """
-            if(self.__now_TM.getNumTapes()!=len(memory_output_keys)):
-                raise ValueError(f"Error : The length of 'out_id' and number of turing machine tapes must be the same => len(out_id) = {len(memory_output_keys)}, number of tapes = {self.__now_TM.getNumTapes()}")
-            for (tape_data,out_key) in zip(tapes,memory_output_keys):
-                valid_flag=False
-                try:
-                    out_key=int(out_key)
-                except:
-                    pass
-
-                if(isinstance(out_key,int)):
-                    if(0<=out_key<len(self.__memory)):
-                        valid_flag=True
-                        self.__memory[out_key]=tape_data
-                    else:
-                        raise ValueError(f"Error : 'out_id' number is invalid => out_id:{memory_output_keys}, memory length : {len(self.__memory)}")
-                elif(isinstance(out_key,str)):
-                    if(out_key==TuringMachine.TMJson.PROGRAM_OUT_ID_DUMP_LIST):
-                        valid_flag=True
-                
-                if(not valid_flag):
-                    raise ValueError(f"Error : 'out_id' is invalid => in_id:{memory_output_keys}")
-                
-        def __init__(self,arg,mode:str=OBJ_MODE_PATH):
-            """
-            Initializes the TMJson with the given argument and mode.
-
-            Args:
-                arg (str or dict): Path to the JSON file or settings dictionary.
-                mode (str): Mode of initialization, either 'PATH' or 'DICT'.
-
-            Raises:
-                ValueError: If the mode is invalid.
-            """
-            if(mode==TuringMachine.TMJson.OBJ_MODE_PATH and isinstance(arg,str)):
-                self.__jsonpath=arg
-                with open(arg,mode="r",encoding="utf-8") as f:
-                    self.__settings=json.load(f)
-            elif(mode==TuringMachine.TMJson.OBJ_MODE_DICT and isinstance(arg,dict)):
-                self.__settings=arg
-            else:
-                raise ValueError(f"The mode is invalid => {mode}")
-            
-            self.__settings_setting=dict(self.__settings["setting"])
-
-            self.__run_mode=self.__settings_setting.get("run_mode",TuringMachine.TMJson.RUN_MODE_NORMAL)
-            self.__import_json_files=self.__settings_setting.get("import",[])
-            if(isinstance(self.__import_json_files,list)):
-                for json_path in self.__import_json_files:
-                    tmp_settings={}
-                    with open(json_path,mode="r",encoding="utf-8") as f:
-                        tmp_settings=json.load(f)
-                    
-                    if(not isinstance(tmp_settings,dict)):
-                        raise ValueError(f"The import setting is invalid => {json_path}")
-
-                    for key in tmp_settings.keys():
-                        if(key=="setting"):
-                            pass
-                        elif(key in self.__settings.keys()):
-                            raise ValueError(f"The import setting key is duplicated => {key}")
-                        else:
-                            self.__settings[key]=tmp_settings[key]
-            else:
-                raise ValueError(f"The import setting is invalid => {self.__import_json_files}")
-
-            self.__now_tm_key=None
-            self.__now_TM=None
-            self.__memory=None
-
-        def setTM(self,tm_key:str=DEFAULT_TM_KEY):
-            """
-            Sets the current Turing Machine with the given key.
-
-            Args:
-                tm_key (str): Key of the Turing Machine in the settings.
-            """
-            self.__now_tm_key=tm_key
-            self.__settings[self.__now_tm_key]["Q"]=set(self.__settings[self.__now_tm_key]["Q"])
-            self.__settings[self.__now_tm_key]["Sigma"]=set(self.__settings[self.__now_tm_key]["Sigma"])
-            self.__settings[self.__now_tm_key]["Gamma"]=set(self.__settings[self.__now_tm_key]["Gamma"])
-
-            self.__now_TM=TuringMachine.TMLib(self.__settings[self.__now_tm_key])
-        
-        def __isNone(self):
-            """
-            Checks if the current Turing Machine is None.
-
-            Returns:
-                bool: True if the current Turing Machine is None, False otherwise.
-            """
-            return self.__now_tm_key==None or self.__now_TM==None
-
-        def getTapes(self,qFlag=True):
-            """
-            Returns the tapes.
-
-            Args:
-                qFlag (bool): If True, includes the state in the tapes.
-
-            Returns:
-                list: List of tapes.
-
-            Raises:
-                TuringMachine.TMJson.TMJsonNullError: If the Turing Machine is not specified.
-            """
-            if(not self.__isNone()):
-                return self.__now_TM.getTapes(qFlag)
-            else:
-                raise TuringMachine.TMJson.TMJsonNullError("TuringMachine is not specified => Execute setTM()")
-        
-        def getMemory(self):
-            """
-            Returns the memory.
-
-            Returns:
-                list: Memory list.
-
-            Raises:
-                TuringMachine.TMJson.TMJsonNullError: If the memory is not defined.
-            """
-            if(self.__memory()!=None):
-                if(isinstance(self.__memory,list)):
-                    return self.__memory.copy()
-                else:
-                    raise TuringMachine.TMJson.TMJsonNullError("'memory' is not list type")
-            else:
-                raise TuringMachine.TMJson.TMJsonNullError("'memory' is not yet defined")
-        
-        def next(self):
-            """
-            Executes the next step of the Turing Machine.
-
-            Raises:
-                TuringMachine.TMJson.TMJsonNullError: If the Turing Machine is not specified.
-            """
-            if(not self.__isNone()):
-                return self.__now_TM.next()
-            else:
-                raise TuringMachine.TMJson.TMJsonNullError("TuringMachine is not specified => Execute setTM()")
-
-        def run(self,inputs,display=True,qFlag=True,tm_key:str=DEFAULT_TM_KEY):
-            """
-            Runs the Turing Machine with the given inputs.
-
-            Args:
-                inputs (list): List of input tapes.
-                display (bool): If True, displays the tapes at each step.
-                qFlag (bool): If True, includes the state in the tapes.
-                tm_key (str): Key of the Turing Machine in the settings.
-
-            Returns:
-                tuple: (bool, list) - Accept status and final tapes.
-            """
-            self.setTM(tm_key)
-            return self.__now_TM.run(inputs=inputs,display=display,qFlag=qFlag)
-
-        def runJson(self,tm_key:str=DEFAULT_TM_KEY):
-            """
-            Runs the Turing Machine based on the JSON settings.
-
-            Args:
-                tm_key (str): Key of the Turing Machine in the settings.
-
-            Returns:
-                tuple: (bool, list) - Accept status and memory.
-            """
-
-            def returnFunc(accept_flag:bool,result:list,display_settings:dict=None):
-                result_flag=bool(display_settings.get("result_flag",False))
-                result_format=str(display_settings.get("result_format","\nAccept : {a}\n{r}\n"))
-                
-                if(result_flag):
-                    print(result_format.format(a=accept_flag,r=result),end="")
-                return accept_flag,result
-
-            display_settings=dict(self.__settings_setting.get("display",{}))
-            display_log=display_settings.get("log",False)
-
-
-            qFlag=self.__settings_setting.get("qFlag",False)
-            tm_key=self.__settings_setting.get("tm_key",tm_key)
-
-            if(self.__run_mode==TuringMachine.TMJson.RUN_MODE_NORMAL):
-                inputs=[]
-                if("inputs" in self.__settings_setting):
-                    inputs=self.__settings_setting["inputs"]
-                else:
-                    raise ValueError(f"run_mode='{TuringMachine.TMJson.RUN_MODE_NORMAL}' requires the 'input' setting!")
-                return returnFunc(
-                    *self.run(inputs=inputs,display=display_log,qFlag=qFlag,tm_key=tm_key),
-                    display_settings=display_settings
-                )
-            
-            elif(self.__run_mode==TuringMachine.TMJson.RUN_MODE_PROGRAM):
-                self.__memory=[]
-                program_list=[]
-
-                if("memory" in self.__settings_setting):
-                    self.__memory=self.__settings_setting["memory"]
-                else:
-                    raise ValueError(f"run_mode='{TuringMachine.TMJson.RUN_MODE_PROGRAM}' requires the 'memory' setting!")
-                if("program" in self.__settings_setting):
-                    program_list=self.__settings_setting["program"]
-                else:
-                    raise ValueError(f"run_mode='{TuringMachine.TMJson.RUN_MODE_PROGRAM}' requires the 'program' setting!")
-                
-                PROGRAM_LABEL_DICT={}
-                for i,program_dict in enumerate(program_list):
-                    if("proc_label" in program_dict):
-                        proc_label=program_dict["proc_label"]
-                        
-                        if(proc_label in PROGRAM_LABEL_DICT):
-                            raise ValueError(f"Error : The program label '{proc_label}' is duplicated!")
-                        if(TuringMachine.TMJson.PROGRAM_AR_MODE_PROCESS==proc_label or TuringMachine.TMJson.PROGRAM_AR_MODE_QUIT==proc_label or TuringMachine.TMJson.PROGRAM_AR_MODE_QUIT_REJECT==proc_label):
-                            raise ValueError(f"Error : The program label '{proc_label}' is reserved!")
-
-                        PROGRAM_LABEL_DICT[proc_label]=i
-                
-                program_index=0
-                process_flag=True
-                while(process_flag and 0<=program_index<len(program_list)):
-                    program_dict=dict(program_list[program_index])
-                    program_tm_key=program_dict["tm_key"]
-                    memory_input_keys=program_dict["in_id"]
-                    memory_output_keys=program_dict["out_id"]
-                    accept_mode=program_dict["accept"]
-                    reject_mode=program_dict["reject"]
-                    
-                    inputs=self.__MemoryTMInputInProgramMode(memory_input_keys)
-
-                    if(display_log):
-                        print(f"Start Program [ {program_index} ] : {program_tm_key} => {inputs}")
-
-                    tmp_flag,_=self.run(inputs=inputs,display=display_log,qFlag=qFlag,tm_key=program_tm_key)
-                    
-                    if(display_log):
-                        print(f"End Program [ {program_index} ] : {program_tm_key} => {'accept' if tmp_flag else 'reject'}",end="\n\n")
-                    
-                    if(tmp_flag):
-                        self.__MemoryTMOutputInProgramMode(memory_output_keys,self.__now_TM.getTapes(False))
-                        process_flag,program_index=TuringMachine.TMJson.__getNextProgramIndex(program_index,accept_mode,PROGRAM_LABEL_DICT)
-                    else:
-                        process_flag,program_index=TuringMachine.TMJson.__getNextProgramIndex(program_index,reject_mode,PROGRAM_LABEL_DICT)
-
-                return returnFunc(
-                    program_index>=0,
-                    self.__memory,
-                    display_settings=display_settings
-                )
-            
 class mathLib:
     """
     Class that performs mathematical operations.
@@ -18667,6 +18039,794 @@ class mathLib:
                 cnt+=1
             return cnt
 
+    @_protectedClass.fileStoreMyLibRegister
+    class TuringMachine(_FileStore.FileStoreParser):
+        """
+        Turing Machine class.
+        """
+
+        def __init__(
+                self,
+                blank:str=None,
+                Q:set=None,
+                Sigma:set=None,
+                Gamma:set=None,
+                delta:callable=None,
+                q_init:str=None,
+                q_accept:str=None,
+                q_reject:str=None,
+                num_tapes:int=1
+            ):
+            """
+            Initializes the Turing Machine with the given parameters.
+
+            Args:
+                blank (str): Blank alphabet.
+                Q (set): Set of states.
+                Sigma (set): Input alphabet.
+                Gamma (set): Tape alphabet.
+                delta (callable): Transition function.
+                q_init (str): Initial state.
+                q_accept (str): Accept state.
+                q_reject (str): Reject state.
+                num_tapes (int): Number of tapes.
+            """
+            self.__machine_parameter={}
+            self.__num_tapes=num_tapes
+
+            self.__tapes=[[] for _ in range(self.__num_tapes)]
+            self.__tapes_q=[0]*self.__num_tapes
+            
+            self.__createMachineList(blank=blank,Q=Q,Sigma=Sigma,Gamma=Gamma,delta=delta,q_init=q_init,q_accept=q_accept,q_reject=q_reject,num_tapes=num_tapes)
+            
+        def __createMachineList(
+                self,
+                blank:str=None,
+                Q:set=None,
+                Sigma:set=None,
+                Gamma:set=None,
+                delta:callable=None,
+                q_init:str=None,
+                q_accept:str=None,
+                q_reject:str=None,
+                num_tapes:int=None
+            ):
+            """
+            Creates the machine list with the given parameters.
+
+            Args:
+                blank (str): Blank alphabet [string].
+                Q (set): Set of states [set].
+                Sigma (set): Input alphabet [set].
+                Gamma (set): Tape alphabet [set].
+                delta (callable): Transition function [function].
+                q_init (str): Initial state [string].
+                q_accept (str): Accept state [string].
+                q_reject (str): Reject state [string].
+                num_tapes (int): Number of tapes [int > 0].
+            
+            Raises:
+                TypeError: If any argument is of incorrect type.
+                ValueError: If any argument violates the conditions.
+            """
+            #Type evaluation
+            if(not(type(blank) is str)):
+                raise TypeError("blank argument must be a string,not '"+type(blank).__name__+"'")
+            if(not(type(Q) is set)):
+                raise TypeError("Q argument must be a set,not '"+type(Q).__name__+"'")
+            if(not(type(Sigma) is set)):
+                raise TypeError("Sigma argument must be a set, not '"+type(Sigma).__name__+"'")
+            if(not(type(Gamma) is set)):
+                raise TypeError("Gamma argument must be a set, not '"+type(Gamma).__name__+"'")
+            if(not(callable(delta))):
+                raise TypeError("delta argument must be a function, not '"+type(delta).__name__+"'")
+            if(not(type(q_init) is str)):
+                raise TypeError("q_init argument must be a string, not '"+type(q_init).__name__+"'")
+            if(not(type(q_accept) is str)):
+                raise TypeError("q_accept argument must be a string, not '"+type(q_accept).__name__+"'")
+            if(not(type(q_reject) is str)):
+                raise TypeError("q_reject argument must be a string, not '"+type(q_reject).__name__+"'")
+            if(not(type(num_tapes) is int)):
+                raise TypeError("num_tapes argument must be a integer, not '"+type(num_tapes).__name__+"'")
+            
+            #Conditions
+            if(blank in Sigma):
+                raise ValueError("Sigma contain blank : '"+blank+"'")
+            if(not(blank in Gamma and Sigma <= Gamma)):
+                raise ValueError("Sigma is not a subset of Gamma")
+            if(not(q_init in Q)):
+                raise ValueError("Q don't contain '"+q_init+"' (q_init)")
+            if(not(q_accept in Q)):
+                raise ValueError("Q don't contain '"+q_accept+"' (q_accept)")
+            if(not(q_reject in Q)):
+                raise ValueError("Q don't contain '"+q_reject+"' (q_reject)")
+            if(q_accept==q_reject):
+                raise ValueError("q_accept and q_reject are the same")
+            if(num_tapes<=0):
+                raise ValueError("num_tapes isn't more than 0 : '"+num_tapes+"'")
+                
+            self.__blank=blank
+            self.__machine_parameter["Q"]=Q
+            self.__machine_parameter["Sigma"]=Sigma
+            self.__machine_parameter["Gamma"]=Gamma
+            self.__machine_parameter["delta"]=delta
+            self.__machine_parameter["q_init"]=q_init
+            self.__machine_parameter["q_accept"]=q_accept
+            self.__machine_parameter["q_reject"]=q_reject
+            self.__machine_parameter["num_tapes"]=num_tapes
+        
+        def getMachineParameter(self):
+            """
+            Returns the machine parameters.
+
+            Returns:
+                dict: Machine parameters.
+            """
+            return pyExLib.safety_deepcopy(self.__machine_parameter)
+        
+        def getTapes(self,qFlag:bool=True):
+            """
+            Returns the tapes.
+
+            Args:
+                qFlag (bool): If True, includes the state in the tapes.
+
+            Returns:
+                list: List of tapes.
+            """
+            tapes_copy=[tape.copy() for tape in self.__tapes]
+            if(not qFlag):
+                for i in range(self.__num_tapes):
+                    tapes_copy[i].pop(self.__tapes_q[i])
+            return tapes_copy
+        
+        def getNumTapes(self):
+            """
+            Returns the number of tapes.
+
+            Returns:
+                int: Number of tapes.
+            """
+            return self.__num_tapes
+
+        def init(self,inputs:list):
+            """
+            Initializes the tapes with the given inputs.
+
+            Args:
+                inputs (list): List of input tapes.
+
+            Raises:
+                ValueError: If the number of inputs does not match the number of tapes or if any symbol is not in Gamma.
+            """
+            def trimInput(inputs:list,blank_str:str):
+                return [list(dropwhile(lambda x:x==blank_str,input_tape)) for input_tape in inputs]
+
+            if(len(inputs)!=self.__num_tapes):
+                raise ValueError("Number of inputs must match the number of tapes")
+            
+            inputs=trimInput(inputs,self.__blank)
+            for i,input_tape in enumerate(inputs):
+                if(not all(symbol in self.__machine_parameter["Gamma"] for symbol in input_tape)):
+                    raise ValueError(f"Gamma does not contain some symbols in tape {i}")
+                
+                self.__tapes[i]=[self.__machine_parameter["q_init"]]+input_tape
+                self.__tapes_q[i]=0
+        
+        def next(self):
+            """
+            Executes the next step of the Turing Machine.
+
+            Raises:
+                ValueError: If any condition is violated during the transition.
+            """
+            qi=self.__tapes[0][self.__tapes_q[0]]
+            gi=[]
+            for i in range(self.__num_tapes):
+                if(self.__tapes_q[i]+1>=len(self.__tapes[i])):
+                    self.__tapes[i].append(self.__blank)
+                gi.append(self.__tapes[i][self.__tapes_q[i]+1])
+
+            qo,go,d=self.__machine_parameter["delta"](qi,gi)
+
+            if(qo not in self.__machine_parameter["Q"]):
+                raise ValueError(f"Q does not contain '{qo}'")
+            if(not all(symbol in self.__machine_parameter["Gamma"] for symbol in go)):
+                raise ValueError(f"Gamma does not contain some symbols in go : {go}")
+            if(not all(d in ("R","L","N") for d in d)):
+                raise ValueError("Directions must be 'R', 'L', or 'N'")
+
+            for i in range(self.__num_tapes):
+                self.__tapes[i][self.__tapes_q[i]]=qo
+                self.__tapes[i][self.__tapes_q[i]+1]=go[i]
+                dn=0
+
+                if(d[i]=="R"):
+                    dn=1
+                    if(self.__tapes_q[i]>=len(self.__tapes[i])):
+                        self.__tapes[i].append(self.__blank)
+                elif(d[i]=="L"):
+                    dn=-1
+                    if(self.__tapes_q[i]+dn<0):
+                        self.__tapes[i].insert(0,self.__blank)
+                        self.__tapes_q[i]+=1
+                if(dn!=0):
+                    self.__tapes[i][self.__tapes_q[i]],self.__tapes[i][self.__tapes_q[i]+dn]=self.__tapes[i][self.__tapes_q[i]+dn],self.__tapes[i][self.__tapes_q[i]]
+                    self.__tapes_q[i]+=dn
+        
+        def run(self,inputs:list,display:bool=True,qFlag:bool=True):
+            """
+            Runs the Turing Machine with the given inputs.
+
+            Args:
+                inputs (list): List of input tapes.
+                display (bool): If True, displays the tapes at each step.
+                qFlag (bool): If True, includes the state in the tapes.
+
+            Returns:
+                tuple: (bool, list) - Accept status and final tapes.
+            """
+            self.init(inputs=inputs)
+            if(display):
+                print(self.getTapes(qFlag))
+            while(self.__tapes[0][self.__tapes_q[0]]!=self.__machine_parameter["q_accept"] and self.__tapes[0][self.__tapes_q[0]]!=self.__machine_parameter["q_reject"]):
+                self.next()
+                if(display):
+                    print(self.getTapes(qFlag))
+            return self.__tapes[0][self.__tapes_q[0]]==self.__machine_parameter["q_accept"],self.__tapes
+
+        @_protectedClass.fileStoreMyLibRegister
+        class TMdelta(_FileStore.FileStoreParser):
+            """
+            Transition function class.
+            """
+
+            def __init__(self,settings:dict):
+                """
+                Initializes the transition function with the given settings.
+
+                Args:
+                    settings (dict): Settings for the transition function.
+                """
+                self.__settings=pyExLib.safety_deepcopy(settings)
+
+                self.convDeltaList()
+                self.__init_qo=settings["delta"]["qo"]
+                self.__init_go=settings["delta"]["go"]
+                self.__init_d=settings["delta"]["d"]
+
+            def convDeltaList(self):
+                """
+                Converts the delta list from the settings to a dictionary.
+                """
+                self.__delta={}
+                for data in self.__settings["delta"]["list"]:
+                    delta_key=tuple([data[0][0],tuple(data[0][1])])
+                    self.__delta[delta_key]=data[1]
+
+            def f(self,qi:str,gi:list):
+                """
+                Transition function.
+
+                Args:
+                    qi (str): Current state.
+                    gi (list): Current symbols on the tapes.
+
+                Returns:
+                    tuple: (qo, go, d) - Next state, next symbols, and directions.
+                """
+                qo=self.__init_qo
+                go=self.__init_go
+                d=self.__init_d
+                key=tuple([qi,tuple(gi)])
+                if(key in self.__delta.keys()):
+                    x=self.__delta[key]
+                    qo=x[0]
+                    go=x[1]
+                    d=x[2]
+                return qo,go,d
+
+        @_protectedClass.fileStoreMyLibRegister
+        class TMLib(_FileStore.FileStoreParser):
+            """
+            Turing Machine library class.
+            """
+
+            def __init__(self,settings:dict):
+                """
+                Initializes the Turing Machine library with the given settings.
+
+                Args:
+                    settings (dict): Settings for the Turing Machine.
+                """
+                self.__settings=pyExLib.safety_deepcopy(settings)
+
+                if(isinstance(self.__settings,dict) and self.__checkSettings()):
+                    blank=self.__settings["blank"]
+                    Q=self.__settings["Q"]
+                    Sigma=self.__settings["Sigma"]
+                    Gamma=self.__settings["Gamma"]
+                    tmdelta=mathLib.TuringMachine.TMdelta(self.__settings)
+                    delta=tmdelta.f
+                    q_init=self.__settings["q_init"]
+                    q_accept=self.__settings["q_accept"]
+                    q_reject=self.__settings["q_reject"]
+                    num_tapes=self.__settings["num_tapes"]
+                    self.__TM=mathLib.TuringMachine(blank=blank,Q=Q,Sigma=Sigma,Gamma=Gamma,delta=delta,q_init=q_init,q_accept=q_accept,q_reject=q_reject,num_tapes=num_tapes)
+                else:
+                    raise ValueError("settings is error : '"+str(settings))
+
+            @staticmethod
+            def __checkSettingsRejectFunc():
+                """
+                Reject function for settings check.
+
+                Returns:
+                    bool: Always False.
+                """
+                return False
+
+            def __checkSettings(self):
+                """
+                Checks the settings for validity.
+
+                Returns:
+                    bool: True if settings are valid, False otherwise.
+
+                Raises:
+                    ValueError: If any setting is invalid.
+                """
+                rflag=True
+                sk=dict(self.__settings).keys()
+                    
+                if("blank" not in sk):
+                    rflag=mathLib.TuringMachine.TMLib.__checkSettingsRejectFunc()
+
+                if("Q" not in sk):
+                    rflag=mathLib.TuringMachine.TMLib.__checkSettingsRejectFunc()
+
+                if("Sigma" not in sk):
+                    rflag=mathLib.TuringMachine.TMLib.__checkSettingsRejectFunc()
+
+                if("Gamma" not in sk):
+                    rflag=mathLib.TuringMachine.TMLib.__checkSettingsRejectFunc()
+
+                if("delta" not in sk):
+                    rflag=mathLib.TuringMachine.TMLib.__checkSettingsRejectFunc()
+                else:
+                    skd=dict(self.__settings["delta"]).keys()
+                    if("list" not in skd):
+                        rflag=mathLib.TuringMachine.TMLib.__checkSettingsRejectFunc()
+                    
+                    if("qo" not in skd):
+                        rflag=mathLib.TuringMachine.TMLib.__checkSettingsRejectFunc()
+                    
+                    if("go" not in skd):
+                        rflag=mathLib.TuringMachine.TMLib.__checkSettingsRejectFunc()
+                    elif(len(self.__settings["delta"]["go"])!=self.__settings["num_tapes"]):
+                            raise ValueError(f"'go' length and 'num_tapes' are different => len(go) = {len(self.__settings['delta']['go'])}, num_tapes = {self.__settings['num_tapes']}")
+                    
+                    if("d" not in skd):
+                        rflag=mathLib.TuringMachine.TMLib.__checkSettingsRejectFunc()
+                    elif(len(self.__settings["delta"]["d"])!=self.__settings["num_tapes"]):
+                            raise ValueError(f"'d' length and 'num_tapes' are different => len(d) = {len(self.__settings['delta']['d'])}, num_tapes = {self.__settings['num_tapes']}")
+                
+                if("q_init" not in sk):
+                    rflag=mathLib.TuringMachine.TMLib.__checkSettingsRejectFunc()
+                
+                if("q_accept" not in sk):
+                    rflag=mathLib.TuringMachine.TMLib.__checkSettingsRejectFunc()
+                
+                if("q_reject" not in sk):
+                    rflag=mathLib.TuringMachine.TMLib.__checkSettingsRejectFunc()
+
+                if("num_tapes" not in sk):
+                    rflag=mathLib.TuringMachine.TMLib.__checkSettingsRejectFunc()
+                return rflag
+
+            def getTapes(self,qFlag:bool=True):
+                """
+                Returns the tapes.
+
+                Args:
+                    qFlag (bool): If True, includes the state in the tapes.
+
+                Returns:
+                    list: List of tapes.
+                """
+                return self.__TM.getTapes(qFlag)
+            
+            def getNumTapes(self):
+                """
+                Returns the number of tapes.
+
+                Returns:
+                    int: Number of tapes.
+                """
+                return self.__TM.getNumTapes()
+            
+            def next(self):
+                """
+                Executes the next step of the Turing Machine.
+                """
+                return self.__TM.next()
+
+            def run(self,inputs:list,display:bool=True,qFlag:bool=True):
+                """
+                Runs the Turing Machine with the given inputs.
+
+                Args:
+                    inputs (list): List of input tapes.
+                    display (bool): If True, displays the tapes at each step.
+                    qFlag (bool): If True, includes the state in the tapes.
+
+                Returns:
+                    tuple: (bool, list) - Accept status and final tapes.
+                """
+                return self.__TM.run(inputs=inputs,display=display,qFlag=qFlag)
+
+        @_protectedClass.fileStoreMyLibRegister
+        class TMJson(_FileStore.FileStoreParser):
+            """
+            Turing Machine JSON class.
+            """
+
+            @_protectedClass.fileStoreMyLibRegister
+            class TMJsonNullError(_FileStore.FileStoreParser):
+                """
+                Exception raised when the Turing Machine is not specified.
+                """
+                pass
+
+            OBJ_MODE_PATH="PATH"
+            OBJ_MODE_DICT="DICT"
+
+            DEFAULT_TM_KEY="TM"
+            
+            RUN_MODE_NORMAL="NORMAL"
+            RUN_MODE_PROGRAM="PROGRAM"
+
+            PROGRAM_IN_ID_BLANK_LIST="b"
+            PROGRAM_OUT_ID_DUMP_LIST="d"
+
+            PROGRAM_AR_MODE_PROCESS="p"
+            PROGRAM_AR_MODE_QUIT="q"
+            PROGRAM_AR_MODE_QUIT_REJECT="r"
+
+            @staticmethod
+            def __getNextProgramIndex(now_index:int,arg,PROGRAM_LABEL_DICT:dict=None):
+                """
+                Determines the next program index based on the current index and argument.
+
+                Args:
+                    now_index (int): Current program index.
+                    arg (int or str): Argument for determining the next index.
+                    PROGRAM_LABEL_DICT (dict): Dictionary mapping labels to indices.
+
+                Returns:
+                    tuple: (bool, int) - Process flag and next program index.
+
+                Raises:
+                    ValueError: If the argument is invalid.
+                """
+                if(PROGRAM_LABEL_DICT is None):
+                    PROGRAM_LABEL_DICT={}
+                else:
+                    PROGRAM_LABEL_DICT=pyExLib.safety_deepcopy(PROGRAM_LABEL_DICT)
+
+                if(isinstance(arg,int)):
+                    return True,arg
+                elif(isinstance(arg,str)):
+                    try:
+                        return True,int(arg)
+                    except:
+                        if(arg==mathLib.TuringMachine.TMJson.PROGRAM_AR_MODE_PROCESS):
+                            return True,now_index+1
+                        elif(arg==mathLib.TuringMachine.TMJson.PROGRAM_AR_MODE_QUIT):
+                            return False,now_index
+                        elif(arg==mathLib.TuringMachine.TMJson.PROGRAM_AR_MODE_QUIT_REJECT):
+                            return False,-1
+                        elif(arg in PROGRAM_LABEL_DICT):
+                            return True,PROGRAM_LABEL_DICT[arg]
+                raise ValueError("Error : Invalid program index!")
+
+            def __MemoryTMInputInProgramMode(self,memory_input_keys:list):
+                """
+                Retrieves the input tapes from memory based on the given keys.
+
+                Args:
+                    memory_input_keys (list): List of memory input keys.
+
+                Returns:
+                    list: List of input tapes.
+
+                Raises:
+                    ValueError: If any input key is invalid.
+                """
+                inputs=[]
+                for in_key in memory_input_keys:
+                    tmp_list=None
+                    try:
+                        in_key=int(in_key)
+                    except:
+                        pass
+
+                    if(isinstance(in_key,int)):
+                        if(0<=in_key<len(self.__memory)):
+                            tmp_list=self.__memory[in_key]
+                        else:
+                            raise ValueError(f"Error : 'in_id' number is invalid => in_id:{memory_input_keys}, memory length : {len(self.__memory)}")
+                    elif(isinstance(in_key,str)):
+                        if(in_key==mathLib.TuringMachine.TMJson.PROGRAM_IN_ID_BLANK_LIST):
+                            tmp_list=[]
+                    
+                    if(tmp_list!=None):
+                        inputs.append(tmp_list)
+                    else:
+                        raise ValueError(f"Error : 'in_id' is invalid => in_id:{memory_input_keys}")
+                return inputs
+            
+            def __MemoryTMOutputInProgramMode(self,memory_output_keys:list,tapes:list):
+                """
+                Stores the output tapes to memory based on the given keys.
+                
+                Args:
+                    memory_output_keys (list): List of memory output keys.
+                    tapes (list): List of output tapes.
+                
+                Raises:
+                    ValueError: If any output key is invalid or if the number of output keys does not match the number of tapes.
+                """
+                if(self.__now_TM.getNumTapes()!=len(memory_output_keys)):
+                    raise ValueError(f"Error : The length of 'out_id' and number of turing machine tapes must be the same => len(out_id) = {len(memory_output_keys)}, number of tapes = {self.__now_TM.getNumTapes()}")
+                for (tape_data,out_key) in zip(tapes,memory_output_keys):
+                    valid_flag=False
+                    try:
+                        out_key=int(out_key)
+                    except:
+                        pass
+
+                    if(isinstance(out_key,int)):
+                        if(0<=out_key<len(self.__memory)):
+                            valid_flag=True
+                            self.__memory[out_key]=tape_data
+                        else:
+                            raise ValueError(f"Error : 'out_id' number is invalid => out_id:{memory_output_keys}, memory length : {len(self.__memory)}")
+                    elif(isinstance(out_key,str)):
+                        if(out_key==mathLib.TuringMachine.TMJson.PROGRAM_OUT_ID_DUMP_LIST):
+                            valid_flag=True
+                    
+                    if(not valid_flag):
+                        raise ValueError(f"Error : 'out_id' is invalid => in_id:{memory_output_keys}")
+                    
+            def __init__(self,arg,mode:str=OBJ_MODE_PATH):
+                """
+                Initializes the TMJson with the given argument and mode.
+
+                Args:
+                    arg (str or dict): Path to the JSON file or settings dictionary.
+                    mode (str): Mode of initialization, either 'PATH' or 'DICT'.
+
+                Raises:
+                    ValueError: If the mode is invalid.
+                """
+                if(mode==mathLib.TuringMachine.TMJson.OBJ_MODE_PATH and isinstance(arg,str)):
+                    self.__jsonpath=arg
+                    with open(arg,mode="r",encoding="utf-8") as f:
+                        self.__settings=json.load(f)
+                elif(mode==mathLib.TuringMachine.TMJson.OBJ_MODE_DICT and isinstance(arg,dict)):
+                    self.__settings=arg
+                else:
+                    raise ValueError(f"The mode is invalid => {mode}")
+                
+                self.__settings_setting=dict(self.__settings["setting"])
+
+                self.__run_mode=self.__settings_setting.get("run_mode",mathLib.TuringMachine.TMJson.RUN_MODE_NORMAL)
+                self.__import_json_files=self.__settings_setting.get("import",[])
+                if(isinstance(self.__import_json_files,list)):
+                    for json_path in self.__import_json_files:
+                        tmp_settings={}
+                        with open(json_path,mode="r",encoding="utf-8") as f:
+                            tmp_settings=json.load(f)
+                        
+                        if(not isinstance(tmp_settings,dict)):
+                            raise ValueError(f"The import setting is invalid => {json_path}")
+
+                        for key in tmp_settings.keys():
+                            if(key=="setting"):
+                                pass
+                            elif(key in self.__settings.keys()):
+                                raise ValueError(f"The import setting key is duplicated => {key}")
+                            else:
+                                self.__settings[key]=tmp_settings[key]
+                else:
+                    raise ValueError(f"The import setting is invalid => {self.__import_json_files}")
+
+                self.__now_tm_key=None
+                self.__now_TM=None
+                self.__memory=None
+
+            def setTM(self,tm_key:str=DEFAULT_TM_KEY):
+                """
+                Sets the current Turing Machine with the given key.
+
+                Args:
+                    tm_key (str): Key of the Turing Machine in the settings.
+                """
+                self.__now_tm_key=tm_key
+                self.__settings[self.__now_tm_key]["Q"]=set(self.__settings[self.__now_tm_key]["Q"])
+                self.__settings[self.__now_tm_key]["Sigma"]=set(self.__settings[self.__now_tm_key]["Sigma"])
+                self.__settings[self.__now_tm_key]["Gamma"]=set(self.__settings[self.__now_tm_key]["Gamma"])
+
+                self.__now_TM=mathLib.TuringMachine.TMLib(self.__settings[self.__now_tm_key])
+            
+            def __isNone(self):
+                """
+                Checks if the current Turing Machine is None.
+
+                Returns:
+                    bool: True if the current Turing Machine is None, False otherwise.
+                """
+                return self.__now_tm_key==None or self.__now_TM==None
+
+            def getTapes(self,qFlag=True):
+                """
+                Returns the tapes.
+
+                Args:
+                    qFlag (bool): If True, includes the state in the tapes.
+
+                Returns:
+                    list: List of tapes.
+
+                Raises:
+                    mathLib.TuringMachine.TMJson.TMJsonNullError: If the Turing Machine is not specified.
+                """
+                if(not self.__isNone()):
+                    return self.__now_TM.getTapes(qFlag)
+                else:
+                    raise mathLib.TuringMachine.TMJson.TMJsonNullError("mathLib.TuringMachine is not specified => Execute setTM()")
+            
+            def getMemory(self):
+                """
+                Returns the memory.
+
+                Returns:
+                    list: Memory list.
+
+                Raises:
+                    mathLib.TuringMachine.TMJson.TMJsonNullError: If the memory is not defined.
+                """
+                if(self.__memory()!=None):
+                    if(isinstance(self.__memory,list)):
+                        return self.__memory.copy()
+                    else:
+                        raise mathLib.TuringMachine.TMJson.TMJsonNullError("'memory' is not list type")
+                else:
+                    raise mathLib.TuringMachine.TMJson.TMJsonNullError("'memory' is not yet defined")
+            
+            def next(self):
+                """
+                Executes the next step of the Turing Machine.
+
+                Raises:
+                    mathLib.TuringMachine.TMJson.TMJsonNullError: If the Turing Machine is not specified.
+                """
+                if(not self.__isNone()):
+                    return self.__now_TM.next()
+                else:
+                    raise mathLib.TuringMachine.TMJson.TMJsonNullError("mathLib.TuringMachine is not specified => Execute setTM()")
+
+            def run(self,inputs,display=True,qFlag=True,tm_key:str=DEFAULT_TM_KEY):
+                """
+                Runs the Turing Machine with the given inputs.
+
+                Args:
+                    inputs (list): List of input tapes.
+                    display (bool): If True, displays the tapes at each step.
+                    qFlag (bool): If True, includes the state in the tapes.
+                    tm_key (str): Key of the Turing Machine in the settings.
+
+                Returns:
+                    tuple: (bool, list) - Accept status and final tapes.
+                """
+                self.setTM(tm_key)
+                return self.__now_TM.run(inputs=inputs,display=display,qFlag=qFlag)
+
+            def runJson(self,tm_key:str=DEFAULT_TM_KEY):
+                """
+                Runs the Turing Machine based on the JSON settings.
+
+                Args:
+                    tm_key (str): Key of the Turing Machine in the settings.
+
+                Returns:
+                    tuple: (bool, list) - Accept status and memory.
+                """
+
+                def returnFunc(accept_flag:bool,result:list,display_settings:dict=None):
+                    result_flag=bool(display_settings.get("result_flag",False))
+                    result_format=str(display_settings.get("result_format","\nAccept : {a}\n{r}\n"))
+                    
+                    if(result_flag):
+                        print(result_format.format(a=accept_flag,r=result),end="")
+                    return accept_flag,result
+
+                display_settings=dict(self.__settings_setting.get("display",{}))
+                display_log=display_settings.get("log",False)
+
+
+                qFlag=self.__settings_setting.get("qFlag",False)
+                tm_key=self.__settings_setting.get("tm_key",tm_key)
+
+                if(self.__run_mode==mathLib.TuringMachine.TMJson.RUN_MODE_NORMAL):
+                    inputs=[]
+                    if("inputs" in self.__settings_setting):
+                        inputs=self.__settings_setting["inputs"]
+                    else:
+                        raise ValueError(f"run_mode='{mathLib.TuringMachine.TMJson.RUN_MODE_NORMAL}' requires the 'input' setting!")
+                    return returnFunc(
+                        *self.run(inputs=inputs,display=display_log,qFlag=qFlag,tm_key=tm_key),
+                        display_settings=display_settings
+                    )
+                
+                elif(self.__run_mode==mathLib.TuringMachine.TMJson.RUN_MODE_PROGRAM):
+                    self.__memory=[]
+                    program_list=[]
+
+                    if("memory" in self.__settings_setting):
+                        self.__memory=self.__settings_setting["memory"]
+                    else:
+                        raise ValueError(f"run_mode='{mathLib.TuringMachine.TMJson.RUN_MODE_PROGRAM}' requires the 'memory' setting!")
+                    if("program" in self.__settings_setting):
+                        program_list=self.__settings_setting["program"]
+                    else:
+                        raise ValueError(f"run_mode='{mathLib.TuringMachine.TMJson.RUN_MODE_PROGRAM}' requires the 'program' setting!")
+                    
+                    PROGRAM_LABEL_DICT={}
+                    for i,program_dict in enumerate(program_list):
+                        if("proc_label" in program_dict):
+                            proc_label=program_dict["proc_label"]
+                            
+                            if(proc_label in PROGRAM_LABEL_DICT):
+                                raise ValueError(f"Error : The program label '{proc_label}' is duplicated!")
+                            if(mathLib.TuringMachine.TMJson.PROGRAM_AR_MODE_PROCESS==proc_label or mathLib.TuringMachine.TMJson.PROGRAM_AR_MODE_QUIT==proc_label or mathLib.TuringMachine.TMJson.PROGRAM_AR_MODE_QUIT_REJECT==proc_label):
+                                raise ValueError(f"Error : The program label '{proc_label}' is reserved!")
+
+                            PROGRAM_LABEL_DICT[proc_label]=i
+                    
+                    program_index=0
+                    process_flag=True
+                    while(process_flag and 0<=program_index<len(program_list)):
+                        program_dict=dict(program_list[program_index])
+                        program_tm_key=program_dict["tm_key"]
+                        memory_input_keys=program_dict["in_id"]
+                        memory_output_keys=program_dict["out_id"]
+                        accept_mode=program_dict["accept"]
+                        reject_mode=program_dict["reject"]
+                        
+                        inputs=self.__MemoryTMInputInProgramMode(memory_input_keys)
+
+                        if(display_log):
+                            print(f"Start Program [ {program_index} ] : {program_tm_key} => {inputs}")
+
+                        tmp_flag,_=self.run(inputs=inputs,display=display_log,qFlag=qFlag,tm_key=program_tm_key)
+                        
+                        if(display_log):
+                            print(f"End Program [ {program_index} ] : {program_tm_key} => {'accept' if tmp_flag else 'reject'}",end="\n\n")
+                        
+                        if(tmp_flag):
+                            self.__MemoryTMOutputInProgramMode(memory_output_keys,self.__now_TM.getTapes(False))
+                            process_flag,program_index=mathLib.TuringMachine.TMJson.__getNextProgramIndex(program_index,accept_mode,PROGRAM_LABEL_DICT)
+                        else:
+                            process_flag,program_index=mathLib.TuringMachine.TMJson.__getNextProgramIndex(program_index,reject_mode,PROGRAM_LABEL_DICT)
+
+                    return returnFunc(
+                        program_index>=0,
+                        self.__memory,
+                        display_settings=display_settings
+                    )
+                
     class PolygonLib:
         """
         Class for polygon-related operations.
