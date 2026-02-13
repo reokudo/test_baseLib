@@ -24770,7 +24770,7 @@ class imgLib:
             multi_class_mode:str=None,
             gpu_flag:bool=True,
             ensemble_args:dict=None,
-            yolo_args:dict=None,
+            yolo_additional_args:dict=None,
             check_model_names_flag:bool=True
         ):
             """
@@ -24785,6 +24785,7 @@ class imgLib:
                 gpu_flag (bool): Whether to use the GPU.
                 ensemble_args (dict): Arguments for ensemble model.
                 yolo_args (dict): Arguments for YOLO model.
+                yolo_additional_args (dict): Additional arguments for the `imgLib.ensembleModel.MultiYOLOModelModule.predictAllYOLOModels` method.
                 check_model_names_flag (bool): Whether to check model names.
 
             Returns:
@@ -24796,6 +24797,11 @@ class imgLib:
                 yolo_args={}
             else:
                 yolo_args=pyExLib.safety_deepcopy(yolo_args)
+
+            if(yolo_additional_args is None):
+                yolo_additional_args={}
+            else:
+                yolo_additional_args=pyExLib.safety_deepcopy(yolo_additional_args)
 
             mode,iou_threshold,multi_class_mode,ensemble_args=imgLib.YOLOANN._beforeProcEnsembleYOLOANNResult(
                 mode=mode,
@@ -24813,6 +24819,7 @@ class imgLib:
                 gpu_flag=gpu_flag,
                 ensemble_args=ensemble_args,
                 yolo_args=yolo_args,
+                yolo_additional_args=yolo_additional_args,
                 check_model_names_flag=check_model_names_flag
             )
         
@@ -28429,6 +28436,7 @@ class imgLib:
             gpu_flag:bool=True,
             ensemble_args:dict=None,
             yolo_args:dict=None,
+            yolo_additional_args:dict=None,
             check_model_names_flag:bool=True,
             prefer_output_id:str=None,
             index:int=0,
@@ -28444,6 +28452,7 @@ class imgLib:
                 gpu_flag (bool): Whether to use GPU for prediction.
                 ensemble_args (dict, optional): Arguments for ensemble prediction.
                 yolo_args (dict, optional): Additional YOLO arguments.
+                yolo_additional_args (dict): Additional arguments for the `imgLib.ensembleModel.MultiYOLOModelModule.predictAllYOLOModels` method.
                 check_model_names_flag (bool): Whether to check model names.
                 prefer_output_id (str, optional): Preferred output ID to set as active.
                 index (int): Index to select from the list of results.
@@ -28459,6 +28468,7 @@ class imgLib:
                 gpu_flag=gpu_flag,
                 ensemble_args=ensemble_args,
                 yolo_args=yolo_args,
+                yolo_additional_args=yolo_additional_args,
                 check_model_names_flag=check_model_names_flag,
             )
             self.setResultsFromProcReturn(r,prefer_output_id=prefer_output_id,index=index,exist_ok=True,set_active=True)
@@ -32128,7 +32138,8 @@ class imgLib:
                 models:list,
                 predict_data,
                 gpu_flag:bool,
-                yolo_args
+                yolo_args,
+                yolo_additional_args:dict=None,
             ):
                 """
                 Predicts all YOLO models.
@@ -32140,6 +32151,7 @@ class imgLib:
                     yolo_args: Arguments for the YOLO model.
                         - dict: shared for all models (backward compatible)
                         - list[dict] / tuple[dict]: per-model args (len must match len(models))
+                    yolo_additional_args (dict): Additional arguments for the `imgLib.ensembleModel.MultiYOLOModelModule.predictAllYOLOModels` method.
 
                 Returns:
                     int: Number of results.
@@ -32156,6 +32168,14 @@ class imgLib:
                 if(yolo_args is None):
                     yolo_args={}
 
+                """
+                !TODO `yolo_additional_args` is for future extension.
+                I'm currently planning to add options like:
+                    - parallel processing of multiple models (if GPU memory allows)
+                """
+                if(yolo_additional_args is None):
+                    yolo_additional_args={}
+                    
                 # Normalize yolo_args into either a shared dict or per-model list[dict]
                 _shared_args=None
                 _per_model_args=None
@@ -32327,6 +32347,7 @@ class imgLib:
             gpu_flag:bool=True,
             ensemble_args:dict=None,
             yolo_args:dict=None,
+            yolo_additional_args:dict=None,
             check_model_names_flag:bool=True
         ):
             """
@@ -32591,6 +32612,7 @@ class imgLib:
                 yolo_args (dict | list[dict] | tuple[dict]): Arguments forwarded into each model's `.predict(...)` call.
                     - dict: shared for all models (backward compatible)
                     - list[dict] / tuple[dict]: per-model args (len must match len(models))
+                yolo_additional_args (dict): Additional arguments for the `imgLib.ensembleModel.MultiYOLOModelModule.predictAllYOLOModels` method.
                 check_model_names_flag (bool): If True, verifies all models expose `.names` and that they match (required when injecting class names).
 
             Returns:
@@ -32630,6 +32652,13 @@ class imgLib:
             else:
                 raise ValueError("Error : yolo_args must be a dict or list[dict] or tuple[dict]!")
 
+            if(yolo_additional_args is None):
+                yolo_additional_args={}
+            else:
+                yolo_additional_args=pyExLib.safety_deepcopy(yolo_additional_args)
+            if(not isinstance(yolo_additional_args,dict)):
+                raise ValueError("Error : yolo_additional_args must be a dict!")
+
             inject_cls_names_dict=ensemble_args.get("inject_cls_names_dict",True)
             if(not isinstance(inject_cls_names_dict,bool)):
                 raise ValueError("Error : inject_cls_names_dict must be a bool!")
@@ -32649,7 +32678,8 @@ class imgLib:
                 models=models,
                 predict_data=predict_data,
                 gpu_flag=gpu_flag,
-                yolo_args=yolo_args
+                yolo_args=yolo_args,
+                yolo_additional_args=yolo_additional_args
             )
             return imgLib.ensembleModel.MultiYOLOModelModule.procEnsembleFunc4YOLOResult(
                 ns=ns,
@@ -37875,6 +37905,7 @@ class imgLib:
                 self,
                 gpu_flag:bool,
                 yolo_args:dict,
+                yolo_additional_args:dict,
                 raw_img:np.ndarray,
                 ns:int,
                 all_results:list
@@ -37885,6 +37916,7 @@ class imgLib:
                 Args:
                     gpu_flag (bool): Flag indicating whether to use GPU.
                     yolo_args (dict): Arguments for the YOLO model.
+                    yolo_additional_args (dict): Additional arguments for the `imgLib.ensembleModel.MultiYOLOModelModule.predictAllYOLOModels` method.
                     raw_img (np.ndarray): The raw image to process.
                     ns (int): The namespace ID.
                     all_results (list): The results from all models.
@@ -37901,6 +37933,7 @@ class imgLib:
                         self.__raw_img,
                         gpu_flag=gpu_flag,
                         yolo_args=yolo_args,
+                        yolo_additional_args=yolo_additional_args
                     )
 
                 elif(isinstance(raw_img,np.ndarray) and isinstance(ns,int) and isinstance(all_results,list)):
@@ -37921,6 +37954,7 @@ class imgLib:
                     yolo_ann_obj,
                     gpu_flag:bool=False,
                     yolo_args:dict=None,
+                    yolo_additional_args:dict=None,
                     raw_img:np.ndarray=None,
                     ns:int=None,
                     all_results:list=None,
@@ -37933,6 +37967,7 @@ class imgLib:
                     yolo_ann_obj (YOLOANN): The YOLO annotation object.
                     gpu_flag (bool): Flag indicating whether to use GPU.
                     yolo_args (dict): Arguments for the YOLO model.
+                    yolo_additional_args (dict): Additional arguments for the `imgLib.ensembleModel.MultiYOLOModelModule.predictAllYOLOModels` method.
                     raw_img (np.ndarray): The raw image to process.
                     ns (int): The namespace ID.
                     all_results (list): The results from all models.
@@ -37945,6 +37980,11 @@ class imgLib:
                     yolo_args={}
                 else:
                     yolo_args=pyExLib.safety_deepcopy(yolo_args)
+
+                if(yolo_additional_args is None):
+                    yolo_additional_args={}
+                else:
+                    yolo_additional_args=pyExLib.safety_deepcopy(yolo_additional_args)
 
                 if(not isinstance(read_yolo_model_list_obj,imgLib.YOLOModelLib.readYOLOModelList)):
                     raise TypeError("Invalid read_yolo_model_list_obj.")
@@ -37960,6 +38000,7 @@ class imgLib:
                 self.__init_data(
                     gpu_flag,
                     yolo_args,
+                    yolo_additional_args,
                     raw_img,
                     ns,
                     all_results,
@@ -41778,6 +41819,7 @@ class imgLib:
 
                 gpu_flag:bool=True,
                 yolo_args:dict=None,
+                yolo_additional_args:dict=None,
                 
                 is_auto_img_name:bool=False,
                 auto_img_name_function:callable=None,
@@ -41791,6 +41833,7 @@ class imgLib:
                     auto_model_name_func (callable, optional): Function to automatically name models.
                     gpu_flag (bool, optional): Whether to use GPU for processing.
                     yolo_args (dict, optional): Additional arguments for YOLO processing.
+                    yolo_additional_args (dict): Additional arguments for the `imgLib.ensembleModel.MultiYOLOModelModule.predictAllYOLOModels` method.
                     is_auto_img_name (bool, optional): Whether to automatically name images.
                 """
                 # model setting parameters
@@ -41810,9 +41853,14 @@ class imgLib:
                 # ensemble predict setting parameters
                 self.__predict_config_list=[]
                 self.__gpu_flag=gpu_flag
+                
                 if(yolo_args is None):
                     yolo_args={}
                 self.__yolo_args=pyExLib.safety_deepcopy(yolo_args)
+
+                if(yolo_additional_args is None):
+                    yolo_additional_args={}
+                self.__yolo_additional_args=pyExLib.safety_deepcopy(yolo_additional_args)
 
                 # image setting parameters
                 self.__predict_image_data={}
@@ -42366,6 +42414,7 @@ class imgLib:
                                 tmp_yolo_ann.getImg(draw_shape_flag=False,label_flag=False),
                                 gpu_flag=self.__gpu_flag,
                                 yolo_args=self.__yolo_args,
+                                yolo_additional_args=self.__yolo_additional_args,
                             )
                             if(not isinstance(tmp_all_results,list)):
                                 raise TypeError("tmp_all_results should be a list")
@@ -43134,10 +43183,16 @@ class imgLib:
                     raise TypeError("ensemble_args should be a dict")
                 if(not isinstance(yolo_args,(dict,list,tuple))):
                     raise TypeError("yolo_args should be a dict, list or tuple")
-
+                
+                if(yolo_additional_args is None):
+                    yolo_additional_args={}
+                if(not isinstance(yolo_additional_args,dict)):
+                    raise TypeError("yolo_additional_args should be a dict")
+                
                 def proc_yolo_ensemble_predict_func(
                     predict_data,
                     gpu_flag:bool=True,
+                    yolo_additional_args:dict=None,
                     check_model_names_flag:bool=True,
                 ):
                     return imgLib.ensembleModel.procYOLOPredict(
@@ -43147,6 +43202,7 @@ class imgLib:
                         gpu_flag=gpu_flag,
                         ensemble_args=ensemble_args,
                         yolo_args=yolo_args,
+                        yolo_additional_args=yolo_additional_args,
                         check_model_names_flag=check_model_names_flag,
                     )
                 return proc_yolo_ensemble_predict_func
@@ -43545,6 +43601,7 @@ class imgLib:
                     index:int,
                     yolo_ann:"imgLib.YOLOANN",
                     gpu_flag:bool=True,
+                    yolo_additional_args:dict=None,
                     check_model_names_flag:bool=True,
                 ):
                     """
@@ -43554,6 +43611,7 @@ class imgLib:
                         index (int): The index of the pipeline configuration to use.
                         yolo_ann (imgLib.YOLOANN): The YOLOANN instance for prediction.
                         gpu_flag (bool, optional): Whether to use GPU for prediction.
+                        yolo_additional_args (dict): Additional arguments for the `imgLib.ensembleModel.MultiYOLOModelModule.predictAllYOLOModels` method.
                         check_model_names_flag (bool, optional): Whether to check model names during prediction.
                     
                     Returns:
@@ -43569,12 +43627,18 @@ class imgLib:
                     if(not isinstance(yolo_ann,imgLib.YOLOANN)):
                         raise TypeError("yolo_ann should be a imgLib.YOLOANN instance")
                     
+                    if(yolo_additional_args is None):
+                        yolo_additional_args={}
+                    else:
+                        yolo_additional_args=pyExLib.safety_deepcopy(yolo_additional_args)
+
                     return yolo_ann.procYOLOPredict(
                         models=models,
                         mode=imgLib.ensembleModel.ENSEMBLE_MODE_PIPELINE,
                         gpu_flag=gpu_flag,
                         ensemble_args=ensemble_args,
                         yolo_args=yolo_args,
+                        yolo_additional_args=yolo_additional_args,
                         check_model_names_flag=check_model_names_flag,
                     )
             
