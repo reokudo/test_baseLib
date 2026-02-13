@@ -5419,20 +5419,76 @@ class pyExLib:
             percentiles:list|tuple=(0,25,50,75,100),
             ddof:int=0,
             round_ndigits:int|None=None,
+            group_by:str="name",
+            group_tags:list|None=None,
         ):
             """
             Converts summary statistics to a pandas DataFrame.
 
             Args:
                 names (list or None): List of processTime instance names to include. If None, all instances are included.
-                tags (list or None): List of tags to filter processTime instances to include. If None, no tag filtering is applied.
+                tags (list or None): List of tags to filter processTime instances to include (AND condition). If None, no tag filtering is applied.
                 percentiles (list or tuple): List of percentiles to calculate.
                 ddof (int): Delta degrees of freedom for std/var calculation.
                 round_ndigits (int or None): Number of digits to round the results. If None, no rounding is applied.
+                group_by (str): Grouping mode. Supported values:
+                    - "name" (default): One row per processTime name (existing behavior).
+                    - "tag": One row per tag. History samples from all names having the tag are pooled.
+                group_tags (list or None): When group_by is "tag", restrict output rows to these tags. If None, all tags found in selected instances are used.
 
             Returns:
-                pandas.DataFrame: DataFrame containing the summary statistics.
+                pandas.DataFrame: Summary DataFrame.
             """
+            if(group_by is None):
+                group_by="name"
+            group_by=str(group_by).lower().strip()
+            if(group_by in ["tags"]):
+                group_by="tag"
+            if(group_by not in ["name","tag"]):
+                raise ValueError(f"Invalid group_by: {group_by}. Expected 'name' or 'tag'.")
+
+            if(group_by=="tag"):
+                if(group_tags is not None):
+                    group_tags=set([str(x) for x in group_tags])
+
+                tag_values={}
+                tag_names={}
+                for item_name,item_tags,item_ps_obj in self.generator(names,tags):
+                    h=self.getHistorySec(item_name)
+                    if(len(h)<=0):
+                        continue
+                    for t in item_tags:
+                        t=str(t)
+                        if((group_tags is not None) and (t not in group_tags)):
+                            continue
+                        if(t not in tag_values):
+                            tag_values[t]=[]
+                            tag_names[t]=set()
+                        tag_values[t].extend(h)
+                        tag_names[t].add(item_name)
+
+                rows=[]
+                for t in sorted(tag_values.keys()):
+                    st=self.__calcStatisticsSec(
+                        tag_values[t],
+                        percentiles=percentiles,
+                        ddof=ddof,
+                        round_ndigits=round_ndigits,
+                    )
+                    r={
+                        "tag":t,
+                        "num_names":len(tag_names.get(t,set())),
+                        "names":sorted(list(tag_names.get(t,set()))),
+                    }
+                    for k in ["count","sum","mean","std","var","min","max"]:
+                        r[k]=st.get(k,None) if isinstance(st,dict) else None
+                    p=st.get("percentiles",{}) if isinstance(st,dict) else {}
+                    if(isinstance(p,dict)):
+                        for pk,pv in p.items():
+                            r[f"p{pk}"]=pv
+                    rows.append(r)
+                return pd.DataFrame(rows)
+
             rows=[]
             for item_name,item_tags,item_ps_obj in self.generator(names,tags):
                 st=self.getHistoryStatisticsSec(
@@ -5488,6 +5544,8 @@ class pyExLib:
             percentiles:list|tuple=(0,25,50,75,100),
             ddof:int=0,
             round_ndigits:int|None=None,
+            group_by:str="name",
+            group_tags:list|None=None,
         )->str:
             """
             Exports summary statistics to a CSV file.
@@ -5495,12 +5553,16 @@ class pyExLib:
             Args:
                 filepath (str): Path to the output CSV file.
                 names (list or None): List of processTime instance names to include. If None, all instances are included.
-                tags (list or None): List of tags to filter processTime instances to include. If None, no tag filtering is applied.
+                tags (list or None): List of tags to filter processTime instances to include (AND condition). If None, no tag filtering is applied.
                 index (bool): Whether to include the DataFrame index in the CSV file.
                 encoding (str): Encoding for the CSV file.
                 percentiles (list or tuple): List of percentiles to calculate.
                 ddof (int): Delta degrees of freedom for std/var calculation.
                 round_ndigits (int or None): Number of digits to round the results. If None, no rounding is applied.
+                group_by (str): Grouping mode. Supported values:
+                    - "name" (default): One row per processTime name (existing behavior).
+                    - "tag": One row per tag. History samples from all names having the tag are pooled.
+                group_tags (list or None): When group_by is "tag", restrict output rows to these tags. If None, all tags found in selected instances are used.
 
             Returns:
                 str: Path to the output CSV file.
@@ -5511,6 +5573,8 @@ class pyExLib:
                 percentiles=percentiles,
                 ddof=ddof,
                 round_ndigits=round_ndigits,
+                group_by=group_by,
+                group_tags=group_tags,
             )
             df.to_csv(filepath,index=index,encoding=encoding)
             return filepath
