@@ -32154,6 +32154,9 @@ class imgLib:
                         - dict: shared for all models (backward compatible)
                         - list[dict] / tuple[dict]: per-model args (len must match len(models))
                     yolo_additional_args (dict): Additional arguments for the `imgLib.ensembleModel.MultiYOLOModelModule.predictAllYOLOModels` method.
+                        - inference_mode (bool): Whether to use `torch.inference_mode()` during prediction. Default is `True`.
+                        - autocast (bool): Whether to use `torch.cuda.amp.autocast()` during prediction when `gpu_flag` is `True`. Default is `True`.
+                        - results_to_cpu (bool): Whether to move the results to CPU after prediction. Default is `False`.
 
                 Returns:
                     int: Number of results.
@@ -32184,6 +32187,14 @@ class imgLib:
                 inference_mode=yolo_additional_args.get("inference_mode",True)
                 if(not isinstance(inference_mode,bool)):
                     raise ValueError("Error : yolo_additional_args[\"inference_mode\"] must be a bool!")
+                    
+                autocast=yolo_additional_args.get("autocast",True)
+                if(not isinstance(autocast,bool)):
+                    raise ValueError("Error : yolo_additional_args[\"autocast\"] must be a bool!")
+
+                results_to_cpu=yolo_additional_args.get("results_to_cpu",False)
+                if(not isinstance(results_to_cpu,bool)):
+                    raise ValueError("Error : yolo_additional_args[\"results_to_cpu\"] must be a bool!")
                 ####
 
                 # Normalize yolo_args into either a shared dict or per-model list[dict]
@@ -32216,16 +32227,23 @@ class imgLib:
                         _infer_cm=contextlib.nullcontext()
                         
                     with _infer_cm:
-                        if(gpu_flag):
+                        if(gpu_flag and autocast):
                             with torch.cuda.amp.autocast():
                                 results=model.predict(predict_data,**_args)
                         else:
                             results=model.predict(predict_data,**_args)
-                    
+
+                        if(not isinstance(results,list)):
+                            results=list(results)
+
+                        if(gpu_flag and results_to_cpu):
+                            results=[(r.cpu() if (hasattr(r,"cpu") and callable(getattr(r,"cpu"))) else r) for r in results]
+
                     if(ns==None):  
                         ns=len(results)
                     elif(ns!=len(results)):
                         raise RuntimeError("Error : YOLO results lengths are not aligned.")
+                    
                     all_results.append(results)
                 return ns,all_results
 
