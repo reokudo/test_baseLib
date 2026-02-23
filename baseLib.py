@@ -42206,6 +42206,146 @@ class imgLib:
                 self.__predict_config_list+=append_predict_config_list
                 self.__renewDonePredictMatrix()
 
+            def appendYOLOANN(
+                self,
+                yolo_ann_obj,
+                img_name:str=None,
+                img_tags:list|set|tuple=None,
+                dont_renew_done_predict_matrix:bool=False,
+                ignore_duplicate_img_name:bool=False,
+                image_path:str|Path=None,
+                label_path:str|Path=None,
+            ):
+                """
+                Appends a pre-built imgLib.YOLOANN object to the project.
+
+                Args:
+                    yolo_ann_obj (imgLib.YOLOANN): YOLOANN instance to append.
+                    img_name (str, optional): Image name. If auto naming is enabled, this may be auto-generated. If auto naming is enabled but yolo_ann_obj has no image path, this is used as fallback.
+                    img_tags (list|set|tuple, optional): Tags associated with the image.
+                    dont_renew_done_predict_matrix (bool, optional): Whether to skip renewing done matrix.
+                    ignore_duplicate_img_name (bool, optional): Whether to ignore duplicate image names.
+                    image_path (str|Path, optional): The path to the image file. Used for auto naming and metadata, but can be None for in-memory YOLOANN.
+                    label_path (str|Path, optional): The path to the label file. Used for metadata, but can be None for in-memory YOLOANN.
+
+                Returns:
+                    str: The name of the appended image.
+
+                Raises:
+                    TypeError: If input types are invalid.
+                    ValueError: If image name is required but missing / duplicated.
+                """
+                if(self.__lock_append):
+                    raise RuntimeError("Appending is locked for this IncrementalYOLOEvalProject instance.")
+
+                if(not isinstance(yolo_ann_obj,imgLib.YOLOANN)):
+                    raise TypeError("yolo_ann_obj should be an instance of imgLib.YOLOANN")
+
+                if((image_path is not None) and (not isinstance(image_path,(str,Path)))):
+                    raise TypeError("image_path should be a string or Path")
+                if((label_path is not None) and (not isinstance(label_path,(str,Path)))):
+                    raise TypeError("label_path should be a string or Path")
+
+                if(image_path is not None):
+                    image_path=Path(image_path)
+                if(label_path is not None):
+                    label_path=Path(label_path)
+
+                if(img_tags is None):
+                    img_tags=set()
+                elif(not isinstance(img_tags,(list,set,tuple))):
+                    raise TypeError("img_tags should be a list, set, or tuple")
+                img_tags=set(list(img_tags))
+
+                # Decide image name
+                tmp_img_path=image_path
+                if(tmp_img_path is None):
+                    try:
+                        tmp_img_path=yolo_ann_obj.getImgPath()
+                    except Exception:
+                        tmp_img_path=None
+
+                if(self.__is_auto_img_name):
+                    if(tmp_img_path is not None and str(tmp_img_path)!=""):
+                        img_name=self.__auto_img_name_function(tmp_img_path)
+                    elif(img_name is not None):
+                        # fallback to caller-provided name (useful for YOLOANNDataset)
+                        img_name=str(img_name)
+                    else:
+                        # final fallback for in-memory YOLOANN without path
+                        base_idx=len(self.__predict_image_data)
+                        while(True):
+                            candidate_name=f"mem_{base_idx:08d}"
+                            if(candidate_name not in self.__predict_image_data):
+                                img_name=candidate_name
+                                break
+                            base_idx+=1
+                elif(img_name is None):
+                    raise ValueError("img_name must be provided if is_auto_img_name is False")
+
+                img_name=str(img_name)
+
+                if(img_name in self.getImageNames()):
+                    if(ignore_duplicate_img_name):
+                        return
+                    else:
+                        raise ValueError(f"Image name {img_name} already exists")
+
+                # Keep metadata shape compatible with appendImage (paths can be None for in-memory inputs)
+                self.__predict_image_data[img_name]={
+                    "img_name":img_name,
+                    "image_path":None if (tmp_img_path is None) else Path(tmp_img_path),
+                    "label_path":label_path,
+                    "img_tags":img_tags,
+                    "input_type":"YOLOANN",
+                }
+                self.__img_tag_types.update(img_tags)
+
+                tmp_yolo_ann=yolo_ann_obj.copy()
+                self.__yolo_ann_fsv.appendData(
+                    key=img_name,
+                    data=tmp_yolo_ann,
+                    release_after=True,
+                    aggressive_release=True,
+                )
+                del tmp_yolo_ann
+
+                if(not dont_renew_done_predict_matrix):
+                    self.__renewDonePredictMatrix()
+
+                return img_name
+
+            def appendYOLOANNDataset(
+                self,
+                yolo_ann_dataset,
+                img_tags:list|set|tuple=None,
+                ignore_duplicate_img_name:bool=False,
+            ):
+                """
+                Appends all items in an imgLib.YOLOANNDataset to the project.
+
+                Args:
+                    yolo_ann_dataset (imgLib.YOLOANNDataset): Dataset to append.
+                    img_tags (list|set|tuple, optional): Tags applied to all appended images.
+                    ignore_duplicate_img_name (bool, optional): Whether to ignore duplicate names.
+                """
+                if(self.__lock_append):
+                    raise RuntimeError("Appending is locked for this IncrementalYOLOEvalProject instance.")
+
+                if(not isinstance(yolo_ann_dataset,imgLib.YOLOANNDataset)):
+                    raise TypeError("yolo_ann_dataset should be an instance of imgLib.YOLOANNDataset")
+
+                for ds_img_name,yolo_ann in yolo_ann_dataset.getAllDataGenerator():
+                    self.appendYOLOANN(
+                        yolo_ann_obj=yolo_ann,
+                        img_name=ds_img_name,
+                        img_tags=img_tags,
+                        dont_renew_done_predict_matrix=True,
+                        ignore_duplicate_img_name=ignore_duplicate_img_name,
+                    )
+
+                self.__renewDonePredictMatrix()
+
             def appendImage(
                 self,
                 image_path:str|Path,
@@ -42239,12 +42379,6 @@ class imgLib:
                 if(not isinstance(label_path,(str,Path))):
                     raise TypeError("label_path should be a string or Path")
 
-                if(img_tags is None):
-                    img_tags=set()
-                elif(not isinstance(img_tags,(list,set,tuple))):
-                    raise TypeError("img_tags should be a list, set, or tuple")
-                img_tags=set(list(img_tags))
-
                 image_path=Path(image_path)
                 if(not image_path.exists()):
                     raise FileNotFoundError(f"Image path {image_path} does not exist")
@@ -42256,26 +42390,6 @@ class imgLib:
                     raise FileNotFoundError(f"Label path {label_path} does not exist")
                 elif(not label_path.is_file()):
                     raise FileNotFoundError(f"Label path {label_path} is not a file")
-            
-                if(self.__is_auto_img_name):
-                    img_name=self.__auto_img_name_function(image_path)
-                elif(img_name is None):
-                    raise ValueError("img_name must be provided if is_auto_img_name is False")
-                img_name=str(img_name)
-
-                if(img_name in self.getImageNames()):
-                    if(ignore_duplicate_img_name):
-                        return
-                    else:
-                        raise ValueError(f"Image name {img_name} already exists")
-
-                self.__predict_image_data[img_name]={
-                    "img_name":img_name,
-                    "image_path":image_path,
-                    "label_path":label_path,
-                    "img_tags":img_tags,
-                }
-                self.__img_tag_types.update(img_tags)
 
                 tmp_yolo_ann=imgLib.YOLOANN(
                     img_mode=imgLib.YOLOANN.IMG_MODE_FILE,
@@ -42283,16 +42397,16 @@ class imgLib:
                     arg=str(image_path),
                     ann_file_mode=imgLib.YOLOANN.ANN_FILE_MODE_YOLOV3,
                 )
-                self.__yolo_ann_fsv.appendData(
-                    key=img_name,
-                    data=tmp_yolo_ann,
-                    release_after=True,
-                    aggressive_release=True,
+                self.appendYOLOANN(
+                    yolo_ann_obj=tmp_yolo_ann,
+                    img_name=img_name,
+                    img_tags=img_tags,
+                    dont_renew_done_predict_matrix=dont_renew_done_predict_matrix,
+                    ignore_duplicate_img_name=ignore_duplicate_img_name,
+                    image_path=image_path,
+                    label_path=label_path,
                 )
                 del tmp_yolo_ann
-
-                if(not dont_renew_done_predict_matrix):
-                    self.__renewDonePredictMatrix()
 
             def __getYOLOANN(self,img_name:str):
                 """
