@@ -28215,6 +28215,64 @@ class imgLib:
                 "n_pred_per_class":n_pred_per_class
             }
 
+        @staticmethod
+        def CalcDetMetricsFromBBimgJsonList(
+            bb_img_json_list:list,
+            iou_threshold:float=0.5,
+            score_threshold:float=None,
+            bbox_key:str="bboxes",
+            cls_key:str="classes",
+            score_key:str="scores",
+            gt_block_key:str="YOLOANN_obj_additional_info",
+            gt_bbox_key:str="ann",
+            gt_cls_key:str="ann_cls_nums",
+            eps:float=1e-12
+        )->dict:
+            """
+            Compatibility wrapper for simple detection metrics calculation.
+
+            This method forwards to:
+                `imgLib.ensembleModel.AutoPipelineSelector.CalcDetMetricsFromBBimgJsonList`
+
+            It is provided so that callers can use:
+                `imgLib.BBimgJson.CalcDetMetricsFromBBimgJsonList(...)`
+
+            with the same interface as CalcMAPFromBBimgJsonList.
+
+            Args:
+                bb_img_json_list (list): List of BBimgJson objects.
+                iou_threshold (float): IoU threshold for matching.
+                score_threshold (float, optional): Score threshold to filter predictions before matching.
+                bbox_key (str): Key for predicted bounding boxes in ann dict.
+                cls_key (str): Key for predicted class ids in ann dict.
+                score_key (str): Key for predicted scores in ann dict.
+                gt_block_key (str): Key for GT block in bb.getDict().
+                gt_bbox_key (str): Key for GT bounding boxes in GT block.
+                gt_cls_key (str): Key for GT class ids in GT block.
+                eps (float): Small value to avoid division by zero.
+
+            Returns:
+                dict: {
+                        "iou_threshold": float,
+                        "score_threshold": float|None,
+                        "overall": {"tp","fp","fn","precision","recall","f1","det_accuracy","matched_pairs","match_accuracy"},
+                        "per_class": {class_name: {...}, ...},
+                        "confusion": {gt_class_name: {pred_class_name: count, ...}, ...}
+                    }
+            """
+            return imgLib.ensembleModel.AutoPipelineSelector.CalcDetMetricsFromBBimgJsonList(
+                bb_img_json_list=bb_img_json_list,
+                iou_threshold=iou_threshold,
+                score_threshold=score_threshold,
+                bbox_key=bbox_key,
+                cls_key=cls_key,
+                score_key=score_key,
+                gt_block_key=gt_block_key,
+                gt_bbox_key=gt_bbox_key,
+                gt_cls_key=gt_cls_key,
+                eps=eps
+            )
+
     @_protectedClass.fileStoreMyLibRegister
     class wrapperYOLOANNAll(_FileStore.FileStoreParser):
         """
@@ -40062,6 +40120,57 @@ class imgLib:
                 "cm_fig_text_table_gap":0.03,
             }
 
+            @staticmethod
+            def _normalize_confusion_matrix_df(
+                cm_df:pd.DataFrame,
+                orientation:str=None,
+                normalize_target:str="gt",
+                eps:float=1e-12,
+            ):
+                """
+                Normalizes a confusion matrix DataFrame.
+
+                Args:
+                    cm_df (pd.DataFrame): Confusion matrix DataFrame.
+                    orientation (str, optional): Confusion matrix orientation.
+                    normalize_target (str, optional): Normalization target. One of:
+                        - "gt": normalize by GT totals (Ultralytics-like behavior)
+                        - "row": normalize by row sums
+                        - "col": normalize by column sums
+                    eps (float, optional): Small epsilon for safe division.
+
+                Returns:
+                    pd.DataFrame: Normalized confusion matrix DataFrame.
+                """
+                if(not isinstance(cm_df,pd.DataFrame)):
+                    raise TypeError("cm_df should be a pd.DataFrame")
+
+                arr=cm_df.to_numpy(dtype=np.float64)
+                if(arr.size==0):
+                    return cm_df.copy()
+
+                ori_ultra=imgLib.BBimgJson.BUILD_CONFUSION_MATRIX_FROM_BB_IMG_JSON_LIST_ORIENTATION_ULTRALYTICS
+                ori_gt_pred=imgLib.BBimgJson.BUILD_CONFUSION_MATRIX_FROM_BB_IMG_JSON_LIST_ORIENTATION_GT_PRED
+
+                if(normalize_target=="gt"):
+                    if(orientation==ori_gt_pred):
+                        # rows=GT
+                        denom=arr.sum(axis=1,keepdims=True)
+                    else:
+                        # rows=Predict, cols=GT (Ultralytics style)
+                        denom=arr.sum(axis=0,keepdims=True)
+                elif(normalize_target=="row"):
+                    denom=arr.sum(axis=1,keepdims=True)
+                elif(normalize_target=="col"):
+                    denom=arr.sum(axis=0,keepdims=True)
+                else:
+                    raise ValueError("normalize_target should be one of ['gt','row','col']")
+
+                denom=np.where(np.abs(denom)<float(eps),1.0,denom)
+                norm_arr=arr/denom
+
+                return pd.DataFrame(norm_arr,index=cm_df.index,columns=cm_df.columns)
+
             def saveConfusionMatrixFig(
                 self,
                 save_dir:Path|str,
@@ -40075,6 +40184,11 @@ class imgLib:
                 cm_fig_title_args:dict=None,
                 cm_fig_include_gt_predict_text:bool=False,
                 cm_fig_gt_predict_label_text_config:dict=None,
+                normalize:bool=False,
+                normalize_target:str="gt",
+                normalize_eps:float=1e-12,
+                cm_fig_round_digits:int|None=None,
+                file_name_suffix:str="",
             ):
                 """
                 Saves confusion matrix figures for each model.
@@ -40101,6 +40215,11 @@ class imgLib:
                         - cm_fig_text_left_gap (float): Left gap for the text.
                         - cm_fig_text_title_gap (float): Title gap for the text.
                         - cm_fig_text_table_gap (float): Table gap for the text.
+                    normalize (bool, optional): Whether to normalize the confusion matrix values.
+                    normalize_target (str, optional): Normalization target ("gt", "row", or "col").
+                    normalize_eps (float, optional): Small epsilon used for safe normalization.
+                    cm_fig_round_digits (int|None, optional): Rounds values when normalized if specified.
+                    file_name_suffix (str, optional): Suffix added to saved file names.
                 """
                 save_dir=Path(save_dir)
                 save_dir.mkdir(parents=True,exist_ok=True)
@@ -40150,6 +40269,18 @@ class imgLib:
                     if(not isinstance(cm_df,pd.DataFrame)):
                         raise ValueError(f"Confusion matrix for model {model_name} is not a DataFrame.")
 
+                    if(normalize):
+                        cm_df=self._normalize_confusion_matrix_df(
+                            cm_df=cm_df,
+                            orientation=orientation,
+                            normalize_target=normalize_target,
+                            eps=normalize_eps
+                        )
+                        if(cm_fig_round_digits is not None):
+                            cm_df=cm_df.round(int(cm_fig_round_digits))
+                    else:
+                        cm_df=cm_df.copy()
+
                     cm_fig_title=None
                     if(cm_fig_include_title):
                         cm_fig_title=str(model_name)
@@ -40164,7 +40295,7 @@ class imgLib:
                     vmin=float(cm_df.min(skipna=True,numeric_only=True).min())
                     vmax=float(cm_df.max(skipna=True,numeric_only=True).max())
 
-                    out_path=save_dir/f"{model_name}.png"
+                    out_path=save_dir/f"{model_name}{file_name_suffix}.png"
                     
                     fig_title_for_tableplot=None if(final_add_left_and_top_text) else cm_fig_title
                     fig,ax,tbl=pyExLib.DataFrameExLib.TablePlotter.dataFrameTablePlot(
@@ -40291,6 +40422,228 @@ class imgLib:
                             dpi=200
                         )
                         plt.close(fig)
+
+            def calcDetMetricsCurves(
+                self,
+                iou_threshold:float=0.5,
+                score_thresholds:list|np.ndarray=None,
+            ):
+                """
+                Calculates detection metric curves (Precision/Recall/F1) for each model by sweeping score_threshold.
+
+                Args:
+                    iou_threshold (float, optional): IoU threshold for TP matching.
+                    score_thresholds (list|np.ndarray, optional): Confidence thresholds to sweep.
+
+                Returns:
+                    dict: {
+                        model_name: {
+                            "overall_df": pd.DataFrame,
+                            "per_class_df": pd.DataFrame,
+                            "iou_threshold": float
+                        }, ...
+                    }
+                """
+                if(score_thresholds is None):
+                    score_thresholds=np.linspace(0.0,1.0,101)
+                else:
+                    score_thresholds=np.array(score_thresholds,dtype=np.float64)
+
+                result={}
+
+                for model_name,results in self.generatorPerModel():
+                    bb_list=[ri for ri in results.values()]
+
+                    rows=[]
+                    per_class_rows=[]
+
+                    # Resolve metric calculator location (version compatibility)
+                    det_metrics_calc_func=None
+                    if(hasattr(imgLib.BBimgJson,"CalcDetMetricsFromBBimgJsonList")):
+                        det_metrics_calc_func=imgLib.BBimgJson.CalcDetMetricsFromBBimgJsonList
+                    elif(
+                        hasattr(imgLib,"ensembleModel")
+                        and hasattr(imgLib.ensembleModel,"AutoPipelineSelector")
+                        and hasattr(imgLib.ensembleModel.AutoPipelineSelector,"CalcDetMetricsFromBBimgJsonList")
+                    ):
+                        det_metrics_calc_func=imgLib.ensembleModel.AutoPipelineSelector.CalcDetMetricsFromBBimgJsonList
+                    else:
+                        raise AttributeError(
+                            "CalcDetMetricsFromBBimgJsonList not found in imgLib.BBimgJson "
+                            "or imgLib.ensembleModel.AutoPipelineSelector."
+                        )
+
+                    for th in score_thresholds:
+                        det=det_metrics_calc_func(
+                            bb_img_json_list=bb_list,
+                            iou_threshold=float(iou_threshold),
+                            score_threshold=float(th)
+                        )
+
+                        ov=(det.get("overall",{}) or {})
+                        rows.append({
+                            "score_threshold":float(th),
+                            "precision":ov.get("precision",None),
+                            "recall":ov.get("recall",None),
+                            "f1":ov.get("f1",None),
+                            "tp":ov.get("tp",None),
+                            "fp":ov.get("fp",None),
+                            "fn":ov.get("fn",None),
+                        })
+
+                        pc=(det.get("per_class",{}) or {})
+                        for cls_name,vals in pc.items():
+                            per_class_rows.append({
+                                "score_threshold":float(th),
+                                "class_name":str(cls_name),
+                                "precision":vals.get("precision",None),
+                                "recall":vals.get("recall",None),
+                                "f1":vals.get("f1",None),
+                                "tp":vals.get("tp",None),
+                                "fp":vals.get("fp",None),
+                                "fn":vals.get("fn",None),
+                                "support":vals.get("support",None),
+                            })
+
+                    overall_df=pd.DataFrame(rows)
+                    per_class_df=pd.DataFrame(per_class_rows)
+
+                    result[model_name]={
+                        "overall_df":overall_df,
+                        "per_class_df":per_class_df,
+                        "iou_threshold":float(iou_threshold),
+                    }
+
+                return result
+
+            def saveDetMetricsCurvesFig(
+                self,
+                save_dir:Path|str,
+                iou_threshold:float=0.5,
+                score_thresholds:list|np.ndarray=None,
+                include_per_class:bool=True,
+                line_alpha:float=0.35,
+                line_width_all:float=2.0,
+                line_width_class:float=1.0,
+                dpi:int=200,
+            ):
+                """
+                Saves Ultralytics-like detection metric curves (BoxP/BoxR/BoxF1/BoxPR) for each model.
+
+                Args:
+                    save_dir (Path|str): Root directory to save curve images.
+                    iou_threshold (float, optional): IoU threshold used in detection metrics.
+                    score_thresholds (list|np.ndarray, optional): Confidence thresholds to sweep.
+                    include_per_class (bool, optional): Whether to overlay per-class curves.
+                    line_alpha (float, optional): Alpha for per-class lines.
+                    line_width_all (float, optional): Line width for all-classes curve.
+                    line_width_class (float, optional): Line width for per-class curves.
+                    dpi (int, optional): Saved figure dpi.
+                """
+                save_dir=Path(save_dir)
+                save_dir.mkdir(parents=True,exist_ok=True)
+
+                curve_dict=self.calcDetMetricsCurves(
+                    iou_threshold=iou_threshold,
+                    score_thresholds=score_thresholds
+                )
+
+                def _safe_series(df,col):
+                    if(col not in df.columns):
+                        return np.array([])
+                    return pd.to_numeric(df[col],errors="coerce").to_numpy(dtype=np.float64)
+
+                for model_name,pack in curve_dict.items():
+                    model_dir=save_dir/Path(str(model_name))
+                    model_dir.mkdir(parents=True,exist_ok=True)
+
+                    overall_df=pack["overall_df"].copy()
+                    per_class_df=pack["per_class_df"].copy()
+
+                    x_conf=_safe_series(overall_df,"score_threshold")
+                    y_p=_safe_series(overall_df,"precision")
+                    y_r=_safe_series(overall_df,"recall")
+                    y_f1=_safe_series(overall_df,"f1")
+
+                    # BoxP_curve
+                    fig,ax=plt.subplots()
+                    if(include_per_class and len(per_class_df)>0):
+                        for cls_name,g in per_class_df.groupby("class_name",sort=False):
+                            gx=_safe_series(g,"score_threshold")
+                            gy=_safe_series(g,"precision")
+                            ax.plot(gx,gy,alpha=line_alpha,linewidth=line_width_class,label=str(cls_name))
+                    ax.plot(x_conf,y_p,linewidth=line_width_all,label="all classes")
+                    ax.set_xlim(0,1)
+                    ax.set_ylim(0,1)
+                    ax.set_xlabel("Confidence")
+                    ax.set_ylabel("Precision")
+                    ax.set_title("BoxP_curve")
+                    if(include_per_class and len(per_class_df)>0):
+                        ax.legend(fontsize=8)
+                    fig.tight_layout()
+                    fig.savefig(model_dir/"BoxP_curve.png",dpi=dpi,bbox_inches="tight")
+                    plt.close(fig)
+
+                    # BoxR_curve
+                    fig,ax=plt.subplots()
+                    if(include_per_class and len(per_class_df)>0):
+                        for cls_name,g in per_class_df.groupby("class_name",sort=False):
+                            gx=_safe_series(g,"score_threshold")
+                            gy=_safe_series(g,"recall")
+                            ax.plot(gx,gy,alpha=line_alpha,linewidth=line_width_class,label=str(cls_name))
+                    ax.plot(x_conf,y_r,linewidth=line_width_all,label="all classes")
+                    ax.set_xlim(0,1)
+                    ax.set_ylim(0,1)
+                    ax.set_xlabel("Confidence")
+                    ax.set_ylabel("Recall")
+                    ax.set_title("BoxR_curve")
+                    if(include_per_class and len(per_class_df)>0):
+                        ax.legend(fontsize=8)
+                    fig.tight_layout()
+                    fig.savefig(model_dir/"BoxR_curve.png",dpi=dpi,bbox_inches="tight")
+                    plt.close(fig)
+
+                    # BoxF1_curve
+                    fig,ax=plt.subplots()
+                    if(include_per_class and len(per_class_df)>0):
+                        for cls_name,g in per_class_df.groupby("class_name",sort=False):
+                            gx=_safe_series(g,"score_threshold")
+                            gy=_safe_series(g,"f1")
+                            ax.plot(gx,gy,alpha=line_alpha,linewidth=line_width_class,label=str(cls_name))
+                    ax.plot(x_conf,y_f1,linewidth=line_width_all,label="all classes")
+                    ax.set_xlim(0,1)
+                    ax.set_ylim(0,1)
+                    ax.set_xlabel("Confidence")
+                    ax.set_ylabel("F1")
+                    ax.set_title("BoxF1_curve")
+                    if(include_per_class and len(per_class_df)>0):
+                        ax.legend(fontsize=8)
+                    fig.tight_layout()
+                    fig.savefig(model_dir/"BoxF1_curve.png",dpi=dpi,bbox_inches="tight")
+                    plt.close(fig)
+
+                    # BoxPR_curve
+                    fig,ax=plt.subplots()
+                    if(include_per_class and len(per_class_df)>0):
+                        for cls_name,g in per_class_df.groupby("class_name",sort=False):
+                            gx=_safe_series(g,"recall")
+                            gy=_safe_series(g,"precision")
+                            if(len(gx)>0):
+                                order=np.argsort(gx)
+                                ax.plot(gx[order],gy[order],alpha=line_alpha,linewidth=line_width_class,label=str(cls_name))
+                    if(len(y_r)>0):
+                        order=np.argsort(y_r)
+                        ax.plot(y_r[order],y_p[order],linewidth=line_width_all,label="all classes")
+                    ax.set_xlim(0,1)
+                    ax.set_ylim(0,1)
+                    ax.set_xlabel("Recall")
+                    ax.set_ylabel("Precision")
+                    ax.set_title("BoxPR_curve")
+                    if(include_per_class and len(per_class_df)>0):
+                        ax.legend(fontsize=8)
+                    fig.tight_layout()
+                    fig.savefig(model_dir/"BoxPR_curve.png",dpi=dpi,bbox_inches="tight")
+                    plt.close(fig)
 
             def getAllAnnotationIoUDataFrame(
                 self,
@@ -41298,6 +41651,13 @@ class imgLib:
                 cm_fig_title_args:dict=None,
                 cm_fig_include_gt_predict_text:bool=False,
                 cm_fig_gt_predict_label_text_config:dict=None,
+                save_data_cm_fig_normalized:bool=False,
+                cm_fig_normalized_target:str="gt",
+                cm_fig_normalized_round_digits:int=3,
+                save_data_box_curves:bool=False,
+                box_curve_iou_threshold:float=None,
+                box_curve_score_thresholds:list|None=None,
+                box_curve_include_per_class:bool=True,
                 save_simple_eval_report_json:bool=False,
                 simple_eval_report_args:dict=None,
                 save_selected_models_json:bool=False,
@@ -41331,6 +41691,13 @@ class imgLib:
                     cm_fig_title_args (dict, optional): Additional arguments for the confusion matrix figure title.
                     cm_fig_include_gt_predict_text (bool, optional): Whether to include ground truth and prediction text in the confusion matrix figure.
                     cm_fig_gt_predict_label_text_config (dict, optional): Configuration for ground truth and prediction label text in the confusion matrix figure.
+                    save_data_cm_fig_normalized (bool, optional): Whether to also save normalized confusion matrix figures.
+                    cm_fig_normalized_target (str, optional): Normalization target for confusion matrices ("gt", "row", or "col").
+                    cm_fig_normalized_round_digits (int, optional): Number of digits to round normalized confusion matrix values.
+                    save_data_box_curves (bool, optional): Whether to save BoxP/BoxR/BoxF1/BoxPR curves.
+                    box_curve_iou_threshold (float, optional): IoU threshold used to build the box curves.
+                    box_curve_score_thresholds (list|None, optional): Confidence thresholds for the box curves.
+                    box_curve_include_per_class (bool, optional): Whether to overlay per-class curves.
                     save_simple_eval_report_json (bool, optional): Whether to save the simple evaluation report JSON.
                     simple_eval_report_args (dict, optional): Arguments for the simple evaluation report.
                     save_selected_models_json (bool, optional): Whether to save the selected models JSON.
@@ -41422,6 +41789,45 @@ class imgLib:
                         cm_fig_title_args=cm_fig_title_args,
                         cm_fig_include_gt_predict_text=cm_fig_include_gt_predict_text,
                         cm_fig_gt_predict_label_text_config=cm_fig_gt_predict_label_text_config,
+                        normalize=False,
+                        file_name_suffix="",
+                    )
+
+                if(save_data_cm_fig_normalized):
+                    cm_fig_iou_threshold=evaluation_args.get("iou_threshold",None)
+                    cm_fig_include_background=evaluation_args.get("include_background",True)
+                    cm_fig_background_label=evaluation_args.get("background_label",None)
+
+                    self.saveConfusionMatrixFig(
+                        save_dir=output_dir_obj/Path("cm_fig_normalized/"),
+                        iou_threshold=cm_fig_iou_threshold,
+                        include_background=cm_fig_include_background,
+                        background_label=cm_fig_background_label,
+                        orientation=cm_fig_orientation,
+                        cm_fig_header_index_face_color=cm_fig_header_index_face_color,
+                        cm_fig_gradient_cmap=cm_fig_gradient_cmap,
+                        cm_fig_include_title=cm_fig_include_title,
+                        cm_fig_title_args=cm_fig_title_args,
+                        cm_fig_include_gt_predict_text=cm_fig_include_gt_predict_text,
+                        cm_fig_gt_predict_label_text_config=cm_fig_gt_predict_label_text_config,
+                        normalize=True,
+                        normalize_target=cm_fig_normalized_target,
+                        cm_fig_round_digits=cm_fig_normalized_round_digits,
+                        file_name_suffix="_normalized",
+                    )
+
+                if(save_data_box_curves):
+                    tmp_box_curve_iou_threshold=box_curve_iou_threshold
+                    if(tmp_box_curve_iou_threshold is None):
+                        tmp_box_curve_iou_threshold=evaluation_args.get("iou_threshold",0.5)
+                        if(tmp_box_curve_iou_threshold is None):
+                            tmp_box_curve_iou_threshold=0.5
+
+                    self.saveDetMetricsCurvesFig(
+                        save_dir=output_dir_obj/Path("box_curves/"),
+                        iou_threshold=float(tmp_box_curve_iou_threshold),
+                        score_thresholds=box_curve_score_thresholds,
+                        include_per_class=box_curve_include_per_class,
                     )
 
                 if(save_simple_eval_report_json):
