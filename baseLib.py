@@ -42366,6 +42366,7 @@ class imgLib:
                     "version":int(getattr(self,"__fs_version__",1)),
                     "gpu_flag":bool(self.__gpu_flag),
                     "yolo_args":self.__yolo_args,
+                    "yolo_additional_args":pyExLib.safety_deepcopy(self.__yolo_additional_args),
                     "lock_append":bool(self.__lock_append),
 
                     "model_duplicate_mode":self.__model_duplicate_mode,
@@ -42458,6 +42459,12 @@ class imgLib:
 
                 obj.__gpu_flag=bool(payload.get("gpu_flag",True))
                 obj.__yolo_args=payload.get("yolo_args") or {}
+
+                tmp_yolo_additional_args=payload.get("yolo_additional_args",{})
+                if(tmp_yolo_additional_args is None):
+                    tmp_yolo_additional_args={}
+                obj.__yolo_additional_args=pyExLib.safety_deepcopy(tmp_yolo_additional_args)
+
                 obj.__lock_append=bool(payload.get("lock_append",False))
 
                 obj.__model_duplicate_mode=payload.get("model_duplicate_mode") or imgLib.YOLOModelLib.readYOLOModelList.DUPLICATE_MODE_IGNORE_APPEND
