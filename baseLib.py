@@ -41662,6 +41662,7 @@ class imgLib:
                 simple_eval_report_args:dict=None,
                 save_selected_models_json:bool=False,
                 selected_models_args:dict=None,
+                verbose:bool|int=False,
             ):
                 """
                 Saves all data related to the evaluation.
@@ -41702,6 +41703,7 @@ class imgLib:
                     simple_eval_report_args (dict, optional): Arguments for the simple evaluation report.
                     save_selected_models_json (bool, optional): Whether to save the selected models JSON.
                     selected_models_args (dict, optional): Arguments for selecting models.
+                    verbose (bool|int, optional): Verbosity level. If True or a positive integer, progress will be printed.
 
                 Raises:
                     TypeError: If the result object is not of the expected type.
@@ -41726,9 +41728,24 @@ class imgLib:
                 else:
                     evaluation_args=pyExLib.safety_deepcopy(evaluation_args)
 
+                verbose_interval=0
+                if(isinstance(verbose,bool)):
+                    verbose_interval=1 if(verbose) else 0
+                elif(isinstance(verbose,int)):
+                    verbose_interval=max(0,int(verbose))
+                else:
+                    raise TypeError("verbose must be bool or int")
+
+                if(verbose_interval>0):
+                    print(f"[saveAllData] output_dir={output_dir_obj} images={len(self)}")
 
                 if(save_bb_img_json or save_img):
-                    for img_name,result_obj in self.generator():
+                    num_images=len(self)
+                    if(verbose_interval>0):
+                        print(f"[saveAllData] Saving per-image outputs... (num_images={num_images})")
+                    for i,(img_name,result_obj) in enumerate(self.generator(),start=1):
+                        if(verbose_interval>0 and (i==1 or i==num_images or i%verbose_interval==0)):
+                            print(f"[saveAllData] [{i}/{num_images}] {img_name}")
                         if(not isinstance(result_obj,imgLib.YOLOModelLib.resultBBImgJsonCombinationsModel)):
                             raise TypeError(f"Expected resultBBImgJsonCombinationsModel for image {img_name}, got {type(result_obj)}")
 
@@ -41750,16 +41767,25 @@ class imgLib:
                             )
 
                 if(save_all_iou_df):
+                    if(verbose_interval>0):
+                        print("[saveAllData] Saving all_iou_df.csv")
+
                     all_iou_df=self.getAllIoUDataFrame(include_iou_mean=include_mean_iou)
                     all_iou_df.to_csv(output_dir_obj/Path("all_iou_df.csv"))
-                
+
                 if(save_evaluation_json):
+                    if(verbose_interval>0):
+                        print("[saveAllData] Saving evaluation.json")
+
                     self.saveEvaluationJson(
                         output_dir_obj/Path("evaluation.json"),
                         evaluation_args=evaluation_args
                     )
 
                 if(save_evaluation_excel):
+                    if(verbose_interval>0):
+                        print("[saveAllData] Saving evaluation.xlsx")
+                    
                     self.saveEvaluationsExcel(
                         output_dir_obj/Path("evaluation.xlsx"),
                         include_mean_iou=include_mean_iou,
@@ -41773,6 +41799,9 @@ class imgLib:
                     )
 
                 if(save_data_cm_fig):
+                    if(verbose_interval>0):
+                        print("[saveAllData] Saving confusion matrix figures")
+
                     cm_fig_iou_threshold=evaluation_args.get("iou_threshold",None)
                     cm_fig_include_background=evaluation_args.get("include_background",True)
                     cm_fig_background_label=evaluation_args.get("background_label",None)
@@ -41794,6 +41823,9 @@ class imgLib:
                     )
 
                 if(save_data_cm_fig_normalized):
+                    if(verbose_interval>0):
+                        print("[saveAllData] Saving normalized confusion matrix figures")
+
                     cm_fig_iou_threshold=evaluation_args.get("iou_threshold",None)
                     cm_fig_include_background=evaluation_args.get("include_background",True)
                     cm_fig_background_label=evaluation_args.get("background_label",None)
@@ -41817,6 +41849,9 @@ class imgLib:
                     )
 
                 if(save_data_box_curves):
+                    if(verbose_interval>0):
+                        print("[saveAllData] Saving box curves")
+
                     tmp_box_curve_iou_threshold=box_curve_iou_threshold
                     if(tmp_box_curve_iou_threshold is None):
                         tmp_box_curve_iou_threshold=evaluation_args.get("iou_threshold",0.5)
@@ -41831,6 +41866,9 @@ class imgLib:
                     )
 
                 if(save_simple_eval_report_json):
+                    if(verbose_interval>0):
+                        print("[saveAllData] Saving simple_eval_report.json")
+
                     if(simple_eval_report_args is None):
                         simple_eval_report_args={}
                     simple_eval_report_args["include_mean_iou"]=include_mean_iou
@@ -41843,6 +41881,9 @@ class imgLib:
                     )
 
                 if(save_selected_models_json):
+                    if(verbose_interval>0):
+                        print("[saveAllData] Saving selected_models.json")
+
                     if(selected_models_args is None):
                         selected_models_args={}
                     if(selected_models_args.get("save_json_path") is None):
@@ -41850,6 +41891,9 @@ class imgLib:
                     self.saveSelectModelsTopkAndDiversity(
                         **selected_models_args
                     )
+
+                if(verbose_interval>0):
+                    print("[saveAllData] Done.")
 
             META_ALL_IMAGES_RESULT_BB_IMG_JSON_COMBINATION_MODEL_OBJ="AllImagesResultBBImgJsonCombinationsModelObj"
 
