@@ -39861,16 +39861,16 @@ class imgLib:
                 Generator for yielding results per model.
 
                 Yields:
-                    tuple: (model_name, {img_name: result_obj}) for each image.
+                    tuple: (model_name, {img_name: BBimgJson}) for each model.
 
                 Raises:
-                    TypeError: If img_name is not of the expected type.
+                    TypeError: If result_obj is not of the expected type.
                 """
                 for model_name in self.getModelNames():
                     yield_dict={}
                     for img_name,result_obj in self.generator():
                         if(not isinstance(result_obj,imgLib.YOLOModelLib.resultBBImgJsonCombinationsModel)):
-                            raise TypeError(f"Expected result_obj to be of type {type(result_obj)}.")
+                            raise TypeError(f"Expected result_obj to be of type resultBBImgJsonCombinationsModel, got {type(result_obj)}.")
 
                         yield_dict[img_name]=imgLib.BBimgJson(result_obj.getDataDict(result_obj.modelName2Index(model_name)))
                     
@@ -41663,6 +41663,10 @@ class imgLib:
                 save_selected_models_json:bool=False,
                 selected_models_args:dict=None,
                 verbose:bool|int=False,
+                verbose_level:int=1,
+                verbose_time:bool=True,
+                verbose_stage_done:bool=True,
+                verbose_model_interval:int|None=None,
             ):
                 """
                 Saves all data related to the evaluation.
@@ -41703,7 +41707,11 @@ class imgLib:
                     simple_eval_report_args (dict, optional): Arguments for the simple evaluation report.
                     save_selected_models_json (bool, optional): Whether to save the selected models JSON.
                     selected_models_args (dict, optional): Arguments for selecting models.
-                    verbose (bool|int, optional): Verbosity level. If True or a positive integer, progress will be printed.
+                    verbose (bool|int, optional): If True prints every image. If int, prints every N images.
+                    verbose_level (int, optional): Detail level. 1=per-image/stage, 2=+per-model, 3=+paths.
+                    verbose_time (bool, optional): Whether to show elapsed time and ETA.
+                    verbose_stage_done (bool, optional): Whether to show per-stage done messages with timings (verbose_level>=2).
+                    verbose_model_interval (int|None, optional): If verbose_level>=2, prints every N models. If None, it follows verbose (image interval).
 
                 Raises:
                     TypeError: If the result object is not of the expected type.
@@ -41736,164 +41744,312 @@ class imgLib:
                 else:
                     raise TypeError("verbose must be bool or int")
 
-                if(verbose_interval>0):
-                    print(f"[saveAllData] output_dir={output_dir_obj} images={len(self)}")
+                if(not isinstance(verbose_level,int)):
+                    raise TypeError("verbose_level must be int")
+                verbose_level=max(0,int(verbose_level))
 
+                if(not isinstance(verbose_time,bool)):
+                    raise TypeError("verbose_time must be bool")
+
+                if(not isinstance(verbose_stage_done,bool)):
+                    raise TypeError("verbose_stage_done must be bool")
+
+                if(verbose_model_interval is None):
+                    verbose_model_interval=verbose_interval
+                    if(verbose_model_interval<=0):
+                        verbose_model_interval=1
+                elif(not isinstance(verbose_model_interval,int)):
+                    raise TypeError("verbose_model_interval must be int or None")
+                else:
+                    verbose_model_interval=max(1,int(verbose_model_interval))
+
+                verbose_enable=(verbose_interval>0)
+
+                def _format_seconds(seconds:float):
+                    if(seconds is None):
+                        return "?:??"
+                    seconds=float(seconds)
+                    if(seconds<0):
+                        seconds=0.0
+                    h=int(seconds//3600)
+                    m=int((seconds%3600)//60)
+                    s=int(seconds%60)
+                    if(h>0):
+                        return f"{h}:{m:02d}:{s:02d}"
+                    return f"{m:02d}:{s:02d}"
+
+                if(verbose_enable):
+                    _t0=time.perf_counter()
+                    def _vprefix():
+                        if(verbose_time):
+                            return f"[saveAllData +{time.perf_counter()-_t0:7.1f}s]"
+                        return "[saveAllData]"
+                    def _vprint(msg:str):
+                        print(f"{_vprefix()} {msg}")
+                    @contextmanager
+                    def _vstage(label:str):
+                        if(verbose_level<2):
+                            yield
+                            return
+                        t=time.perf_counter()
+                        _vprint(label)
+                        try:
+                            yield
+                        finally:
+                            if(verbose_stage_done):
+                                _vprint(f"{label} done ({time.perf_counter()-t:.2f}s)")
+                else:
+                    def _vprint(msg:str):
+                        return
+                    @contextmanager
+                    def _vstage(label:str):
+                        yield
+
+                if(verbose_enable):
+                    _vprint(f"output_dir={output_dir_obj} images={len(self)} interval(image)={verbose_interval} level={verbose_level}")
+
+                # --- per-image outputs (json/img) ---
                 if(save_bb_img_json or save_img):
                     num_images=len(self)
-                    if(verbose_interval>0):
-                        print(f"[saveAllData] Saving per-image outputs... (num_images={num_images})")
+                    if(verbose_enable):
+                        _vprint(f"per-image outputs: save_bb_img_json={save_bb_img_json} save_img={save_img} interval(model)={verbose_model_interval}")
+
+                    img_loop_t0=None
+                    if(verbose_enable and verbose_time):
+                        img_loop_t0=time.perf_counter()
+
                     for i,(img_name,result_obj) in enumerate(self.generator(),start=1):
-                        if(verbose_interval>0 and (i==1 or i==num_images or i%verbose_interval==0)):
-                            print(f"[saveAllData] [{i}/{num_images}] {img_name}")
                         if(not isinstance(result_obj,imgLib.YOLOModelLib.resultBBImgJsonCombinationsModel)):
                             raise TypeError(f"Expected resultBBImgJsonCombinationsModel for image {img_name}, got {type(result_obj)}")
+
+                        num_models=len(result_obj)
+
+                        if(verbose_enable):
+                            if(i==1 or i==num_images or (verbose_interval>0 and i%verbose_interval==0)):
+                                pct=100.0*float(i)/float(num_images) if(num_images>0) else 100.0
+                                eta_str=""
+                                if(img_loop_t0 is not None):
+                                    elapsed=time.perf_counter()-img_loop_t0
+                                    sec_per_img=(elapsed/float(i)) if(i>0) else None
+                                    eta=(sec_per_img*float(num_images-i)) if(sec_per_img is not None) else None
+                                    eta_str=f" eta={_format_seconds(eta)}"
+                                _vprint(f"[{i}/{num_images}] {pct:6.2f}% {img_name} models={num_models}{eta_str}")
 
                         save_img_dir=None
                         if(save_bb_img_json_inner_dir is not None):
                             save_img_dir=output_dir_obj/Path(save_bb_img_json_inner_dir)/Path(img_name)
                         else:
                             save_img_dir=output_dir_obj/Path(img_name)
-                        
+
+                        # json
                         if(save_bb_img_json):
-                            result_obj.allSaveJson(
-                                save_img_dir,
-                                **save_json_args
-                            )
+                            if(verbose_enable and verbose_level>=2):
+                                _vprint(f"  json -> {save_img_dir}")
+                                save_path_func=save_json_args.get("save_path_func",result_obj.DEFAULT_SAVE_JSON_PATH_FUNC)
+                                exist_ok=save_json_args.get("exist_ok",True)
+                                indent=save_json_args.get("indent",IOLib.JSONLib.DEFAULT_INDENT)
+                                minimalize_flag=save_json_args.get("minimalize_flag",False)
+
+                                for j,(bb_img_json,model_name) in enumerate(result_obj.generatorResultsAndModelNames(),start=1):
+                                    if(j==1 or j==num_models or (verbose_model_interval>0 and j%verbose_model_interval==0)):
+                                        _vprint(f"    ({j}/{num_models}) {model_name}")
+                                    save_path=Path(save_img_dir)/Path(save_path_func(model_name))
+                                    if(verbose_enable and verbose_level>=3):
+                                        _vprint(f"      -> {save_path}")
+                                    if((not exist_ok) and Path(save_path).exists()):
+                                        raise FileExistsError(f"File {save_path} already exists.")
+                                    bb_img_json.toJson(
+                                        path=save_path,
+                                        indent=indent,
+                                        minimalize_flag=minimalize_flag
+                                    )
+                            else:
+                                result_obj.allSaveJson(
+                                    save_img_dir,
+                                    **save_json_args
+                                )
+
+                        # img
                         if(save_img):
-                            result_obj.allSaveImg(
-                                save_img_dir,
-                                **save_img_args,
-                            )
+                            if(verbose_enable and verbose_level>=2):
+                                _vprint(f"  img  -> {save_img_dir}")
+                                save_path_func=save_img_args.get("save_path_func",result_obj.DEFAULT_SAVE_IMG_PATH_FUNC)
+                                exist_ok=save_img_args.get("exist_ok",True)
+                                draw_rect_flag=save_img_args.get("draw_rect_flag",True)
+                                draw_rect_args=save_img_args.get("draw_rect_args",{})
+                                label_flag=save_img_args.get("label_flag",True)
+                                label_args=save_img_args.get("label_args",{})
+                                label_org_function=save_img_args.get("label_org_function",None)
+                                label_str_format=save_img_args.get("label_str_format",None)
 
+                                if(draw_rect_args is None):
+                                    draw_rect_args={}
+                                else:
+                                    draw_rect_args=pyExLib.safety_deepcopy(draw_rect_args)
+
+                                if(label_args is None):
+                                    label_args={}
+                                else:
+                                    label_args=pyExLib.safety_deepcopy(label_args)
+
+                                if(label_str_format is None):
+                                    label_str_format=imgLib.BBimgJson.DEFAULT_LABEL_STR_FORMAT
+
+                                for j,(bb_img_json,model_name) in enumerate(result_obj.generatorResultsAndModelNames(),start=1):
+                                    if(j==1 or j==num_models or (verbose_model_interval>0 and j%verbose_model_interval==0)):
+                                        _vprint(f"    ({j}/{num_models}) {model_name}")
+                                    save_path=Path(save_img_dir)/Path(save_path_func(model_name))
+                                    if(verbose_enable and verbose_level>=3):
+                                        _vprint(f"      -> {save_path}")
+                                    if((not exist_ok) and Path(save_path).exists()):
+                                        raise FileExistsError(f"File {save_path} already exists.")
+                                    bb_img_json.saveImg(
+                                        save_path=save_path,
+                                        draw_rect_flag=draw_rect_flag,
+                                        draw_rect_args=draw_rect_args,
+                                        label_flag=label_flag,
+                                        label_args=label_args,
+                                        label_org_function=label_org_function,
+                                        label_str_format=label_str_format,
+                                    )
+                            else:
+                                result_obj.allSaveImg(
+                                    save_img_dir,
+                                    **save_img_args,
+                                )
+
+                # --- aggregated outputs ---
                 if(save_all_iou_df):
-                    if(verbose_interval>0):
-                        print("[saveAllData] Saving all_iou_df.csv")
-
-                    all_iou_df=self.getAllIoUDataFrame(include_iou_mean=include_mean_iou)
-                    all_iou_df.to_csv(output_dir_obj/Path("all_iou_df.csv"))
+                    if(verbose_enable):
+                        _vprint("Saving all_iou_df.csv")
+                    with _vstage("stage: all_iou_df.csv"):
+                        all_iou_df=self.getAllIoUDataFrame(include_iou_mean=include_mean_iou)
+                        all_iou_df.to_csv(output_dir_obj/Path("all_iou_df.csv"))
 
                 if(save_evaluation_json):
-                    if(verbose_interval>0):
-                        print("[saveAllData] Saving evaluation.json")
-
-                    self.saveEvaluationJson(
-                        output_dir_obj/Path("evaluation.json"),
-                        evaluation_args=evaluation_args
-                    )
+                    if(verbose_enable):
+                        _vprint("Saving evaluation.json")
+                    with _vstage("stage: evaluation.json"):
+                        self.saveEvaluationJson(
+                            output_dir_obj/Path("evaluation.json"),
+                            evaluation_args=evaluation_args
+                        )
 
                 if(save_evaluation_excel):
-                    if(verbose_interval>0):
-                        print("[saveAllData] Saving evaluation.xlsx")
-                    
-                    self.saveEvaluationsExcel(
-                        output_dir_obj/Path("evaluation.xlsx"),
-                        include_mean_iou=include_mean_iou,
-                        evaluation_args=evaluation_args,
-                        excel_writer_args=excel_writer_args,
-                        include_index=include_index,
-                        include_title=include_title,
-                        freeze_head=freeze_head,
-                        save_data_frame_csvs=save_data_frame_csvs,
-                        evaluation_csvs_dir=output_dir_obj/Path("evaluation_csvs")
-                    )
+                    if(verbose_enable):
+                        _vprint("Saving evaluation.xlsx")
+                    with _vstage("stage: evaluation.xlsx"):
+                        self.saveEvaluationsExcel(
+                            output_dir_obj/Path("evaluation.xlsx"),
+                            include_mean_iou=include_mean_iou,
+                            evaluation_args=evaluation_args,
+                            excel_writer_args=excel_writer_args,
+                            include_index=include_index,
+                            include_title=include_title,
+                            freeze_head=freeze_head,
+                            save_data_frame_csvs=save_data_frame_csvs,
+                            evaluation_csvs_dir=output_dir_obj/Path("evaluation_csvs")
+                        )
 
                 if(save_data_cm_fig):
-                    if(verbose_interval>0):
-                        print("[saveAllData] Saving confusion matrix figures")
-
-                    cm_fig_iou_threshold=evaluation_args.get("iou_threshold",None)
-                    cm_fig_include_background=evaluation_args.get("include_background",True)
-                    cm_fig_background_label=evaluation_args.get("background_label",None)
-
-                    self.saveConfusionMatrixFig(
-                        save_dir=output_dir_obj/Path("cm_fig/"),
-                        iou_threshold=cm_fig_iou_threshold,
-                        include_background=cm_fig_include_background,
-                        background_label=cm_fig_background_label,
-                        orientation=cm_fig_orientation,
-                        cm_fig_header_index_face_color=cm_fig_header_index_face_color,
-                        cm_fig_gradient_cmap=cm_fig_gradient_cmap,
-                        cm_fig_include_title=cm_fig_include_title,
-                        cm_fig_title_args=cm_fig_title_args,
-                        cm_fig_include_gt_predict_text=cm_fig_include_gt_predict_text,
-                        cm_fig_gt_predict_label_text_config=cm_fig_gt_predict_label_text_config,
-                        normalize=False,
-                        file_name_suffix="",
-                    )
+                    if(verbose_enable):
+                        _vprint("Saving confusion matrix figures")
+                    with _vstage("stage: confusion_matrix_fig"):
+                        cm_fig_iou_threshold=evaluation_args.get("iou_threshold",None)
+                        cm_fig_include_background=evaluation_args.get("include_background",True)
+                        cm_fig_background_label=evaluation_args.get("background_label",None)
+                        
+                        self.saveConfusionMatrixFig(
+                            save_dir=output_dir_obj/Path("cm_fig/"),
+                            iou_threshold=cm_fig_iou_threshold,
+                            include_background=cm_fig_include_background,
+                            background_label=cm_fig_background_label,
+                            orientation=cm_fig_orientation,
+                            cm_fig_header_index_face_color=cm_fig_header_index_face_color,
+                            cm_fig_gradient_cmap=cm_fig_gradient_cmap,
+                            cm_fig_include_title=cm_fig_include_title,
+                            cm_fig_title_args=cm_fig_title_args,
+                            cm_fig_include_gt_predict_text=cm_fig_include_gt_predict_text,
+                            cm_fig_gt_predict_label_text_config=cm_fig_gt_predict_label_text_config,
+                            normalize=False,
+                            file_name_suffix="",
+                        )
 
                 if(save_data_cm_fig_normalized):
-                    if(verbose_interval>0):
-                        print("[saveAllData] Saving normalized confusion matrix figures")
+                    if(verbose_enable):
+                        _vprint("Saving normalized confusion matrix figures")
+                    with _vstage("stage: confusion_matrix_fig_normalized"):
+                        cm_fig_iou_threshold=evaluation_args.get("iou_threshold",None)
+                        cm_fig_include_background=evaluation_args.get("include_background",True)
+                        cm_fig_background_label=evaluation_args.get("background_label",None)
 
-                    cm_fig_iou_threshold=evaluation_args.get("iou_threshold",None)
-                    cm_fig_include_background=evaluation_args.get("include_background",True)
-                    cm_fig_background_label=evaluation_args.get("background_label",None)
-
-                    self.saveConfusionMatrixFig(
-                        save_dir=output_dir_obj/Path("cm_fig_normalized/"),
-                        iou_threshold=cm_fig_iou_threshold,
-                        include_background=cm_fig_include_background,
-                        background_label=cm_fig_background_label,
-                        orientation=cm_fig_orientation,
-                        cm_fig_header_index_face_color=cm_fig_header_index_face_color,
-                        cm_fig_gradient_cmap=cm_fig_gradient_cmap,
-                        cm_fig_include_title=cm_fig_include_title,
-                        cm_fig_title_args=cm_fig_title_args,
-                        cm_fig_include_gt_predict_text=cm_fig_include_gt_predict_text,
-                        cm_fig_gt_predict_label_text_config=cm_fig_gt_predict_label_text_config,
-                        normalize=True,
-                        normalize_target=cm_fig_normalized_target,
-                        cm_fig_round_digits=cm_fig_normalized_round_digits,
-                        file_name_suffix="_normalized",
-                    )
+                        self.saveConfusionMatrixFig(
+                            save_dir=output_dir_obj/Path("cm_fig_normalized/"),
+                            iou_threshold=cm_fig_iou_threshold,
+                            include_background=cm_fig_include_background,
+                            background_label=cm_fig_background_label,
+                            orientation=cm_fig_orientation,
+                            cm_fig_header_index_face_color=cm_fig_header_index_face_color,
+                            cm_fig_gradient_cmap=cm_fig_gradient_cmap,
+                            cm_fig_include_title=cm_fig_include_title,
+                            cm_fig_title_args=cm_fig_title_args,
+                            cm_fig_include_gt_predict_text=cm_fig_include_gt_predict_text,
+                            cm_fig_gt_predict_label_text_config=cm_fig_gt_predict_label_text_config,
+                            normalize=True,
+                            normalize_target=cm_fig_normalized_target,
+                            cm_fig_round_digits=cm_fig_normalized_round_digits,
+                            file_name_suffix="_normalized",
+                        )
 
                 if(save_data_box_curves):
-                    if(verbose_interval>0):
-                        print("[saveAllData] Saving box curves")
-
-                    tmp_box_curve_iou_threshold=box_curve_iou_threshold
-                    if(tmp_box_curve_iou_threshold is None):
-                        tmp_box_curve_iou_threshold=evaluation_args.get("iou_threshold",0.5)
+                    if(verbose_enable):
+                        _vprint("Saving box curves")
+                    with _vstage("stage: box_curves"):
+                        tmp_box_curve_iou_threshold=box_curve_iou_threshold
                         if(tmp_box_curve_iou_threshold is None):
-                            tmp_box_curve_iou_threshold=0.5
+                            tmp_box_curve_iou_threshold=evaluation_args.get("iou_threshold",0.5)
+                            if(tmp_box_curve_iou_threshold is None):
+                                tmp_box_curve_iou_threshold=0.5
 
-                    self.saveDetMetricsCurvesFig(
-                        save_dir=output_dir_obj/Path("box_curves/"),
-                        iou_threshold=float(tmp_box_curve_iou_threshold),
-                        score_thresholds=box_curve_score_thresholds,
-                        include_per_class=box_curve_include_per_class,
-                    )
+                        self.saveDetMetricsCurvesFig(
+                            save_dir=output_dir_obj/Path("box_curves/"),
+                            iou_threshold=float(tmp_box_curve_iou_threshold),
+                            score_thresholds=box_curve_score_thresholds,
+                            include_per_class=box_curve_include_per_class,
+                        )
 
                 if(save_simple_eval_report_json):
-                    if(verbose_interval>0):
-                        print("[saveAllData] Saving simple_eval_report.json")
+                    if(verbose_enable):
+                        _vprint("Saving simple_eval_report.json")
+                    with _vstage("stage: simple_eval_report.json"):
+                        if(simple_eval_report_args is None):
+                            simple_eval_report_args={}
+                        simple_eval_report_args["include_mean_iou"]=include_mean_iou
+                        simple_eval_report_args["evaluation_args"]=evaluation_args
 
-                    if(simple_eval_report_args is None):
-                        simple_eval_report_args={}
-                    simple_eval_report_args["include_mean_iou"]=include_mean_iou
-                    simple_eval_report_args["evaluation_args"]=evaluation_args
-                    
-                    save_simple_eval_report_json_save_path=output_dir_obj/Path("simple_eval_report.json")
-                    self.saveSimpleEvalReportJSON(
-                        save_simple_eval_report_json_save_path,
-                        **simple_eval_report_args
-                    )
+                        save_simple_eval_report_json_save_path=output_dir_obj/Path("simple_eval_report.json")
+                        self.saveSimpleEvalReportJSON(
+                            save_simple_eval_report_json_save_path,
+                            **simple_eval_report_args
+                        )
 
                 if(save_selected_models_json):
-                    if(verbose_interval>0):
-                        print("[saveAllData] Saving selected_models.json")
+                    if(verbose_enable):
+                        _vprint("Saving selected_models.json")
+                    with _vstage("stage: selected_models.json"):
+                        if(selected_models_args is None):
+                            selected_models_args={}
+                        if(selected_models_args.get("save_json_path") is None):
+                            selected_models_args["save_json_path"]=output_dir_obj/Path("selected_models.json")
+                        self.saveSelectModelsTopkAndDiversity(
+                            **selected_models_args
+                        )
 
-                    if(selected_models_args is None):
-                        selected_models_args={}
-                    if(selected_models_args.get("save_json_path") is None):
-                        selected_models_args["save_json_path"]=output_dir_obj/Path("selected_models.json")
-                    self.saveSelectModelsTopkAndDiversity(
-                        **selected_models_args
-                    )
-
-                if(verbose_interval>0):
-                    print("[saveAllData] Done.")
+                if(verbose_enable):
+                    if(verbose_time):
+                        _vprint(f"Done (elapsed={_format_seconds(time.perf_counter()-_t0)})")
+                    else:
+                        _vprint("Done.")
 
             META_ALL_IMAGES_RESULT_BB_IMG_JSON_COMBINATION_MODEL_OBJ="AllImagesResultBBImgJsonCombinationsModelObj"
 
