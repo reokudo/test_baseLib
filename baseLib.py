@@ -37875,6 +37875,65 @@ class imgLib:
                 for perm,new_read_yolo_model_list in self.generatorPermutationsModelWithPerm(r):
                     yield new_read_yolo_model_list
 
+            def generatorCasesModelWithCase(self,cases:list,allow_name:bool=True):
+                """
+                Generates YOLO model lists for explicitly specified cases.
+
+                Args:
+                    cases (list): List of cases. Each case can be:
+                        - int (single index)
+                        - str (single model name)
+                        - list/tuple of int/str
+                    allow_name (bool): If True, allows str elements as model names.
+
+                Yields:
+                    tuple: (case_index_tuple, readYOLOModelList)
+                """
+                if(not isinstance(cases,list)):
+                    raise TypeError("cases must be a list.")
+                if(len(cases)==0):
+                    raise ValueError("cases must be non-empty.")
+
+                model_names=self.getModelNames()
+                name2idx={str(n):i for i,n in enumerate(model_names)}
+                n_models=len(self.__read_yolo_model_obj_list)
+
+                for case in cases:
+                    if(isinstance(case,(int,str))):
+                        case=[case]
+                    elif(not isinstance(case,(list,tuple))):
+                        raise TypeError("Each case must be int/str/list/tuple.")
+                    if(len(case)==0):
+                        raise ValueError("Each case must be non-empty.")
+
+                    idx_list=[]
+                    for x in case:
+                        if(isinstance(x,int)):
+                            if(x<0 or x>=n_models):
+                                raise IndexError(f"case index out of bounds: {x}")
+                            idx_list.append(int(x))
+                        elif(isinstance(x,str)):
+                            if(not allow_name):
+                                raise TypeError("case string is not allowed when allow_name is False.")
+                            sx=str(x)
+                            if(sx not in name2idx):
+                                raise ValueError(f"Model name {sx} not found in the list.")
+                            idx_list.append(int(name2idx[sx]))
+                        else:
+                            raise TypeError("case element must be int or str.")
+
+                    yield tuple(idx_list),imgLib.YOLOModelLib.readYOLOModelList(
+                        [self.__read_yolo_model_obj_list[i] for i in idx_list],
+                        duplicate_mode=self.__duplicate_mode
+                    )
+
+            def generatorCasesModel(self,cases:list,allow_name:bool=True):
+                """
+                Generates YOLO model lists for explicitly specified cases.
+                """
+                for _,new_read_yolo_model_list in self.generatorCasesModelWithCase(cases,allow_name=allow_name):
+                    yield new_read_yolo_model_list
+
             def getYOLOModels(self):
                 """
                 Returns a list of all YOLO model objects in the list.
@@ -38314,6 +38373,33 @@ class imgLib:
                         all_results=new_all_results
                     )
 
+            def generatorCasesModel(self,cases:list,allow_name:bool=True):
+                """
+                Generates YOLOModelPredict objects for explicitly specified cases.
+                Keeps the order inside each case, and aligns all_results accordingly.
+
+                Args:
+                    cases (list): List of cases. Each case can be:
+                        - int (single index)
+                        - str (single model name)
+                        - list/tuple of int/str
+                    allow_name (bool): If True, allows str elements as model names.
+
+                Yields:
+                    YOLOModelPredict: The YOLO model prediction object for each case.
+                """
+                for case_idx_tuple,new_yolo_model_list in self.__read_yolo_model_list_obj.generatorCasesModelWithCase(cases,allow_name=allow_name):
+                    new_all_results=[self.__all_results[i] for i in case_idx_tuple]
+
+                    yield imgLib.YOLOModelLib.YOLOModelPredict(
+                        read_yolo_model_list_obj=new_yolo_model_list,
+                        yolo_ann_obj=self.__yolo_ann_obj,
+
+                        raw_img=self.__raw_img,
+                        ns=self.__ns,
+                        all_results=new_all_results
+                    )
+
             @staticmethod
             def SAMPLE_GENERATOR_PREDICT_COMBINATIONS_MODEL_CONFIG():
                 """
@@ -38390,15 +38476,32 @@ class imgLib:
                     
                     has_combinations_r=("combinations_r" in predict_config_dict)
                     has_permutation_r=("permutation_r" in predict_config_dict)
+                    has_cases=("cases" in predict_config_dict)
 
-                    if(has_combinations_r and has_permutation_r):
-                        raise KeyError("Each dictionary in predict_config_list must contain only one of 'combinations_r' or 'permutation_r' key.")
-                    elif((not has_combinations_r) and (not has_permutation_r)):
-                        raise KeyError("Each dictionary in predict_config_list must contain 'combinations_r' or 'permutation_r' key.")
-                    elif(has_combinations_r and (not isinstance(predict_config_dict["combinations_r"],int))):
+                    mode_count=int(has_combinations_r)+int(has_permutation_r)+int(has_cases)
+                    if(mode_count!=1):
+                        raise KeyError("Each dictionary in predict_config_list must contain exactly one of 'combinations_r', 'permutation_r', or 'cases' key.")
+
+                    if(has_combinations_r and (not isinstance(predict_config_dict["combinations_r"],int))):
                         raise TypeError("'combinations_r' must be an integer.")
                     elif(has_permutation_r and (not isinstance(predict_config_dict["permutation_r"],int))):
                         raise TypeError("'permutation_r' must be an integer.")
+                    elif(has_cases):
+                        cases=predict_config_dict["cases"]
+                        if(not isinstance(cases,list)):
+                            raise TypeError("'cases' must be a list.")
+                        if(len(cases)==0):
+                            raise ValueError("'cases' must be non-empty.")
+                        for case in cases:
+                            if(isinstance(case,(int,str))):
+                                continue
+                            if(not isinstance(case,(list,tuple))):
+                                raise TypeError("Each case in 'cases' must be int/str/list/tuple.")
+                            if(len(case)==0):
+                                raise ValueError("Each case in 'cases' must be non-empty.")
+                            for x in case:
+                                if(not isinstance(x,(int,str))):
+                                    raise TypeError("case element must be int or str.")
 
                     if("config_for_each_combination" not in predict_config_dict):
                         raise KeyError("Each dictionary in predict_config_list must contain 'config_for_each_combination' key.")
@@ -38431,8 +38534,10 @@ class imgLib:
                         comb_gen=self.generatorCombinationsModel(predict_config_dict["combinations_r"])
                     elif("permutation_r" in predict_config_dict):
                         comb_gen=self.generatorPermutationsModel(predict_config_dict["permutation_r"])
+                    elif("cases" in predict_config_dict):
+                        comb_gen=self.generatorCasesModel(predict_config_dict["cases"])
                     else:
-                        raise KeyError("predict_config_dict must contain either 'combinations_r' or 'permutation_r' key.")
+                        raise KeyError("predict_config_dict must contain either 'combinations_r', 'permutation_r', or 'cases' key.")
 
                     for comb_yolo_model_predict in comb_gen:
                         for config in predict_config_dict["config_for_each_combination"]:
@@ -38511,8 +38616,10 @@ class imgLib:
                         model_list_gen=read_yolo_model_list_obj.generatorCombinationsModel(predict_config_dict["combinations_r"])
                     elif("permutation_r" in predict_config_dict):
                         model_list_gen=read_yolo_model_list_obj.generatorPermutationsModel(predict_config_dict["permutation_r"])
+                    elif("cases" in predict_config_dict):
+                        model_list_gen=read_yolo_model_list_obj.generatorCasesModel(predict_config_dict["cases"])
                     else:
-                        raise KeyError("predict_config_dict must contain either 'combinations_r' or 'permutation_r' key.")
+                        raise KeyError("predict_config_dict must contain either 'combinations_r', 'permutation_r', or 'cases' key.")
 
                     for new_yolo_model_list in model_list_gen:
                         for config in predict_config_dict["config_for_each_combination"]:
