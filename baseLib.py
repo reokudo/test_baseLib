@@ -32548,7 +32548,11 @@ class imgLib:
                 * `num_thread` (int, required): minimum votes required to keep a detection.
 
             - RateNVONMS ("RateNVONMS"):
-                * `thread_rate` (float, required): in [0.0, 1.0]. Vote threshold is `floor(num_models * thread_rate)`.
+                * `thread_rate` (float, required): in `0.0 <= thread_rate <= 1.0`. Vote threshold is `floor(num_models * thread_rate)`.
+                * `thread_func_mode` (str, optional): how to compute the vote threshold from `thread_rate` and `num_models`. Options: "floor" (default), "ceil", "round".
+
+            - MajorityRuleNMS ("MajorityRuleNMS"):
+                * `thread_func_mode` (str, optional): how to compute the vote threshold from `thread_rate` and `num_models`. Options: "floor" (default), "ceil", "round".
             
             - CenterCluster ("CenterCluster"):
                 * `dist_threshold` (float|None, optional): normalized center distance threshold. If explicitly set to None, falls back to `iou_threshold`.
