@@ -19546,7 +19546,8 @@ class imgLib:
         label_flag:bool=False,
         label_list:list=None,
         label_arg:dict=None,
-        label_org_function:callable=None
+        label_org_function:callable=None,
+        rect_thickness:int=2
     ):
         """
         Draws rectangles on an image.
@@ -19562,6 +19563,7 @@ class imgLib:
             label_list (list): List of labels for the boxes.
             label_arg (dict): Arguments for the label text (e.g., font, size, color).
             label_org_function (function): Function to determine the label position.
+            rect_thickness (int): Thickness of the rectangle lines.
 
         Returns:
             np.ndarray: Image with rectangles drawn.
@@ -19596,7 +19598,7 @@ class imgLib:
             x2=bc[2]
             y2=bc[3]
             
-            cv2.rectangle(tmp_img,(int(x1),int(y1)),(int(x2),int(y2)),rect_color,thickness=2)
+            cv2.rectangle(tmp_img,(int(x1),int(y1)),(int(x2),int(y2)),rect_color,thickness=rect_thickness)
             if(flag_center):
                 mx=int((x1+x2)/2)
                 my=int((y1+y2)/2)
@@ -19622,7 +19624,8 @@ class imgLib:
         label_flag:bool=False,
         label_list:list=None,
         label_arg:dict=None,
-        label_org_function:callable=DEFAULT_LABEL_ORG_FUNCTION
+        label_org_function:callable=DEFAULT_LABEL_ORG_FUNCTION,
+        line_thickness:int=2
     ):
         """
         Draws polygons on an image.
@@ -19638,6 +19641,7 @@ class imgLib:
             label_list (list): List of labels for the polygons.
             label_arg (dict): Arguments for the label text (e.g., font, size, color).
             label_org_function (function): Function to determine the label position.
+            line_thickness (int): Thickness of the polygon lines.
 
         Returns:
             np.ndarray: Image with polygons drawn.
@@ -19673,7 +19677,7 @@ class imgLib:
                     ]
                 ]
             )
-            cv2.polylines(tmp_img,tmp_list,True,rect_color,thickness=2)
+            cv2.polylines(tmp_img,tmp_list,True,rect_color,thickness=line_thickness)
 
             if(flag_center):
                 mx,my=mathLib.PolygonLib.calculateCentroid(pts,True)
@@ -19702,7 +19706,8 @@ class imgLib:
         label_flag:bool=False,
         label_list:list=None,
         label_arg:dict=None,
-        label_org_function:callable=DEFAULT_LABEL_ORG_FUNCTION
+        label_org_function:callable=DEFAULT_LABEL_ORG_FUNCTION,
+        box_thickness_list=None
     ):
         """
         Draws rectangles with colors on an image.
@@ -19718,6 +19723,7 @@ class imgLib:
             label_list (list): List of labels for the boxes.
             label_arg (dict): Arguments for the label text (e.g., font, size, color).
             label_org_function (function): Function to determine the label position.
+            box_thickness_list (list or int): List of thicknesses for the rectangle edges or a single integer for all rectangles.
 
         Returns:
             np.ndarray: Image with rectangles drawn.
@@ -19741,7 +19747,15 @@ class imgLib:
         if(label_list is None):
             label_list=["" for _ in range(len(box_coords_list))]
 
-        for bc,bc_color,label_str in zip(box_coords_list,box_colors,label_list):
+        if(box_thickness_list is None):
+            box_thickness_list=pyExLib.IterableLib.createConstInitList(len(box_coords_list),2)
+        elif(isinstance(box_thickness_list,int)):
+            box_thickness_list=pyExLib.IterableLib.createConstInitList(len(box_coords_list),box_thickness_list)
+        else:
+            if(len(box_coords_list)!=len(box_thickness_list)):
+                raise ValueError("The lengths of `box_coords_list` and `box_thickness_list` must be equal!")
+
+        for bc,bc_color,label_str,bc_thick in zip(box_coords_list,box_colors,label_list,box_thickness_list):
             img=imgLib.drawRect(
                 img=img,
                 box_coords_list=[bc],
@@ -19752,7 +19766,8 @@ class imgLib:
                 label_flag=label_flag,
                 label_list=[label_str],
                 label_arg=label_arg,
-                label_org_function=label_org_function
+                label_org_function=label_org_function,
+                rect_thickness=int(bc_thick)
         )
         
         return img
@@ -19768,7 +19783,8 @@ class imgLib:
         label_flag:bool=False,
         label_list:list=None,
         label_arg:dict=None,
-        label_org_function:callable=DEFAULT_LABEL_ORG_FUNCTION
+        label_org_function:callable=DEFAULT_LABEL_ORG_FUNCTION,
+        polygon_thickness_list=None
     ):
         """
         Draws polygons with colors on an image.
@@ -19784,6 +19800,7 @@ class imgLib:
             label_list (list): List of labels for the polygons.
             label_arg (dict): Arguments for the label text (e.g., font, size, color).
             label_org_function (function): Function to determine the label position.
+            polygon_thickness_list (list or int): List of thicknesses for the polygon edges or a single integer for all polygons.
 
         Returns:
             np.ndarray: Image with polygons drawn.
@@ -19798,8 +19815,16 @@ class imgLib:
 
         if(len(point_coords_list)!=len(polygon_colors)):
             raise ValueError("The lengths of `point_coords_list` and `polygon_colors` must be equal!")
-        
-        for pts,pts_color in zip(point_coords_list,polygon_colors):
+
+        if(polygon_thickness_list is None):
+            polygon_thickness_list=pyExLib.IterableLib.createConstInitList(len(point_coords_list),2)
+        elif(isinstance(polygon_thickness_list,int)):
+            polygon_thickness_list=pyExLib.IterableLib.createConstInitList(len(point_coords_list),polygon_thickness_list)
+        else:
+            if(len(point_coords_list)!=len(polygon_thickness_list)):
+                raise ValueError("The lengths of `point_coords_list` and `polygon_thickness_list` must be equal!")
+
+        for pts,pts_color,pts_thick in zip(point_coords_list,polygon_colors,polygon_thickness_list):
             img=imgLib.drawPolygon(
                 img,
                 [pts],
@@ -19810,7 +19835,8 @@ class imgLib:
                 label_flag=label_flag,
                 label_list=label_list,
                 label_arg=label_arg,
-                label_org_function=label_org_function
+                label_org_function=label_org_function,
+                line_thickness=int(pts_thick)
         )
         
         return img
@@ -19830,7 +19856,8 @@ class imgLib:
         label_flag:bool=False,
         label_list:list=None,
         label_arg:dict=None,
-        label_org_function:callable=DEFAULT_LABEL_ORG_FUNCTION
+        label_org_function:callable=DEFAULT_LABEL_ORG_FUNCTION,
+        shape_thicknesses=None
     ):
         """
         Draws shapes on an image.
@@ -19847,6 +19874,7 @@ class imgLib:
             label_list (list): List of labels for the shapes.
             label_arg (dict): Arguments for the label text (e.g., font, size, color).
             label_org_function (function): Function to determine the label position.
+            shape_thicknesses (list or int): List of thicknesses for the shape edges or a single integer for all shapes.
         
         Returns:
             np.ndarray: Image with shapes drawn.
@@ -19873,7 +19901,8 @@ class imgLib:
                 label_flag=label_flag,
                 label_list=label_list,
                 label_arg=label_arg,
-                label_org_function=label_org_function
+                label_org_function=label_org_function,
+                box_thickness_list=shape_thicknesses
             )
         elif(mode==imgLib.MODE_DRAW_SHAPE_LINE_POLYGON):
             return imgLib.drawColorsPolygon(
@@ -19886,7 +19915,8 @@ class imgLib:
                 label_flag=label_flag,
                 label_list=label_list,
                 label_arg=label_arg,
-                label_org_function=label_org_function
+                label_org_function=label_org_function,
+                polygon_thickness_list=shape_thicknesses
             )
         else:
             raise ValueError(f"Invalid mode! : {mode}")
@@ -25605,6 +25635,8 @@ class imgLib:
                 label_args:dict=None,
                 label_org_function:callable=None,
                 label_str_format:str=DEFAULT_LABEL_STR_FORMAT,
+                shape_colors=None,
+                shape_thicknesses=None,
             ):
             """
             Gets the image with optional drawing of rectangles.
@@ -25616,6 +25648,18 @@ class imgLib:
                 label_args (dict): Arguments for drawing labels.
                 label_org_function (callable): Function to get the label origin.
                 label_str_format (str): Format string for labels.
+                shape_colors: Color specification for shapes. Supported formats:
+                    - None: use YOLOANN.staticColorOfANNClsNums(classes) (default behavior)
+                    - tuple: (B, G, R) applied to all boxes
+                    - list/tuple: list of (B, G, R) with the same length as bboxes
+                    - dict: {cls_num: (B,G,R), "default"/None: (B,G,R)}
+                    - callable: f(cls_num:int, score:float, bbox:list, index:int)->(B,G,R)
+                shape_thicknesses: Thickness specification for shapes. Supported formats:
+                    - None: use default thickness 2
+                    - int: applied to all boxes (0 is invalid; -1 means fill)
+                    - list/tuple: list of int with the same length as bboxes
+                    - dict: {cls_num: int, "default"/None: int}
+                    - callable: f(cls_num:int, score:float, bbox:list, index:int)->int
 
             Returns:
                 np.ndarray: Image with optional drawing.
@@ -25649,11 +25693,88 @@ class imgLib:
                         ) for cls_num,score,name_class in zip(classes,scores,name_classes)
                 ]
 
+            if(not draw_rect_flag):
+                return tmp_img
+
+            # shape_colors can be specified by argument or draw_rect_args["shape_colors"].
+            # Supported formats:
+            #   - None: use YOLOANN.staticColorOfANNClsNums(classes) (default behavior)
+            #   - tuple: (B, G, R) applied to all boxes
+            #   - list/tuple: list of (B, G, R) with the same length as bboxes
+            #   - dict: {cls_num: (B,G,R), "default"/None: (B,G,R)}
+            #   - callable: f(cls_num:int, score:float, bbox:list, index:int)->(B,G,R)
+            if("shape_colors" in draw_rect_args):
+                if(shape_colors is not None):
+                    raise ValueError("Error : shape_colors is specified in both argument and draw_rect_args['shape_colors']!")
+                shape_colors=draw_rect_args.pop("shape_colors")
+
+            if(shape_colors is None):
+                tmp_shape_colors=imgLib.YOLOANN.staticColorOfANNClsNums(classes)
+            elif(callable(shape_colors)):
+                tmp_shape_colors=[
+                    shape_colors(
+                        cls_num=int(cls_num),
+                        score=float(score),
+                        bbox=bbox,
+                        index=i
+                    ) for i,(cls_num,score,bbox) in enumerate(zip(classes,scores,bboxes))
+                ]
+            elif(isinstance(shape_colors, dict)):
+                default_color=shape_colors.get("default", shape_colors.get(None, imgLib.DEFAULT_FIGURE_FRAME_COLOR))
+                tmp_shape_colors=[shape_colors.get(int(cls_num), default_color) for cls_num in classes]
+            elif(isinstance(shape_colors, tuple) and (len(shape_colors)==3)):
+                tmp_shape_colors=pyExLib.IterableLib.createConstInitList(len(bboxes), shape_colors)
+            elif(isinstance(shape_colors, (list,tuple))):
+                if(len(shape_colors)!=len(bboxes)):
+                    raise ValueError("Error : shape_colors length mismatch!")
+                tmp_shape_colors=list(shape_colors)
+            else:
+                raise TypeError("Error : Invalid shape_colors type!")
+
+            # shape_thicknesses can be specified by argument or draw_rect_args["shape_thicknesses"].
+            # Supported formats:
+            #   - None: use default thickness 2
+            #   - int: applied to all boxes (0 is invalid; -1 means fill)
+            #   - list/tuple: list of int with the same length as bboxes
+            #   - dict: {cls_num: int, "default"/None: int}
+            #   - callable: f(cls_num:int, score:float, bbox:list, index:int)->int
+            if("shape_thicknesses" in draw_rect_args):
+                if(shape_thicknesses is not None):
+                    raise ValueError("Error : shape_thicknesses is specified in both argument and draw_rect_args['shape_thicknesses']!")
+                shape_thicknesses=draw_rect_args.pop("shape_thicknesses")
+
+            if(shape_thicknesses is None):
+                tmp_shape_thicknesses=pyExLib.IterableLib.createConstInitList(len(bboxes),2)
+            elif(callable(shape_thicknesses)):
+                tmp_shape_thicknesses=[
+                    int(shape_thicknesses(
+                        cls_num=int(cls_num),
+                        score=float(score),
+                        bbox=bbox,
+                        index=i
+                    )) for i,(cls_num,score,bbox) in enumerate(zip(classes,scores,bboxes))
+                ]
+            elif(isinstance(shape_thicknesses, dict)):
+                default_thick=shape_thicknesses.get("default", shape_thicknesses.get(None, 2))
+                tmp_shape_thicknesses=[int(shape_thicknesses.get(int(cls_num), default_thick)) for cls_num in classes]
+            elif(isinstance(shape_thicknesses, int)):
+                tmp_shape_thicknesses=pyExLib.IterableLib.createConstInitList(len(bboxes),shape_thicknesses)
+            elif(isinstance(shape_thicknesses, (list,tuple))):
+                if(len(shape_thicknesses)!=len(bboxes)):
+                    raise ValueError("Error : shape_thicknesses length mismatch!")
+                tmp_shape_thicknesses=[int(t) for t in shape_thicknesses]
+            else:
+                raise TypeError("Error : Invalid shape_thicknesses type!")
+
+            if(any([t==0 for t in tmp_shape_thicknesses])):
+                raise ValueError("Error : shape_thicknesses contains 0!")
+
             if(draw_rect_flag):
                 tmp_img=imgLib.drawShapeLine(
                     mode=imgLib.MODE_DRAW_SHAPE_LINE_RECT,
                     img=tmp_img,
-                    shape_colors=imgLib.YOLOANN.staticColorOfANNClsNums(classes),
+                    shape_colors=tmp_shape_colors,
+                    shape_thicknesses=tmp_shape_thicknesses,
                     shape_list=bboxes,
                     label_flag=label_flag,
                     label_list=label_list,
@@ -26057,7 +26178,9 @@ class imgLib:
             label_flag:bool=False,
             label_args:dict=None,
             label_org_function:callable=None,
-            label_str_format:str=DEFAULT_LABEL_STR_FORMAT
+            label_str_format:str=DEFAULT_LABEL_STR_FORMAT,
+            shape_colors=None,
+            shape_thicknesses=None
         ):
             """
             Saves the image with optional drawing of rectangles.
@@ -26071,6 +26194,18 @@ class imgLib:
                 label_args (dict): Arguments for drawing labels.
                 label_org_function (callable): Function to get the label origin.
                 label_str_format (str): Format string for labels.
+                shape_colors: Color specification for shapes. Supported formats:
+                    - None: use YOLOANN.staticColorOfANNClsNums(classes) (default behavior)
+                    - tuple: (B, G, R) applied to all boxes
+                    - list/tuple: list of (B, G, R) with the same length as bboxes
+                    - dict: {cls_num: (B,G,R), "default"/None: (B,G,R)}
+                    - callable: f(cls_num:int, score:float, bbox:list, index:int)->(B,G,R)
+                shape_thicknesses: Thickness specification for shapes. Supported formats:
+                    - None: use default thickness 2
+                    - int: applied to all boxes (0 is invalid; -1 means fill)
+                    - list/tuple: list of int with the same length as bboxes
+                    - dict: {cls_num: int, "default"/None: int}
+                    - callable: f(cls_num:int, score:float, bbox:list, index:int)->int
             """
             if(draw_rect_args is None):
                 draw_rect_args={}
@@ -26090,7 +26225,9 @@ class imgLib:
                 label_flag=label_flag,
                 label_args=label_args,
                 label_org_function=label_org_function,
-                label_str_format=label_str_format
+                label_str_format=label_str_format,
+                shape_colors=shape_colors,
+                shape_thicknesses=shape_thicknesses,
             )
             cv2.imwrite(save_path,img)
         
