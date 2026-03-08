@@ -57,6 +57,7 @@ from email.message import EmailMessage
 import atexit
 import functools
 import platform
+import sqlite3
 
 # ultralytics
 IMPORT_ULTRALYTICS_FLAG=True
@@ -165,14 +166,6 @@ except ImportError:
     except ImportError:
         IMPORT_MOVIEPY_FLAG=False
         print("Pass moviepy import! moviepy related functions will not be available. \nYou must install moviepy package to use moviepy related functions. `pip install moviepy`\n")
-
-# sqlite3
-IMPORT_SQLITE3_FLAG=True
-try:
-    import sqlite3
-except ImportError:
-    IMPORT_SQLITE3_FLAG=False
-    print("Pass sqlite3 import! sqlite3 related functions will not be available. \nYou must install sqlite3 package to use sqlite3 related functions. `pip install pysqlite3`\n")
 
 # optuna
 IMPORT_OPTUNA_FLAG=True
@@ -15512,12 +15505,8 @@ class IOLib:
                 pragmas (dict or None): Dictionary of PRAGMA settings to apply to the database connection (default is None).
 
             Raises:
-                ImportError: If sqlite3 is not available in the Python environment.
                 TypeError: If db_asset is not a valid type.
             """
-            if(not IMPORT_SQLITE3_FLAG):
-                raise ImportError("Error: sqlite3 is not available in this Python environment.")
-
             if(isinstance(db_asset,(str,Path))):
                 db_asset=IOLib.FileAsset(db_asset)
             elif(not isinstance(db_asset,IOLib.FileAsset)):
@@ -15829,11 +15818,8 @@ class IOLib:
                 FileStoreDB: New FileStoreDB instance representing the created database.
 
             Raises:
-                ImportError: If sqlite3 is not available in the Python environment.
                 FileExistsError: If the database file already exists and overwrite is False.
             """
-            if(not IMPORT_SQLITE3_FLAG):
-                raise ImportError("Error: sqlite3 is not available in this Python environment.")
             db_path=Path(db_path).absolute()
 
             if(db_path.exists() and (not overwrite)):
@@ -38923,23 +38909,6 @@ class imgLib:
                 obj=cls.__new__(cls)
                 obj.__dict__.update(payload)
                 return obj
-
-            @classmethod
-            def from_payload(cls,payload:dict,store:"IOLib.FileStore"):
-                """
-                Creates a readYOLOModelList instance from a payload dictionary.
-
-                Args:
-                    payload (dict): The payload dictionary.
-                    store (IOLib.FileStore): The file store instance.
-
-                Returns:
-                    readYOLOModelList: The readYOLOModelList instance.
-                """
-                obj=cls.__new__(cls)
-                obj.__dict__.update(payload)
-                return obj
-            
 
             def __len__(self):
                 """
