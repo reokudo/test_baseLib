@@ -1,4 +1,5 @@
-# baseLib.py - The library is a collection of various utility functions for Python programming.
+# baseLib.py v1.1.0
+# - The library is a collection of various utility functions for Python programming.
 
 # standard libraries
 import os
