@@ -32565,7 +32565,7 @@ class imgLib:
             ensemble_args:dict=None,
             yolo_args:dict=None,
             yolo_additional_args:dict=None,
-            check_model_names_flag:bool=True
+            check_model_names_flag:bool=True,
         ):
             """
             Predicts multiple YOLO models and outputs ensemble results.
@@ -33341,6 +33341,770 @@ class imgLib:
                 return [int(inv[n]) for n in name_list]
 
             raise ValueError("Error : names must be a dict like {id:name}.")
+
+        class _ProcYOLOPredcitWrapperPredictData:
+            """
+            Internal wrapper to unify different predict_data types for procYOLOPredictWrapper.
+            """
+
+            MODE_YOLOANN="YOLOANN"
+            MODE_BB_IMG_JSON="BBimgJson"
+            MODE_WRAPPER_YOLOANN="wrapperYOLOANN"
+            MODE_WRAPPER_YOLOANN_ALL="wrapperYOLOANNAll"
+            MODE_OTHERS="others"
+
+            OUTPUT_MODE_AUTO="auto"
+            OUTPUT_MODE_RAW="raw"
+            OUTPUT_MODE_YOLOANN_RESULT="YOLOANNResult"
+            OUTPUT_MODE_BB_IMG_JSON="BBimgJson"
+            OUTPUT_MODE_WRAPPER_YOLOANN_ALL="wrapperYOLOANNAll"
+
+            def __init__(self,predict_data):
+                """
+                Initializes the wrapper by detecting the type of predict_data and extracting a unified temporary representation.
+
+                Args:
+                    predict_data: The input data for prediction, which can be of various types (YOLOANN, BBimgJson, wrapperYOLOANN, wrapperYOLOANNAll, or others). The wrapper will detect the type and extract a temporary representation accordingly.
+                """
+                self.__predict_data=predict_data
+                self.__mode=None
+                self.__tmp_predict_data=None
+                self.__raw_yolo_ann=None
+                
+                if(isinstance(predict_data,imgLib.YOLOANN)):
+                    self.__mode=imgLib.ensembleModel._ProcYOLOPredcitWrapperPredictData.MODE_YOLOANN
+                    self.__raw_yolo_ann=predict_data
+                    self.__tmp_predict_data=predict_data.getImg(
+                        draw_shape_flag=False,
+                        is_polygon_mode=False,
+                        draw_shape_args=None,
+                        label_flag=False,
+                        label_args=None,
+                        label_org_function=None,
+                    )
+                elif(isinstance(predict_data,imgLib.BBimgJson)):
+                    self.__mode=imgLib.ensembleModel._ProcYOLOPredcitWrapperPredictData.MODE_BB_IMG_JSON
+                    self.__tmp_predict_data=predict_data.getImg(
+                        draw_rect_flag=False,
+                        draw_rect_args=None,
+                        label_flag=False,
+                        label_args=None,
+                        label_org_function=None,
+                        label_str_format=imgLib.BBimgJson.DEFAULT_LABEL_STR_FORMAT,
+                        shape_colors=None,
+                        shape_thicknesses=None,
+                    )
+                    self.__raw_yolo_ann=predict_data.toYOLOANN(
+                        ann_mode="auto",
+                        load_img_flag=True,
+                        apply_reshape_log=True,
+                        strict_gt_flag=False,
+                        allow_reshape_flag=True,
+                    )
+                elif(isinstance(predict_data,imgLib.wrapperYOLOANN)):
+                    self.__mode=imgLib.ensembleModel._ProcYOLOPredcitWrapperPredictData.MODE_WRAPPER_YOLOANN
+                    self.__raw_yolo_ann=predict_data.yolo_ann
+                    self.__tmp_predict_data=predict_data.yolo_ann.getImg(
+                        draw_shape_flag=False,
+                        is_polygon_mode=False,
+                        draw_shape_args=None,
+                        label_flag=False,
+                        label_args=None,
+                        label_org_function=None,
+                    )
+                elif(isinstance(predict_data,imgLib.wrapperYOLOANNAll)):
+                    self.__mode=imgLib.ensembleModel._ProcYOLOPredcitWrapperPredictData.MODE_WRAPPER_YOLOANN_ALL
+                    self.__raw_yolo_ann=predict_data.ann
+                    self.__tmp_predict_data=predict_data.ann.getImg(
+                        draw_shape_flag=False,
+                        is_polygon_mode=False,
+                        draw_shape_args=None,
+                        label_flag=False,
+                        label_args=None,
+                        label_org_function=None,
+                    )
+                else:
+                    self.__mode=imgLib.ensembleModel._ProcYOLOPredcitWrapperPredictData.MODE_OTHERS
+                    self.__tmp_predict_data=predict_data
+
+            @property
+            def mode(self):
+                """
+                Returns the detected mode of the input predict_data.
+
+                Returns:
+                    str: The mode of the input predict_data, which can be one of the following: 
+                        - "YOLOANN": if the input is an instance of `imgLib.YOLOANN`.
+                        - "BBimgJson": if the input is an instance of `imgLib.BBimgJson`.
+                        - "wrapperYOLOANN": if the input is an instance of `imgLib.wrapperYOLOANN`.
+                        - "wrapperYOLOANNAll": if the input is an instance of `imgLib.wrapperYOLOANNAll`.
+                        - "others": if the input does not match any of the above types and is treated as a generic input for YOLO prediction.
+                """
+                return self.__mode
+
+            @property
+            def tmp_predict_data(self):
+                """
+                Returns the temporary representation of the input predict_data, which is extracted based on the detected mode. This temporary representation is intended to be used as input for YOLO prediction.
+
+                Returns:
+                    The temporary representation of the input predict_data, which can be a numpy array, PIL image, or any format accepted by `ultralytics.YOLO.predict(...)`, depending on the original type of predict_data. 
+                """
+                return self.__tmp_predict_data
+
+            @property
+            def predict_data(self):
+                """
+                Returns the original input predict_data.
+
+                Returns:
+                    The original input predict_data that was provided to the wrapper.
+                """
+                return self.__predict_data
+
+            @property
+            def raw_yolo_ann(self):
+                """
+                Returns the raw YOLOANN object when available.
+
+                Returns:
+                    imgLib.YOLOANN or None: The raw YOLOANN object used for output restoration.
+                """
+                return self.__raw_yolo_ann
+
+            def getDefaultOutputMode(self):
+                """
+                Returns the default output mode inferred from the input type.
+
+                Returns:
+                    str: Default output mode.
+                """
+                if(self.__mode==imgLib.ensembleModel._ProcYOLOPredcitWrapperPredictData.MODE_BB_IMG_JSON):
+                    return imgLib.ensembleModel._ProcYOLOPredcitWrapperPredictData.OUTPUT_MODE_BB_IMG_JSON
+                elif(self.__mode==imgLib.ensembleModel._ProcYOLOPredcitWrapperPredictData.MODE_WRAPPER_YOLOANN_ALL):
+                    return imgLib.ensembleModel._ProcYOLOPredcitWrapperPredictData.OUTPUT_MODE_WRAPPER_YOLOANN_ALL
+                elif(self.__mode in (
+                    imgLib.ensembleModel._ProcYOLOPredcitWrapperPredictData.MODE_YOLOANN,
+                    imgLib.ensembleModel._ProcYOLOPredcitWrapperPredictData.MODE_WRAPPER_YOLOANN,
+                )):
+                    return imgLib.ensembleModel._ProcYOLOPredcitWrapperPredictData.OUTPUT_MODE_YOLOANN_RESULT
+                else:
+                    return imgLib.ensembleModel._ProcYOLOPredcitWrapperPredictData.OUTPUT_MODE_RAW
+
+        @staticmethod
+        def _clsNamesDictToList(names_dict):
+            """
+            Converts a cls_names_dict ({id:name}) into a dense list form.
+
+            Args:
+                names_dict (dict|None): Class names dictionary.
+
+            Returns:
+                list|None: Dense class-name list or None.
+            """
+            if(names_dict is None):
+                return None
+            names_dict=imgLib.ensembleModel._normalizeClsNamesDict(names_dict)
+            if(not isinstance(names_dict,dict)):
+                return names_dict
+            if(len(names_dict)==0):
+                return []
+            max_id=max(int(k) for k in names_dict.keys())
+            out=[]
+            for i in range(max_id+1):
+                out.append(str(names_dict.get(i,str(i))))
+            return out
+
+        @staticmethod
+        def _splitPredictDataForWrapper(predict_data,expected_len:int):
+            """
+            Splits generic predict_data into per-image items for wrapper post-processing.
+
+            Args:
+                predict_data: Original predict_data passed to procYOLOPredictWrapper.
+                expected_len (int): Expected number of per-image outputs.
+
+            Returns:
+                list: Per-image predict_data items.
+
+            Raises:
+                TypeError: If predict_data cannot be split consistently.
+                ValueError: If the number of items does not match expected_len.
+            """
+            if(not isinstance(expected_len,int)):
+                expected_len=int(expected_len)
+
+            if(expected_len<=0):
+                return []
+
+            if(isinstance(predict_data,(list,tuple))):
+                if(len(predict_data)!=expected_len):
+                    raise ValueError(
+                        f"Error : predict_data length ({len(predict_data)}) does not match the number of output images ({expected_len})."
+                    )
+                return list(predict_data)
+
+            if(expected_len==1):
+                return [predict_data]
+
+            raise TypeError(
+                "Error : Generic predict_data can be converted to BBimgJson only when it is a per-image list/tuple "
+                f"or when the output length is 1. Got output length={expected_len}."
+            )
+
+        @staticmethod
+        def _tryGetPredictItemPath(predict_item):
+            """
+            Tries to extract an existing image path string from a generic predict item.
+
+            Args:
+                predict_item: One input image item accepted by YOLO predict.
+
+            Returns:
+                str|None: Extracted path string when available, otherwise None.
+            """
+            if(isinstance(predict_item,(str,Path,os.PathLike))):
+                return str(predict_item)
+
+            for attr_name in ["path","filename","filepath","raw_img_path"]:
+                try:
+                    attr_value=getattr(predict_item,attr_name,None)
+                except Exception:
+                    attr_value=None
+                if(isinstance(attr_value,(str,Path,os.PathLike))):
+                    return str(attr_value)
+
+            return None
+
+        @staticmethod
+        def _savePredictItemImageForWrapper(
+            predict_item,
+            save_path,
+        ):
+            """
+            Saves a generic predict item as an image file.
+
+            Args:
+                predict_item: One input image item accepted by YOLO predict.
+                save_path (str|Path): Destination file path.
+
+            Returns:
+                tuple[str,np.ndarray|None]: Saved file path and optional numpy image cache.
+
+            Raises:
+                TypeError: If the input type cannot be saved as an image.
+                RuntimeError: If saving fails.
+            """
+            save_path_obj=Path(save_path)
+            save_path_obj.parent.mkdir(parents=True,exist_ok=True)
+
+            if(isinstance(predict_item,np.ndarray)):
+                raw_img=pyExLib.safety_deepcopy(predict_item)
+                ok=cv2.imwrite(str(save_path_obj),raw_img)
+                if(not ok):
+                    raise RuntimeError(f"Error : Failed to save ndarray image to '{save_path_obj}'.")
+                return (str(save_path_obj),raw_img)
+
+            if(
+                (hasattr(predict_item,"save"))
+                and callable(getattr(predict_item,"save"))
+                and (not isinstance(predict_item,(str,bytes)))
+            ):
+                try:
+                    predict_item.save(str(save_path_obj))
+                except Exception as e:
+                    raise RuntimeError(f"Error : Failed to save PIL-like image to '{save_path_obj}'.") from e
+                try:
+                    raw_img=np.array(predict_item)
+                except Exception:
+                    raw_img=None
+                return (str(save_path_obj),raw_img)
+
+            raise TypeError(
+                "Error : predict_item has no path information and cannot be saved as an image automatically. "
+                f"Unsupported type: {type(predict_item)}"
+            )
+
+        @staticmethod
+        def _resolvePredictItemImagePathForWrapper(
+            predict_item,
+            index:int=0,
+            other_input_img_save_path:str=None,
+        ):
+            """
+            Resolves a real image path for a generic predict item.
+
+            Resolution order:
+            1. If the input already has path information, reuse that path.
+            2. Otherwise, save the image to ``other_input_img_save_path`` and use the saved path.
+
+            Args:
+                predict_item: One input image item accepted by YOLO predict.
+                index (int): Item index used for fallback naming.
+                other_input_img_save_path (str, optional): Save destination path or directory used when
+                    the input does not already have path information.
+
+            Returns:
+                tuple[str,str,dict,np.ndarray|None,tuple|None]:
+                    raw_img_path, img_name, raw_img_info, raw_img_cache, img_wh
+
+            Raises:
+                ValueError: If no path information exists and ``other_input_img_save_path`` is not provided.
+                TypeError: If the input cannot be saved as an image.
+                RuntimeError: If the image save operation fails.
+            """
+            raw_img_info={"gt_available":False}
+            raw_img=None
+            img_wh=None
+
+            existing_path=imgLib.ensembleModel._tryGetPredictItemPath(predict_item)
+            if(existing_path is not None):
+                raw_img_path=str(existing_path)
+                try:
+                    img_name=Path(raw_img_path).stem
+                except Exception:
+                    img_name=f"input_{int(index):06d}"
+                raw_img_info["source_mode"]="path"
+                raw_img_info["exists"]=bool(os.path.exists(raw_img_path))
+
+                try:
+                    shape=getattr(predict_item,"shape",None)
+                    if((shape is not None) and (len(shape)>=2)):
+                        img_wh=(int(shape[1]),int(shape[0]))
+                except Exception:
+                    pass
+
+                return (raw_img_path,img_name,raw_img_info,raw_img,img_wh)
+
+            if(other_input_img_save_path is None):
+                raise ValueError(
+                    "Error : predict_item has no image path information. "
+                    "Please set other_input_img_save_path to save the image and use that real path."
+                )
+
+            save_base=Path(other_input_img_save_path)
+            if(save_base.suffix!=""):
+                if(int(index)==0):
+                    save_path_obj=save_base
+                else:
+                    save_path_obj=save_base.parent/f"{save_base.stem}_{int(index):06d}{save_base.suffix}"
+            else:
+                save_path_obj=save_base/f"input_{int(index):06d}.png"
+
+            saved_path,raw_img=imgLib.ensembleModel._savePredictItemImageForWrapper(
+                predict_item=predict_item,
+                save_path=save_path_obj,
+            )
+
+            raw_img_path=str(saved_path)
+            img_name=Path(raw_img_path).stem
+            raw_img_info["source_mode"]=type(predict_item).__name__
+            raw_img_info["exists"]=True
+            raw_img_info["saved_for_wrapper"]=True
+            raw_img_info["saved_path"]=str(raw_img_path)
+
+            if(isinstance(raw_img,np.ndarray)):
+                try:
+                    if((raw_img.ndim>=2) and (raw_img.shape[0] is not None) and (raw_img.shape[1] is not None)):
+                        img_wh=(int(raw_img.shape[1]),int(raw_img.shape[0]))
+                except Exception:
+                    pass
+            elif(
+                (hasattr(predict_item,"size"))
+                and isinstance(getattr(predict_item,"size"),(tuple,list))
+                and (len(getattr(predict_item,"size"))==2)
+                and (not isinstance(predict_item,(str,bytes)))
+            ):
+                try:
+                    img_wh=(int(predict_item.size[0]),int(predict_item.size[1]))
+                except Exception:
+                    pass
+            else:
+                try:
+                    shape=getattr(predict_item,"shape",None)
+                    if((shape is not None) and (len(shape)>=2)):
+                        img_wh=(int(shape[1]),int(shape[0]))
+                except Exception:
+                    pass
+
+            return (raw_img_path,img_name,raw_img_info,raw_img,img_wh)
+
+        @staticmethod
+        def _makeBBimgJsonFromOtherInput(
+            predict_item,
+            result_dict:dict,
+            index:int=0,
+            additional_dict:dict=None,
+            yolo_model_config:dict=None,
+            other_input_img_save_path:str=None,
+        ):
+            """
+            Creates a GT-less BBimgJson directly from generic input data and a raw procYOLOPredict result dict.
+
+            Args:
+                predict_item: One input image item accepted by YOLO predict.
+                result_dict (dict): One raw result dict.
+                index (int): Item index used for fallback naming.
+                additional_dict (dict, optional): Additional dict to merge into BBimgJson.
+                yolo_model_config (dict, optional): Extra model config to include.
+                other_input_img_save_path (str, optional): Real image save destination used when
+                    ``predict_item`` does not already contain path information.
+
+            Returns:
+                imgLib.BBimgJson: BBimgJson object without GT labels.
+            """
+            if(not isinstance(result_dict,dict)):
+                raise TypeError("Error : result_dict must be dict.")
+
+            ann={
+                "bboxes":pyExLib.safety_deepcopy(result_dict.get("bboxes",[])),
+                "scores":pyExLib.safety_deepcopy(result_dict.get("scores",[])),
+                "classes":pyExLib.safety_deepcopy(result_dict.get("classes",[])),
+            }
+
+            cls_names=imgLib.ensembleModel._clsNamesDictToList(result_dict.get("cls_names_dict",None))
+            img_wh=imgLib.ensembleModel._extractImgWh(result_dict)
+
+            raw_img_path,img_name,raw_img_info,raw_img,resolved_img_wh=imgLib.ensembleModel._resolvePredictItemImagePathForWrapper(
+                predict_item=predict_item,
+                index=index,
+                other_input_img_save_path=other_input_img_save_path,
+            )
+
+            if(resolved_img_wh is not None):
+                img_wh=resolved_img_wh
+
+            if(img_wh is not None):
+                raw_img_info["wh"]=[int(img_wh[0]),int(img_wh[1])]
+
+            merged_additional_dict={}
+            if(isinstance(additional_dict,dict)):
+                merged_additional_dict.update(pyExLib.safety_deepcopy(additional_dict))
+            if(isinstance(yolo_model_config,dict)):
+                merged_additional_dict["yolo_model_config"]=pyExLib.safety_deepcopy(yolo_model_config)
+
+            d={
+                **merged_additional_dict,
+                **{
+                    "raw_img_path":str(raw_img_path),
+                    "img_name":str(img_name),
+                    "img_reshape_log":[],
+                    "final_ann":ann,
+                    "raw_img_info":raw_img_info,
+                }
+            }
+            if(cls_names is not None):
+                d["cls_names"]=cls_names
+
+            out_obj=imgLib.BBimgJson(d)
+            if(isinstance(raw_img,np.ndarray)):
+                try:
+                    setattr(out_obj,"_BBimgJson__raw_img",raw_img)
+                    setattr(out_obj,"_BBimgJson__img",pyExLib.safety_deepcopy(raw_img))
+                except Exception:
+                    pass
+            return out_obj
+
+        @staticmethod
+        def procYOLOPredictWrapper(
+            models:list,
+            mode:str,
+            predict_data,
+            iou_threshold:float=DEFAULT_IOU_THRESHOLD,
+            multi_class_mode:str=None,
+            gpu_flag:bool=True,
+            ensemble_args:dict=None,
+            yolo_args:dict=None,
+            yolo_additional_args:dict=None,
+            check_model_names_flag:bool=True,
+
+            output_mode:str="auto",
+            prefer_output_id:str=None,
+            index:int=0,
+            exist_ok:bool=True,
+            set_active:bool=True,
+            copy_input_wrapper_flag:bool=True,
+            bb_img_json_additional_dict:dict=None,
+            raw_yolo_ann_additional_info_flag:bool=True,
+            bb_img_json_iou_args:dict=None,
+            yolo_model_config:dict=None,
+            other_input_img_save_path:str=None,
+        ):
+            """
+            General wrapper around `procYOLOPredict` that normalizes several input formats and optionally restores the prediction result into a higher-level output object.
+
+            This function is intended to provide a unified interface for prediction when the input may be a raw image, a `YOLOANN`-related object, or a `BBimgJson` object, while still allowing the caller to choose the final output format.
+
+            Supported input categories include:
+
+            - `imgLib.YOLOANN`
+            - `imgLib.BBimgJson`
+            - `imgLib.wrapperYOLOANN`
+            - `imgLib.wrapperYOLOANNAll`
+            - other raw image-like inputs such as image paths, `numpy.ndarray`, or lists/tuples of such values
+
+            Internally, the input is first normalized into a form accepted by `procYOLOPredict`. After prediction, the raw result may be returned as-is or converted into one of several structured output formats.
+
+            Args:
+                models (list):
+                    List of models used for ensemble prediction.
+
+                mode (str):
+                    Ensemble prediction mode passed to `procYOLOPredict`.
+                    For example, this may be an NMS-based or WBF-based ensemble mode.
+
+                predict_data:
+                    Input prediction target. This may be a raw image path, image array, list/tuple of images, or one of the supported wrapper/annotation objects.
+
+                iou_threshold (float):
+                    IoU threshold used by the ensemble post-processing.
+
+                multi_class_mode (str, optional):
+                    Multi-class handling mode passed to `procYOLOPredict`.
+
+                gpu_flag (bool):
+                    Whether GPU-based prediction should be used.
+
+                ensemble_args (dict, optional):
+                    Additional arguments forwarded to ensemble prediction logic.
+
+                yolo_args (dict, optional):
+                    Additional YOLO-related arguments forwarded to the prediction backend.
+
+                yolo_additional_args (dict, optional):
+                    Additional arguments forwarded to the internal prediction call.
+
+                check_model_names_flag (bool):
+                    Whether model name consistency should be checked before prediction.
+
+                output_mode (str):
+                    Output formatting mode.
+
+                    Supported values are:
+
+                    - `"auto"`
+                    - `"raw"`
+                    - `"YOLOANNResult"`
+                    - `"BBimgJson"`
+                    - `"wrapperYOLOANNAll"`
+
+                    Behavior of `"auto"` depends on the input type:
+
+                    - `YOLOANN` -> `YOLOANNResult`
+                    - `BBimgJson` -> `BBimgJson`
+                    - `wrapperYOLOANN` -> `YOLOANNResult`
+                    - `wrapperYOLOANNAll` -> `wrapperYOLOANNAll`
+                    - other raw inputs -> `raw`
+
+                    Notes on each mode:
+
+                    - `"raw"`: Returns the raw output of `procYOLOPredict` without any restoration.
+                    - `"YOLOANNResult"`: Restores the raw result using the corresponding internal `YOLOANN` object and returns `YOLOANNResult`-based output.
+
+                    - `"BBimgJson"`: Returns prediction results as `BBimgJson` objects. If the input is `YOLOANN`-based, conversion is performed via `YOLOANNResult`. If the input is a raw non-`YOLOANN` input (`others`), a prediction-only `BBimgJson` object is constructed directly from the raw prediction result, without ground-truth labels.
+
+                    - `"wrapperYOLOANNAll"`: Restores the result and stores it into a `wrapperYOLOANNAll` object.
+
+                prefer_output_id (str, optional):
+                    Preferred output ID used when storing results into `wrapperYOLOANNAll`. This value may be used as the active output ID.
+
+                index (int):
+                    Index of the result to select from each result list when storing into `wrapperYOLOANNAll`.
+
+                exist_ok (bool):
+                    Whether existing output IDs may be overwritten when `output_mode="wrapperYOLOANNAll"`.
+
+                set_active (bool):
+                    Whether the selected output should be set as the active output when `output_mode="wrapperYOLOANNAll"`.
+
+                copy_input_wrapper_flag (bool):
+                    Controls behavior when the input itself is `wrapperYOLOANNAll` and `output_mode="wrapperYOLOANNAll"`.
+
+                    - If `True`, a new `wrapperYOLOANNAll` object is created.
+                    - If `False`, the input wrapper object itself may be updated and returned.
+
+                bb_img_json_additional_dict (dict, optional):
+                    Additional dictionary passed to `YOLOANNResult.getResultBBimgJsonObj()` when converting from `YOLOANNResult` to `BBimgJson`.
+
+                raw_yolo_ann_additional_info_flag (bool):
+                    Whether additional raw `YOLOANN`-derived metadata should be embedded into `BBimgJson` output when such information is available.
+
+                bb_img_json_iou_args (dict, optional):
+                    IoU-related arguments passed to `YOLOANNResult.getResultBBimgJsonObj()`.
+
+                yolo_model_config (dict, optional):
+                    Optional model configuration attached to restored output objects when supported by the target format.
+
+                other_input_img_save_path (str, optional):
+                    Save destination path or directory used when the input is a raw non `YOLOANN` input that does not already contain path information. This is used to save the input image and provide a real path for output objects that require it.
+
+            Returns:
+                list | dict | imgLib.wrapperYOLOANNAll:
+                    Output formatted according to `output_mode`.
+
+                    Typical return forms are:
+
+                    - `output_mode="raw"`
+                    -> `list[dict]` or `dict[str, list[dict]]`
+
+                    - `output_mode="YOLOANNResult"`
+                    -> `list[imgLib.YOLOANNResult]` or
+                        `dict[str, list[imgLib.YOLOANNResult]]`
+
+                    - `output_mode="BBimgJson"`
+                    -> `list[imgLib.BBimgJson]` or
+                        `dict[str, list[imgLib.BBimgJson]]`
+
+                    - `output_mode="wrapperYOLOANNAll"`
+                    -> `imgLib.wrapperYOLOANNAll`
+
+            Raises:
+                ValueError:
+                    If `output_mode` is not supported.
+
+                TypeError:
+                    If the requested restoration mode requires an internal `YOLOANN`- compatible source but the given input cannot provide one.
+                    In particular, raw non-`YOLOANN` inputs do not support`"YOLOANNResult"` or `"wrapperYOLOANNAll"` restoration unless such support is explicitly implemented.
+
+            Notes:
+                - For raw non-`YOLOANN` inputs, `output_mode="BBimgJson"` produces prediction-only `BBimgJson` objects without ground-truth labels.
+                - For raw non-`YOLOANN` inputs, `output_mode="auto"` falls back to`"raw"`.
+                - The exact raw output structure depends on the behavior of `procYOLOPredict`. In single-output cases this is typically a `list[dict]`, while multi-output modes may return `dict[str, list[dict]]`.
+            """
+            pd_obj=imgLib.ensembleModel._ProcYOLOPredcitWrapperPredictData(predict_data)
+            results=imgLib.ensembleModel.procYOLOPredict(
+                models=models,
+                mode=mode,
+                predict_data=pd_obj.tmp_predict_data,
+                iou_threshold=iou_threshold,
+                multi_class_mode=multi_class_mode,
+                gpu_flag=gpu_flag,
+                ensemble_args=ensemble_args,
+                yolo_args=yolo_args,
+                yolo_additional_args=yolo_additional_args,
+                check_model_names_flag=check_model_names_flag,
+            )
+
+            if(output_mode is None):
+                output_mode=imgLib.ensembleModel._ProcYOLOPredcitWrapperPredictData.OUTPUT_MODE_AUTO
+
+            if(output_mode==imgLib.ensembleModel._ProcYOLOPredcitWrapperPredictData.OUTPUT_MODE_AUTO):
+                output_mode=pd_obj.getDefaultOutputMode()
+
+            if(output_mode==imgLib.ensembleModel._ProcYOLOPredcitWrapperPredictData.OUTPUT_MODE_RAW):
+                return results
+
+            raw_yolo_ann_obj=pd_obj.raw_yolo_ann
+
+            if(
+                (output_mode==imgLib.ensembleModel._ProcYOLOPredcitWrapperPredictData.OUTPUT_MODE_BB_IMG_JSON)
+                and (not isinstance(raw_yolo_ann_obj,imgLib.YOLOANN))
+            ):
+                if(isinstance(results,list)):
+                    predict_item_list=imgLib.ensembleModel._splitPredictDataForWrapper(pd_obj.predict_data,len(results))
+                    return [
+                        imgLib.ensembleModel._makeBBimgJsonFromOtherInput(
+                            predict_item=predict_item_list[i],
+                            result_dict=results[i],
+                            index=i,
+                            additional_dict=bb_img_json_additional_dict,
+                            yolo_model_config=yolo_model_config,
+                            other_input_img_save_path=other_input_img_save_path,  
+                        )
+                        for i in range(len(results))
+                    ]
+                elif(isinstance(results,dict)):
+                    any_value=None
+                    for _k,_v in results.items():
+                        any_value=_v
+                        break
+                    if(any_value is None):
+                        return {}
+                    if(not isinstance(any_value,list)):
+                        raise TypeError("Error : When results is dict, each value must be list.")
+                    predict_item_list=imgLib.ensembleModel._splitPredictDataForWrapper(pd_obj.predict_data,len(any_value))
+                    out_dict={}
+                    for k,v in results.items():
+                        if(not isinstance(v,list)):
+                            raise TypeError("Error : When results is dict, each value must be list.")
+                        if(len(v)!=len(predict_item_list)):
+                            raise ValueError("Error : The number of results is inconsistent across output IDs.")
+                        out_dict[k]=[
+                            imgLib.ensembleModel._makeBBimgJsonFromOtherInput(
+                                predict_item=predict_item_list[i],
+                                result_dict=v[i],
+                                index=i,
+                                additional_dict=bb_img_json_additional_dict,
+                                yolo_model_config=yolo_model_config,
+                            )
+                            for i in range(len(v))
+                        ]
+                    return out_dict
+                else:
+                    raise TypeError("Error : results must be list or dict.")
+
+            if(not isinstance(raw_yolo_ann_obj,imgLib.YOLOANN)):
+                raise TypeError("Error : output restoration requires predict_data that can be converted to imgLib.YOLOANN.")
+
+            restored_results=imgLib.YOLOANN._afterProcEnsembleYOLOANNResult(
+                raw_yolo_ann_obj=raw_yolo_ann_obj,
+                r=results,
+                bb_img_json_mode=False,
+                yolo_model_config=yolo_model_config,
+            )
+
+            if(output_mode==imgLib.ensembleModel._ProcYOLOPredcitWrapperPredictData.OUTPUT_MODE_YOLOANN_RESULT):
+                return restored_results
+
+            elif(output_mode==imgLib.ensembleModel._ProcYOLOPredcitWrapperPredictData.OUTPUT_MODE_BB_IMG_JSON):
+                def _convert_yolo_ann_result_to_bb_img_json(result_obj):
+                    if(not isinstance(result_obj,imgLib.YOLOANNResult)):
+                        raise TypeError("Error : Expected instance of imgLib.YOLOANNResult.")
+                    additional_dict=bb_img_json_additional_dict
+                    if(isinstance(yolo_model_config,dict)):
+                        if(additional_dict is None):
+                            additional_dict={"yolo_model_config":pyExLib.safety_deepcopy(yolo_model_config)}
+                        else:
+                            additional_dict={
+                                **pyExLib.safety_deepcopy(additional_dict),
+                                **{"yolo_model_config":pyExLib.safety_deepcopy(yolo_model_config)},
+                            }
+                    return result_obj.getResultBBimgJsonObj(
+                        additional_dict=additional_dict,
+                        raw_yolo_ann_additional_info_flag=raw_yolo_ann_additional_info_flag,
+                        iou_args=bb_img_json_iou_args,
+                    )
+
+                if(isinstance(restored_results,list)):
+                    return [_convert_yolo_ann_result_to_bb_img_json(x) for x in restored_results]
+                elif(isinstance(restored_results,dict)):
+                    return {k:[_convert_yolo_ann_result_to_bb_img_json(x) for x in v] for k,v in restored_results.items()}
+                else:
+                    raise TypeError("Error : restored_results must be a list or dict.")
+
+            elif(output_mode==imgLib.ensembleModel._ProcYOLOPredcitWrapperPredictData.OUTPUT_MODE_WRAPPER_YOLOANN_ALL):
+                if(
+                    (pd_obj.mode==imgLib.ensembleModel._ProcYOLOPredcitWrapperPredictData.MODE_WRAPPER_YOLOANN_ALL)
+                    and (not copy_input_wrapper_flag)
+                ):
+                    wrapper_obj=pd_obj.predict_data
+                else:
+                    wrapper_obj=imgLib.wrapperYOLOANNAll(
+                        yolo_ann_obj=pyExLib.safety_deepcopy(raw_yolo_ann_obj)
+                    )
+
+                wrapper_obj.setResultsFromProcReturn(
+                    r=restored_results,
+                    prefer_output_id=prefer_output_id,
+                    index=index,
+                    exist_ok=exist_ok,
+                    set_active=set_active,
+                )
+                return wrapper_obj
+
+            else:
+                raise ValueError(f"Error : Unsupported output_mode: {output_mode}")
+
 
         @staticmethod
         def EnsembleFunc4YOLOResult(
