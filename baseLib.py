@@ -1,4 +1,4 @@
-# baseLib.py v1.1.0
+# baseLib.py v1.1.2
 # - The library is a collection of various utility functions for Python programming.
 
 # standard libraries
@@ -27932,138 +27932,212 @@ class imgLib:
             iou_threshold:float=DEFAULT_CONFUSION_MATRIX_IOU_THRESHOLD,
             include_background:bool=True,
             background_label:str=DEFAULT_CONFUSION_MATRIX_BACKGROUND_LABEL,
-            orientation:str=BUILD_CONFUSION_MATRIX_FROM_BB_IMG_JSON_LIST_ORIENTATION_GT_PRED
+            orientation:str=BUILD_CONFUSION_MATRIX_FROM_BB_IMG_JSON_LIST_ORIENTATION_GT_PRED,
+            class_aware_match:bool=False,
+            match_by_score:bool=False,
+            score_key:str="scores",
+            strict:bool=True,
         ):
             """
             Builds a confusion matrix from a list of BBimgJson objects.
+
+            Notes:
+                - The returned matrix is square and uses the same label order for rows and columns.
+                - The canonical internal orientation is GT x Predict.
+                - If `class_aware_match` is False, class-mismatched high-IoU pairs may appear on off-diagonal cells.
+                - If `match_by_score` is True, predictions are processed by descending score and each prediction
+                  selects the best remaining GT.
 
             Args:
                 bb_img_json_list (list): List of BBimgJson objects.
                 iou_threshold (float): IoU threshold for matching.
                 include_background (bool): Whether to include background class.
                 background_label (str): Label for background class.
-                orientation (str): Orientation of the confusion matrix. Options are "gt_pred", "pred_gt", and "ultralytics".
+                orientation (str): One of "gt_pred", "pred_gt", or "ultralytics".
+                class_aware_match (bool): Whether to restrict matching candidates to the same class.
+                match_by_score (bool): Whether to match predictions in descending score order.
+                score_key (str): Prediction score key in ANN dict.
+                strict (bool): If True, raises when bbox/class list lengths are inconsistent.
 
             Returns:
                 pd.DataFrame: Confusion matrix.
-
-            Raises:
-                TypeError: If the bb_img_json_list is not a list of BBimgJson objects.
-                ValueError: If the iou_threshold is not between 0 and 1.
-                ValueError: If the background_label is already used as a class name.
-                ValueError: If the orientation is not one of the specified options.
             """
+            if(not isinstance(bb_img_json_list,list)):
+                raise TypeError("Error : The bb_img_json_list must be a list of BBimgJson objects!")
+            if(not isinstance(iou_threshold,(int,float)) or not (0.0<=float(iou_threshold)<=1.0)):
+                raise ValueError("Error : The iou_threshold must be between 0 and 1!")
+            if(not isinstance(background_label,str) or background_label==""):
+                raise ValueError("Error : The background_label must be a non-empty string!")
 
-            def greedyMatchViaIoULib(
-                pre_boxes:list,
-                gt_boxes:list,
-                thr:float
-            ):
+            valid_orientations=(
+                imgLib.BBimgJson.BUILD_CONFUSION_MATRIX_FROM_BB_IMG_JSON_LIST_ORIENTATION_GT_PRED,
+                imgLib.BBimgJson.BUILD_CONFUSION_MATRIX_FROM_BB_IMG_JSON_LIST_ORIENTATION_PRED_GT,
+                imgLib.BBimgJson.BUILD_CONFUSION_MATRIX_FROM_BB_IMG_JSON_LIST_ORIENTATION_ULTRALYTICS,
+            )
+            if(orientation not in valid_orientations):
+                raise ValueError('Error : The orientation must be "gt_pred", "pred_gt" or "ultralytics"!')
+
+            def _ensure_axis(cm_df:pd.DataFrame,row_name:str=None,col_name:str=None):
+                if((row_name is not None) and (row_name not in cm_df.index)):
+                    cm_df.loc[row_name]=0
+                if((col_name is not None) and (col_name not in cm_df.columns)):
+                    cm_df[col_name]=0
+
+            def _extract_data(bb_obj):
+                if(not isinstance(bb_obj,imgLib.BBimgJson)):
+                    raise TypeError("Error : The bb_img_json_list must be a list of BBimgJson objects!")
+
+                ann=bb_obj.getANN() or {}
+                pred_boxes=list(ann.get("bboxes",[]) or [])
+                pred_classes=list(ann.get("classes",[]) or [])
+                pred_scores=list(ann.get(score_key,[]) or [])
+
+                d=bb_obj.getDict() or {}
+                gt_block=d.get("YOLOANN_obj_additional_info",{}) or {}
+                gt_boxes=list(gt_block.get("ann",[]) or [])
+                gt_classes=list(gt_block.get("ann_cls_nums",[]) or [])
+
+                if(strict and (len(pred_boxes)!=len(pred_classes))):
+                    raise ValueError(f"Prediction bbox/class length mismatch: {len(pred_boxes)} != {len(pred_classes)}")
+                if(strict and (len(gt_boxes)!=len(gt_classes))):
+                    raise ValueError(f"GT bbox/class length mismatch: {len(gt_boxes)} != {len(gt_classes)}")
+
+                n_pred=min(len(pred_boxes),len(pred_classes))
+                pred_boxes=pred_boxes[:n_pred]
+                pred_classes=pred_classes[:n_pred]
+                if(len(pred_scores)<n_pred):
+                    pred_scores=pred_scores+[1.0]*(n_pred-len(pred_scores))
+                pred_scores=pred_scores[:n_pred]
+
+                n_gt=min(len(gt_boxes),len(gt_classes))
+                gt_boxes=gt_boxes[:n_gt]
+                gt_classes=gt_classes[:n_gt]
+
+                return pred_boxes,pred_classes,pred_scores,gt_boxes,gt_classes,d
+
+            def _greedy_match(pred_boxes,pred_classes,pred_scores,gt_boxes,gt_classes,thr:float):
+                if(match_by_score):
+                    pred_order=sorted(
+                        range(len(pred_boxes)),
+                        key=lambda i:(float(pred_scores[i]) if i<len(pred_scores) else 0.0,-int(i)),
+                        reverse=True
+                    )
+                    used_gt=set()
+                    matches=[]
+                    for pi in pred_order:
+                        best_gi=None
+                        best_iou=0.0
+                        pcls=int(pred_classes[pi])
+                        for gi in range(len(gt_boxes)):
+                            if(gi in used_gt):
+                                continue
+                            if(class_aware_match and int(gt_classes[gi])!=pcls):
+                                continue
+                            iou_val=imgLib.IoULib.IoU(gt_boxes[gi],pred_boxes[pi])
+                            if(iou_val>best_iou):
+                                best_iou=float(iou_val)
+                                best_gi=gi
+                        if((best_gi is not None) and (best_iou>=float(thr))):
+                            used_gt.add(best_gi)
+                            matches.append((int(best_gi),int(pi),float(best_iou)))
+                    return matches
+
                 pairs=[]
-                for gi,g in enumerate(gt_boxes):
-                    for pi,p in enumerate(pre_boxes):
-                        val=imgLib.IoULib.IoU(g,p)
-                        if(val>=thr):
-                            pairs.append((gi,pi,val))
-                pairs.sort(key=lambda x:x[2],reverse=True)
+                for gi,gbox in enumerate(gt_boxes):
+                    gcls=int(gt_classes[gi])
+                    for pi,pbox in enumerate(pred_boxes):
+                        if(class_aware_match and gcls!=int(pred_classes[pi])):
+                            continue
+                        iou_val=imgLib.IoULib.IoU(gbox,pbox)
+                        if(iou_val>=float(thr)):
+                            score_val=float(pred_scores[pi]) if pi<len(pred_scores) else 0.0
+                            pairs.append((int(gi),int(pi),float(iou_val),score_val))
+                pairs.sort(key=lambda x:(x[2],x[3]),reverse=True)
                 matched_g=set()
                 matched_p=set()
                 matches=[]
-
-                for gi,pi,val in pairs:
+                for gi,pi,iou_val,_ in pairs:
                     if((gi in matched_g) or (pi in matched_p)):
                         continue
                     matched_g.add(gi)
                     matched_p.add(pi)
-                    matches.append((gi,pi,val))
+                    matches.append((int(gi),int(pi),float(iou_val)))
                 return matches
-            
+
+            extracted=[]
             class_id_to_name={}
             for bb in bb_img_json_list:
-                if(not isinstance(bb,imgLib.BBimgJson)):
-                    raise TypeError("Error : The bb_img_json_list must be a list of BBimgJson objects!")
+                pred_boxes,pred_classes,pred_scores,gt_boxes,gt_classes,d=_extract_data(bb)
+                extracted.append((bb,pred_boxes,pred_classes,pred_scores,gt_boxes,gt_classes,d))
+
                 try:
                     names=bb.getClsNames()
                     if(isinstance(names,list)):
                         for i,v in enumerate(names):
-                            class_id_to_name.setdefault(i,str(v))
-
-                    d=bb.getDict()
-                    if(isinstance(d,dict)):
-                        gt_block=d.get("YOLOANN_obj_additional_info",{}) or {}
-                        gt_names=gt_block.get("class_names_data",None)
-                        if(isinstance(gt_names,list)):
-                            for i,v in enumerate(gt_names):
-                                class_id_to_name.setdefault(i,str(v))
+                            class_id_to_name.setdefault(int(i),str(v))
                 except Exception:
                     pass
-                
+
+                gt_block=d.get("YOLOANN_obj_additional_info",{}) or {}
+                gt_names=gt_block.get("class_names_data",None)
+                if(isinstance(gt_names,list)):
+                    for i,v in enumerate(gt_names):
+                        class_id_to_name.setdefault(int(i),str(v))
+
+                for cid in gt_classes:
+                    try:
+                        class_id_to_name.setdefault(int(cid),f"class_{int(cid)}")
+                    except Exception:
+                        pass
+                for cid in pred_classes:
+                    try:
+                        class_id_to_name.setdefault(int(cid),f"class_{int(cid)}")
+                    except Exception:
+                        pass
+
             if(len(class_id_to_name)==0):
-                class_id_to_name={0:imgLib.BBimgJson.DEFAULT_CONFUSION_MATRIX_BACKGROUND_LABEL}
-            
-            num_classes=max(class_id_to_name.keys())+1
-            class_names=[class_id_to_name.get(i,f"class_{i}") for i in range(num_classes)]
+                class_id_to_name={0:"class_0"}
+
+            class_names=[class_id_to_name[k] for k in sorted(class_id_to_name.keys())]
+            if(include_background and background_label in class_names):
+                raise ValueError(f'Error : The background_label "{background_label}" is already used as a class name!')
 
             rows=list(class_names)
             cols=list(class_names)
             if(include_background):
-                rows=rows+[background_label]
-                cols=cols+[background_label]
+                rows.append(background_label)
+                cols.append(background_label)
             cm=pd.DataFrame(0,index=rows,columns=cols,dtype=int)
 
-            for bb in bb_img_json_list:
-                if(not isinstance(bb,imgLib.BBimgJson)):
-                    raise TypeError("Error : The bb_img_json_list must be a list of BBimgJson objects!")
-
-                ann=bb.getANN() or {}
-                pred_boxes=ann.get("bboxes",[]) or []
-                pred_classes=ann.get("classes",[]) or []
-
-                d=bb.getDict()
-                gt_boxes=[]
-                gt_classes=[]
-
-                if(isinstance(d,dict)):
-                    gt_block=d.get("YOLOANN_obj_additional_info",{}) or {}
-                    gt_boxes=gt_block.get("ann",[]) or []
-                    gt_classes=gt_block.get("ann_cls_nums",[]) or []
-                
-                matches=greedyMatchViaIoULib(pred_boxes,gt_boxes,iou_threshold)
+            for _,pred_boxes,pred_classes,pred_scores,gt_boxes,gt_classes,_ in extracted:
+                matches=_greedy_match(pred_boxes,pred_classes,pred_scores,gt_boxes,gt_classes,float(iou_threshold))
                 matched_g={gi for gi,_,_ in matches}
-                matched_p={pi for _,pi, _ in matches}
+                matched_p={pi for _,pi,_ in matches}
 
                 for gi,pi,_ in matches:
-                    if((gi<len(gt_classes)) and (pi<len(pred_classes))):
-                        gt_name=class_id_to_name.get(int(gt_classes[gi]),f"class_{int(gt_classes[gi])}")
-                        pr_name=class_id_to_name.get(int(pred_classes[pi]),f"class_{int(pred_classes[pi])}")
-                        if(gt_name not in cm.index):
-                            cm.loc[gt_name]=0
-                        if(pr_name not in cm.columns):
-                            cm[pr_name]=0
-                        cm.loc[gt_name,pr_name]+=1
-                    
+                    gt_name=class_id_to_name.get(int(gt_classes[gi]),f"class_{int(gt_classes[gi])}")
+                    pr_name=class_id_to_name.get(int(pred_classes[pi]),f"class_{int(pred_classes[pi])}")
+                    _ensure_axis(cm,row_name=gt_name,col_name=pr_name)
+                    cm.loc[gt_name,pr_name]+=1
+
                 if(include_background):
                     for gi in range(len(gt_boxes)):
                         if(gi in matched_g):
                             continue
-                        if(gi<len(gt_classes)):
-                            gt_name=class_id_to_name.get(int(gt_classes[gi]),f"class_{int(gt_classes[gi])}")
-                            cm.loc[gt_name,background_label]+=1
-                
-                if(include_background):
+                        gt_name=class_id_to_name.get(int(gt_classes[gi]),f"class_{int(gt_classes[gi])}")
+                        _ensure_axis(cm,row_name=gt_name,col_name=background_label)
+                        cm.loc[gt_name,background_label]+=1
+
                     for pi in range(len(pred_boxes)):
                         if(pi in matched_p):
                             continue
-                        if(pi<len(pred_classes)):
-                            pr_name=class_id_to_name.get(int(pred_classes[pi]),f"class_{int(pred_classes[pi])}")
-                            cm.loc[background_label, pr_name]+=1
-            
+                        pr_name=class_id_to_name.get(int(pred_classes[pi]),f"class_{int(pred_classes[pi])}")
+                        _ensure_axis(cm,row_name=background_label,col_name=pr_name)
+                        cm.loc[background_label,pr_name]+=1
+
             if(orientation==imgLib.BBimgJson.BUILD_CONFUSION_MATRIX_FROM_BB_IMG_JSON_LIST_ORIENTATION_GT_PRED):
                 return cm
-            elif(orientation==imgLib.BBimgJson.BUILD_CONFUSION_MATRIX_FROM_BB_IMG_JSON_LIST_ORIENTATION_PRED_GT or orientation==imgLib.BBimgJson.BUILD_CONFUSION_MATRIX_FROM_BB_IMG_JSON_LIST_ORIENTATION_ULTRALYTICS):
-                return cm.T
-            else:
-                raise ValueError("Error : The orientation must be \"gt_pred\", \"pred_gt\" or \"ultralytics\"!")
+            return cm.T
 
         DEFAULT_MAP_IOU_THRESHOLDS=[round(0.5+0.05*i,2) for i in range(10)]
         DEFAULT_MAP_AP_MODE="interp101"  # COCO-style interpolation by default (101-point)
@@ -28350,39 +28424,40 @@ class imgLib:
             gt_block_key:str="YOLOANN_obj_additional_info",
             gt_bbox_key:str="ann",
             gt_cls_key:str="ann_cls_nums",
-            eps:float=1e-12
+            eps:float=1e-12,
+            class_aware_match:bool=True,
+            macro_average_mode:str="present",
+            background_label:str=DEFAULT_CONFUSION_MATRIX_BACKGROUND_LABEL,
+            strict:bool=True,
         )->dict:
             """
             Compatibility wrapper for simple detection metrics calculation.
 
-            This method forwards to:
-                `imgLib.ensembleModel.AutoPipelineSelector.CalcDetMetricsFromBBimgJsonList`
-
-            It is provided so that callers can use:
-                `imgLib.BBimgJson.CalcDetMetricsFromBBimgJsonList(...)`
-
-            with the same interface as CalcMAPFromBBimgJsonList.
+            Notes:
+                - Matching policy: greedy by descending prediction score, one-to-one matching.
+                - A matched pair is counted as TP only if (IoU>=iou_threshold) and (class matches).
+                    If IoU matches but class differs, it is treated as FP for predicted class and FN for GT class.
 
             Args:
                 bb_img_json_list (list): List of BBimgJson objects.
                 iou_threshold (float): IoU threshold for matching.
-                score_threshold (float, optional): Score threshold to filter predictions before matching.
-                bbox_key (str): Key for predicted bounding boxes in ann dict.
-                cls_key (str): Key for predicted class ids in ann dict.
-                score_key (str): Key for predicted scores in ann dict.
-                gt_block_key (str): Key for GT block in bb.getDict().
-                gt_bbox_key (str): Key for GT bounding boxes in GT block.
-                gt_cls_key (str): Key for GT class ids in GT block.
-                eps (float): Small value to avoid division by zero.
+                score_threshold (float): Minimum score threshold for predictions to consider.
+                bbox_key (str): Key for predicted bounding boxes in ANN.
+                cls_key (str): Key for predicted class numbers in ANN.
+                score_key (str): Key for predicted scores in ANN.
+                gt_block_key (str): Key for ground-truth block in BBimgJson dict.
+                gt_bbox_key (str): Key for ground-truth bounding boxes in GT block.
+                gt_cls_key (str): Key for ground-truth class numbers in GT block.
+                eps (float): Small epsilon to avoid division by zero.
 
             Returns:
                 dict: {
-                        "iou_threshold": float,
-                        "score_threshold": float|None,
-                        "overall": {"tp","fp","fn","precision","recall","f1","det_accuracy","matched_pairs","match_accuracy"},
-                        "per_class": {class_name: {...}, ...},
-                        "confusion": {gt_class_name: {pred_class_name: count, ...}, ...}
-                    }
+                    "iou_threshold": float,
+                    "score_threshold": float|None,
+                    "overall": {"tp","fp","fn","precision","recall","f1","det_accuracy","matched_pairs","match_accuracy"},
+                    "per_class": {class_name: {...}, ...},
+                    "confusion": {gt_class_name: {pred_class_name: count, ...}, ...}
+                }
             """
             return imgLib.ensembleModel.AutoPipelineSelector.CalcDetMetricsFromBBimgJsonList(
                 bb_img_json_list=bb_img_json_list,
@@ -28394,9 +28469,13 @@ class imgLib:
                 gt_block_key=gt_block_key,
                 gt_bbox_key=gt_bbox_key,
                 gt_cls_key=gt_cls_key,
-                eps=eps
+                eps=eps,
+                class_aware_match=class_aware_match,
+                macro_average_mode=macro_average_mode,
+                background_label=background_label,
+                strict=strict,
             )
-
+            
     @_protectedClass.fileStoreMyLibRegister
     class wrapperYOLOANNAll(_FileStore.FileStoreParser):
         """
@@ -31780,14 +31859,30 @@ class imgLib:
                 DEFAULT_NEAR_ZERO=1e-16
                 
                 @staticmethod
-                def modelEvaluation4ConfusionMatrix(cm_mat:np.ndarray,names_dict:dict=None,is_transpose:bool=True,NEAR_ZERO:float=DEFAULT_NEAR_ZERO):
+                def modelEvaluation4ConfusionMatrix(
+                    cm_mat:np.ndarray,
+                    names_dict:dict=None,
+                    is_transpose:bool=None,
+                    orientation:str=None,
+                    background_label:str="__background__",
+                    exclude_background_from_macro:bool=True,
+                    NEAR_ZERO:float=DEFAULT_NEAR_ZERO
+                ):
                     """
                     Evaluates a confusion matrix.
+
+                    Notes:
+                        - Internal evaluation is always performed on a GT x Predict matrix.
+                        - `orientation` is preferred over `is_transpose`.
+                        - `is_transpose=True` means the input matrix is Predict x GT (Ultralytics-like) and must be transposed.
 
                     Args:
                         cm_mat (np.ndarray): Confusion matrix.
                         names_dict (dict): Dictionary of class names.
                         is_transpose (bool): Whether to transpose the confusion matrix.
+                        orientation (str): Orientation of the confusion matrix, "pred_gt" or "gt_pred".
+                        background_label (str): Label for the background class.
+                        exclude_background_from_macro (bool): Whether to exclude the background class from macro metrics.
                         NEAR_ZERO (float): Near zero value.
 
                     Returns:
@@ -31795,54 +31890,107 @@ class imgLib:
                     """
                     if(names_dict is None):
                         names_dict={}
-                    else:
-                        zip_args=pyExLib.safety_deepcopy(names_dict)
+                    if(not isinstance(cm_mat,np.ndarray)):
+                        cm_mat=np.array(cm_mat)
 
-                    tmp_cm_mat=cm_mat.copy()
-                    if(is_transpose):
-                        tmp_cm_mat=tmp_cm_mat.T
+                    tmp_cm_mat=np.array(cm_mat,copy=True)
+                    if(tmp_cm_mat.ndim!=2 or tmp_cm_mat.shape[0]!=tmp_cm_mat.shape[1]):
+                        raise ValueError("cm_mat must be a square 2D matrix.")
 
-                    num_classes=tmp_cm_mat.shape[0]
+                    ori_gt_pred=imgLib.BBimgJson.BUILD_CONFUSION_MATRIX_FROM_BB_IMG_JSON_LIST_ORIENTATION_GT_PRED
+                    ori_pred_gt=imgLib.BBimgJson.BUILD_CONFUSION_MATRIX_FROM_BB_IMG_JSON_LIST_ORIENTATION_PRED_GT
+                    ori_ultra=imgLib.BBimgJson.BUILD_CONFUSION_MATRIX_FROM_BB_IMG_JSON_LIST_ORIENTATION_ULTRALYTICS
+
+                    if(orientation is None):
+                        if(isinstance(is_transpose,bool)):
+                            orientation=ori_pred_gt if is_transpose else ori_gt_pred
+                        else:
+                            orientation=ori_gt_pred
+                    if(orientation not in (ori_gt_pred,ori_pred_gt,ori_ultra)):
+                        raise ValueError('orientation must be "gt_pred", "pred_gt", or "ultralytics".')
+
+                    gt_pred_mat=tmp_cm_mat.T if orientation in (ori_pred_gt,ori_ultra) else tmp_cm_mat
+
+                    num_classes=gt_pred_mat.shape[0]
                     labels=[]
                     for i in range(num_classes):
-                        labels.append(names_dict.get(i,str(i)))
+                        labels.append(names_dict.get(i,names_dict.get(float(i),str(i))))
 
                     r={}
-                    
-                    tp_sum=np.diag(tmp_cm_mat).sum()
-                    all_sum=tmp_cm_mat.sum()
-                    accuracy=tp_sum/all_sum
+                    tp_sum=int(np.diag(gt_pred_mat).sum())
+                    all_sum=int(gt_pred_mat.sum())
+                    accuracy=0.0 if all_sum<=0 else float(tp_sum)/(float(all_sum)+float(NEAR_ZERO))
 
-                    r["confusion_matrix"]=cm_mat.tolist()
-                    r["is_transpose"]=is_transpose
+                    r["confusion_matrix"]=gt_pred_mat.tolist()
+                    r["input_orientation"]=orientation
+                    r["returned_confusion_matrix_orientation"]=ori_gt_pred
+                    r["is_transpose"]=bool(orientation in (ori_pred_gt,ori_ultra))
                     r["all_sum"]=all_sum
                     r["accuracy"]=accuracy
                     r["labels"]=labels
-                    
-                    r["class_data"]={}
-                    for i,class_name in enumerate(labels):
-                        r["class_data"][class_name]={}
-                        
-                        tp_num=tmp_cm_mat[i,i]
-                        fp_num=tmp_cm_mat[:,i].sum()-tp_num
-                        fn_num=tmp_cm_mat[i,:].sum()-tp_num
-                        tn_num=tmp_cm_mat.sum()-(tp_num+fp_num+fn_num)
-                        
-                        r["class_data"][class_name]["class_name"]=class_name
-                        r["class_data"][class_name]["TP"]=tp_num
-                        r["class_data"][class_name]["FP"]=fp_num
-                        r["class_data"][class_name]["FN"]=fn_num
-                        r["class_data"][class_name]["TN"]=tn_num
 
-                        precision_i=tp_num/(tp_num+fp_num+NEAR_ZERO)
-                        recall_i=tp_num/(tp_num+fn_num+NEAR_ZERO)
-                        f1_i=2*precision_i*recall_i/(precision_i+recall_i+NEAR_ZERO)
-                        
-                        r["class_data"][class_name]["precision"]=precision_i
-                        r["class_data"][class_name]["recall"]=recall_i
-                        r["class_data"][class_name]["f1"]=f1_i
+                    r["class_data"]={}
+                    macro_precision_vals=[]
+                    macro_recall_vals=[]
+                    macro_f1_vals=[]
+                    weighted_precision_sum=0.0
+                    weighted_recall_sum=0.0
+                    weighted_f1_sum=0.0
+                    weighted_support=0.0
+                    fp_sum=0
+                    fn_sum=0
+
+                    for i,class_name in enumerate(labels):
+                        tp_num=int(gt_pred_mat[i,i])
+                        fp_num=int(gt_pred_mat[:,i].sum()-tp_num)
+                        fn_num=int(gt_pred_mat[i,:].sum()-tp_num)
+                        tn_num=int(gt_pred_mat.sum()-(tp_num+fp_num+fn_num))
+                        support=int(gt_pred_mat[i,:].sum())
+
+                        precision_i=0.0 if (tp_num+fp_num)<=0 else float(tp_num)/(float(tp_num+fp_num)+float(NEAR_ZERO))
+                        recall_i=0.0 if (tp_num+fn_num)<=0 else float(tp_num)/(float(tp_num+fn_num)+float(NEAR_ZERO))
+                        f1_i=0.0 if (precision_i+recall_i)<=0 else float(2.0*precision_i*recall_i)/(float(precision_i+recall_i)+float(NEAR_ZERO))
+
+                        r["class_data"][class_name]={
+                            "class_name":class_name,
+                            "TP":tp_num,
+                            "FP":fp_num,
+                            "FN":fn_num,
+                            "TN":tn_num,
+                            "support":support,
+                            "precision":precision_i,
+                            "recall":recall_i,
+                            "f1":f1_i,
+                        }
+
+                        fp_sum+=fp_num
+                        fn_sum+=fn_num
+
+                        if(not (exclude_background_from_macro and class_name==background_label)):
+                            macro_precision_vals.append(precision_i)
+                            macro_recall_vals.append(recall_i)
+                            macro_f1_vals.append(f1_i)
+                            weighted_precision_sum+=precision_i*support
+                            weighted_recall_sum+=recall_i*support
+                            weighted_f1_sum+=f1_i*support
+                            weighted_support+=support
+
+                    def _mean(vals):
+                        if(len(vals)==0):
+                            return None
+                        return float(sum(vals))/float(len(vals))
+
+                    r["tp_sum"]=int(tp_sum)
+                    r["fp_sum"]=int(fp_sum)
+                    r["fn_sum"]=int(fn_sum)
+                    r["macro_precision"]= _mean(macro_precision_vals)
+                    r["macro_recall"]= _mean(macro_recall_vals)
+                    r["macro_f1"]= _mean(macro_f1_vals)
+                    r["weighted_precision"]= None if weighted_support<=0 else float(weighted_precision_sum)/(float(weighted_support)+float(NEAR_ZERO))
+                    r["weighted_recall"]= None if weighted_support<=0 else float(weighted_recall_sum)/(float(weighted_support)+float(NEAR_ZERO))
+                    r["weighted_f1"]= None if weighted_support<=0 else float(weighted_f1_sum)/(float(weighted_support)+float(NEAR_ZERO))
                     return r
-                
+
                 RESULT_YOLO_TRAIN_EVALUATION_MODE_RAW="raw"
                 RESULT_YOLO_TRAIN_EVALUATION_MODE_MODEL_DIRECTORY="model_directory"
                 DEFAULT_YOLO_MODEL_PT_PATH="weights/best.pt"
@@ -33359,17 +33507,166 @@ class imgLib:
             OUTPUT_MODE_BB_IMG_JSON="BBimgJson"
             OUTPUT_MODE_WRAPPER_YOLOANN_ALL="wrapperYOLOANNAll"
 
-            def __init__(self,predict_data):
+            INPUT_DATA_TYPE_AUTO="auto"
+            INPUT_DATA_TYPE_SINGLE="single"
+            INPUT_DATA_TYPE_MULTI="multi"
+
+            INPUT_DATA_TYPE_LIST=(
+                INPUT_DATA_TYPE_AUTO,
+                INPUT_DATA_TYPE_SINGLE,
+                INPUT_DATA_TYPE_MULTI,
+            )
+
+            @staticmethod
+            def _normalizeInputDataType(input_data_type):
+                """
+                Normalizes input_data_type.
+
+                Args:
+                    input_data_type (str or None): Requested input data type.
+
+                Returns:
+                    str: Normalized input data type.
+                """
+                if(input_data_type is None):
+                    return imgLib.ensembleModel._ProcYOLOPredcitWrapperPredictData.INPUT_DATA_TYPE_AUTO
+                if(not isinstance(input_data_type,str)):
+                    raise TypeError("Error : input_data_type must be str.")
+                v=str(input_data_type).strip()
+                if(v not in imgLib.ensembleModel._ProcYOLOPredcitWrapperPredictData.INPUT_DATA_TYPE_LIST):
+                    raise ValueError(
+                        "Error : Unsupported input_data_type: "
+                        f"{input_data_type}. "
+                        f"Supported values are {imgLib.ensembleModel._ProcYOLOPredcitWrapperPredictData.INPUT_DATA_TYPE_LIST}."
+                    )
+                return v
+
+            @staticmethod
+            def _isWrapperLikeSingleInput(x):
+                """
+                Returns whether x is one of the wrapper-like single input types.
+               
+                Args:
+                    x: The input to check.
+
+                Returns:
+                    bool: True if x is an instance of any of the wrapper-like single input types, False otherwise.
+                """
+                return isinstance(
+                    x,
+                    (
+                        imgLib.YOLOANN,
+                        imgLib.BBimgJson,
+                        imgLib.wrapperYOLOANN,
+                        imgLib.wrapperYOLOANNAll,
+                    )
+                )
+
+            @classmethod
+            def _inferResolvedInputDataType(cls,predict_data,mode):
+                """
+                Infers resolved input_data_type from predict_data and detected mode.
+
+                Args:
+                    predict_data: The input data for prediction.
+
+                Returns:
+                    str: Inferred input data type.
+                """
+                if(mode in (
+                    cls.MODE_YOLOANN,
+                    cls.MODE_BB_IMG_JSON,
+                    cls.MODE_WRAPPER_YOLOANN,
+                    cls.MODE_WRAPPER_YOLOANN_ALL,
+                )):
+                    return cls.INPUT_DATA_TYPE_SINGLE
+
+                if(isinstance(predict_data,(list,tuple))):
+                    return cls.INPUT_DATA_TYPE_MULTI
+
+                return cls.INPUT_DATA_TYPE_SINGLE
+
+            @classmethod
+            def _validateExplicitInputDataType(
+                cls,
+                predict_data,
+                mode,
+                input_data_type,
+                strict_input_data_type_flag=True,
+            ):
+                """
+                Validates explicit input_data_type against actual predict_data.
+
+                Args:
+                    predict_data: The input data for prediction.
+                    mode: Detected mode of predict_data.
+                    input_data_type: Explicitly requested input data type.
+                    strict_input_data_type_flag: If True, validates input_data_type strictly against predict_data.
+
+                Returns:
+                    str: Resolved input data type.
+                """
+                resolved_input_data_type=cls._inferResolvedInputDataType(predict_data,mode)
+
+                if(not strict_input_data_type_flag):
+                    return resolved_input_data_type
+
+                if(input_data_type==cls.INPUT_DATA_TYPE_AUTO):
+                    return resolved_input_data_type
+
+                if(input_data_type==cls.INPUT_DATA_TYPE_SINGLE):
+                    if(isinstance(predict_data,(list,tuple))):
+                        raise TypeError(
+                            "Error : input_data_type='single' was specified, "
+                            "but predict_data is list/tuple."
+                        )
+                    return resolved_input_data_type
+
+                if(input_data_type==cls.INPUT_DATA_TYPE_MULTI):
+                    if(not isinstance(predict_data,(list,tuple))):
+                        raise TypeError(
+                            "Error : input_data_type='multi' was specified, "
+                            "but predict_data is not list/tuple."
+                        )
+                    if(len(predict_data)==0):
+                        raise ValueError(
+                            "Error : input_data_type='multi' requires non-empty predict_data."
+                        )
+
+                    invalid_ids=[
+                        i for i,x in enumerate(predict_data)
+                        if(cls._isWrapperLikeSingleInput(x))
+                    ]
+                    if(len(invalid_ids)>=1):
+                        raise TypeError(
+                            "Error : input_data_type='multi' currently does not support "
+                            "list/tuple items of YOLOANN/BBimgJson/wrapperYOLOANN/wrapperYOLOANNAll. "
+                            f"Invalid indices={invalid_ids}"
+                        )
+                    return resolved_input_data_type
+
+                raise ValueError(f"Error : Unsupported input_data_type: {input_data_type}")
+
+            def __init__(
+                self,
+                predict_data,
+                input_data_type:str="auto",
+                strict_input_data_type_flag:bool=True
+            ):
                 """
                 Initializes the wrapper by detecting the type of predict_data and extracting a unified temporary representation.
 
                 Args:
                     predict_data: The input data for prediction, which can be of various types (YOLOANN, BBimgJson, wrapperYOLOANN, wrapperYOLOANNAll, or others). The wrapper will detect the type and extract a temporary representation accordingly.
+                    input_data_type (str): Requested input data type. Supported values are "auto", "single", and "multi".
+                    strict_input_data_type_flag (bool): If True, validates input_data_type strictly against predict_data.
                 """
                 self.__predict_data=predict_data
                 self.__mode=None
                 self.__tmp_predict_data=None
                 self.__raw_yolo_ann=None
+                self.__input_data_type=self._normalizeInputDataType(input_data_type)
+                self.__resolved_input_data_type=None
                 
                 if(isinstance(predict_data,imgLib.YOLOANN)):
                     self.__mode=imgLib.ensembleModel._ProcYOLOPredcitWrapperPredictData.MODE_YOLOANN
@@ -33427,6 +33724,13 @@ class imgLib:
                     self.__mode=imgLib.ensembleModel._ProcYOLOPredcitWrapperPredictData.MODE_OTHERS
                     self.__tmp_predict_data=predict_data
 
+                self.__resolved_input_data_type=self._validateExplicitInputDataType(
+                    predict_data=self.__predict_data,
+                    mode=self.__mode,
+                    input_data_type=self.__input_data_type,
+                    strict_input_data_type_flag=strict_input_data_type_flag,
+                )
+
             @property
             def mode(self):
                 """
@@ -33471,6 +33775,26 @@ class imgLib:
                     imgLib.YOLOANN or None: The raw YOLOANN object used for output restoration.
                 """
                 return self.__raw_yolo_ann
+
+            @property
+            def input_data_type(self):
+                """
+                Returns explicitly requested input_data_type.
+
+                Returns:
+                    str: Explicitly requested input_data_type.
+                """
+                return self.__input_data_type
+
+            @property
+            def resolved_input_data_type(self):
+                """
+                Returns resolved input_data_type inferred from actual predict_data.
+                
+                Returns:
+                    str: Resolved input_data_type.
+                """
+                return self.__resolved_input_data_type
 
             def getDefaultOutputMode(self):
                 """
@@ -33737,6 +34061,8 @@ class imgLib:
             additional_dict:dict=None,
             yolo_model_config:dict=None,
             other_input_img_save_path:str=None,
+            input_data_type:str="auto",
+            strict_input_data_type_flag:bool=True,
         ):
             """
             Creates a GT-less BBimgJson directly from generic input data and a raw procYOLOPredict result dict.
@@ -33748,7 +34074,9 @@ class imgLib:
                 additional_dict (dict, optional): Additional dict to merge into BBimgJson.
                 yolo_model_config (dict, optional): Extra model config to include.
                 other_input_img_save_path (str, optional): Real image save destination used when
-                    ``predict_item`` does not already contain path information.
+                    `predict_item` does not already contain path information.
+                input_data_type (str): Explicitly requested input data type for validation.
+                strict_input_data_type_flag (bool): If True, validates input_data_type strictly against predict_item.
 
             Returns:
                 imgLib.BBimgJson: BBimgJson object without GT labels.
@@ -33829,6 +34157,8 @@ class imgLib:
             bb_img_json_iou_args:dict=None,
             yolo_model_config:dict=None,
             other_input_img_save_path:str=None,
+            input_data_type:str="auto",
+            strict_input_data_type_flag:bool=True,
         ):
             """
             General wrapper around `procYOLOPredict` that normalizes several input formats and optionally restores the prediction result into a higher-level output object.
@@ -33938,6 +34268,16 @@ class imgLib:
                 other_input_img_save_path (str, optional):
                     Save destination path or directory used when the input is a raw non `YOLOANN` input that does not already contain path information. This is used to save the input image and provide a real path for output objects that require it.
 
+                input_data_type (str):
+                    Explicit top-level input structure hint. Supported values are "auto", "single", and "multi".
+
+                    - "auto": infer automatically from predict_data
+                    - "single": require non-list/tuple single input
+                    - "multi": require list/tuple multi input
+
+                strict_input_data_type_flag (bool):
+                    Whether to validate input_data_type strictly against the actual predict_data structure.
+
             Returns:
                 list | dict | imgLib.wrapperYOLOANNAll:
                     Output formatted according to `output_mode`.
@@ -33961,17 +34301,23 @@ class imgLib:
             Raises:
                 ValueError:
                     If `output_mode` is not supported.
+                    Also raised when `input_data_type` is invalid or when `input_data_type="multi"` is used with an empty input list/tuple.
 
                 TypeError:
                     If the requested restoration mode requires an internal `YOLOANN`- compatible source but the given input cannot provide one.
                     In particular, raw non-`YOLOANN` inputs do not support`"YOLOANNResult"` or `"wrapperYOLOANNAll"` restoration unless such support is explicitly implemented.
+                    Also raised when strict input_data_type validation fails.
 
             Notes:
                 - For raw non-`YOLOANN` inputs, `output_mode="BBimgJson"` produces prediction-only `BBimgJson` objects without ground-truth labels.
                 - For raw non-`YOLOANN` inputs, `output_mode="auto"` falls back to`"raw"`.
                 - The exact raw output structure depends on the behavior of `procYOLOPredict`. In single-output cases this is typically a `list[dict]`, while multi-output modes may return `dict[str, list[dict]]`.
             """
-            pd_obj=imgLib.ensembleModel._ProcYOLOPredcitWrapperPredictData(predict_data)
+            pd_obj=imgLib.ensembleModel._ProcYOLOPredcitWrapperPredictData(
+                predict_data=predict_data,
+                input_data_type=input_data_type,
+                strict_input_data_type_flag=strict_input_data_type_flag,
+            )
             results=imgLib.ensembleModel.procYOLOPredict(
                 models=models,
                 mode=mode,
@@ -35913,16 +36259,20 @@ class imgLib:
                 gt_block_key:str="YOLOANN_obj_additional_info",
                 gt_bbox_key:str="ann",
                 gt_cls_key:str="ann_cls_nums",
-                eps:float=1e-12
+                eps:float=1e-12,
+                class_aware_match:bool=True,
+                macro_average_mode:str="present",
+                background_label:str="__background__",
+                strict:bool=True,
             )->dict:
                 """
                 Calculates simple detection stats (precision/recall/F1 etc.) from BBimgJson list.
 
                 Notes:
                     - Matching policy: greedy by descending prediction score, one-to-one matching.
-                    - A matched pair is counted as TP only if (IoU>=iou_threshold) and (class matches).
-                      If IoU matches but class differs, it is treated as FP for predicted class and FN for GT class.
-
+                    - By default (`class_aware_match=True`), TP/FP/FN are counted with class-aware matching.
+                    - `det_accuracy` is kept for backward compatibility and is identical to Jaccard/CSI.
+                    
                 Args:
                     bb_img_json_list (list): List of BBimgJson objects.
                     iou_threshold (float): IoU threshold for matching.
@@ -35934,6 +36284,10 @@ class imgLib:
                     gt_bbox_key (str): Key for ground-truth bounding boxes in GT block.
                     gt_cls_key (str): Key for ground-truth class numbers in GT block.
                     eps (float): Small epsilon to avoid division by zero.
+                    class_aware_match (bool): Whether to require class match for TP/FP/FN counting.
+                    macro_average_mode (str): "present" to average over classes present in GT, "support" to average over all classes with support>0.
+                    background_label (str): Class name to treat as background (ignored in metrics).
+                    strict (bool): Whether to strictly check for consistency in predicted/GT data lengths and raise
 
                 Returns:
                     dict: {
@@ -35944,169 +36298,214 @@ class imgLib:
                         "confusion": {gt_class_name: {pred_class_name: count, ...}, ...}
                     }
                 """
-                # Build class-id to name map (best-effort, same policy as CalcMAPFromBBimgJsonList)
+                if(not isinstance(bb_img_json_list,list)):
+                    raise TypeError("bb_img_json_list must be a list of BBimgJson objects.")
+                if(not isinstance(iou_threshold,(int,float)) or not (0.0<=float(iou_threshold)<=1.0)):
+                    raise ValueError("iou_threshold must be between 0 and 1.")
+                if(score_threshold is not None and not isinstance(score_threshold,(int,float))):
+                    raise TypeError("score_threshold must be None or a numeric value.")
+                if(macro_average_mode not in ["present","support"]):
+                    raise ValueError("macro_average_mode must be 'present' or 'support'.")
+
                 class_id_to_name={}
-                for bb in bb_img_json_list:
+
+                def _clsname(cid:int)->str:
+                    return class_id_to_name.get(int(cid),f"class_{int(cid)}")
+
+                def _extract(bb):
                     if(not isinstance(bb,imgLib.BBimgJson)):
                         raise TypeError("bb_img_json_list must be a list of BBimgJson objects.")
+                    ann=bb.getANN() or {}
+                    pred_boxes=list(ann.get(bbox_key,[]) or [])
+                    pred_classes=list(ann.get(cls_key,[]) or [])
+                    pred_scores=list(ann.get(score_key,[]) or [])
+                    d=bb.getDict() or {}
+                    gt_block=d.get(gt_block_key,{}) or {}
+                    gt_boxes=list(gt_block.get(gt_bbox_key,[]) or [])
+                    gt_classes=list(gt_block.get(gt_cls_key,[]) or [])
+
+                    if(strict and (len(pred_boxes)!=len(pred_classes))):
+                        raise ValueError(f"Prediction bbox/class length mismatch: {len(pred_boxes)} != {len(pred_classes)}")
+                    if(strict and (len(gt_boxes)!=len(gt_classes))):
+                        raise ValueError(f"GT bbox/class length mismatch: {len(gt_boxes)} != {len(gt_classes)}")
+
+                    n_pred=min(len(pred_boxes),len(pred_classes))
+                    pred_boxes=pred_boxes[:n_pred]
+                    pred_classes=pred_classes[:n_pred]
+                    if(len(pred_scores)<n_pred):
+                        pred_scores=pred_scores+[1.0]*(n_pred-len(pred_scores))
+                    pred_scores=pred_scores[:n_pred]
+
+                    n_gt=min(len(gt_boxes),len(gt_classes))
+                    gt_boxes=gt_boxes[:n_gt]
+                    gt_classes=gt_classes[:n_gt]
+                    return pred_boxes,pred_classes,pred_scores,gt_boxes,gt_classes,d
+
+                extracted=[]
+                for bb in bb_img_json_list:
+                    pred_boxes,pred_classes,pred_scores,gt_boxes,gt_classes,d=_extract(bb)
+                    extracted.append((bb,pred_boxes,pred_classes,pred_scores,gt_boxes,gt_classes,d))
                     try:
                         names=bb.getClsNames()
                         if(isinstance(names,list)):
                             for i,v in enumerate(names):
                                 class_id_to_name.setdefault(int(i),str(v))
-                        d=bb.getDict()
-                        if(isinstance(d,dict)):
-                            gt_block=d.get(gt_block_key,{}) or {}
-                            gt_names=gt_block.get("class_names_data",None)
-                            if(isinstance(gt_names,list)):
-                                for i,v in enumerate(gt_names):
-                                    class_id_to_name.setdefault(int(i),str(v))
                     except Exception:
                         pass
+                    gt_block=d.get(gt_block_key,{}) or {}
+                    gt_names=gt_block.get("class_names_data",None)
+                    if(isinstance(gt_names,list)):
+                        for i,v in enumerate(gt_names):
+                            class_id_to_name.setdefault(int(i),str(v))
+                    for cid in list(gt_classes)+list(pred_classes):
+                        try:
+                            class_id_to_name.setdefault(int(cid),f"class_{int(cid)}")
+                        except Exception:
+                            pass
 
                 if(len(class_id_to_name)==0):
                     class_id_to_name={0:"class_0"}
 
-                def _clsname(cid:int)->str:
-                    return class_id_to_name.get(int(cid),f"class_{int(cid)}")
-
-                # counters
                 per_class={}
-                confusion={}
-                matched_pairs=0
-                correct_pairs=0
+                for cid in sorted(class_id_to_name.keys()):
+                    per_class[_clsname(cid)]={"tp":0,"fp":0,"fn":0,"support":0,"pred_count":0}
 
-                for bb in bb_img_json_list:
-                    ann=bb.getANN() or {}
-                    pred_boxes=ann.get(bbox_key,[]) or []
-                    pred_classes=ann.get(cls_key,[]) or []
-                    pred_scores=ann.get(score_key,[]) or []
+                for _,pred_boxes,pred_classes,pred_scores,gt_boxes,gt_classes,_ in extracted:
+                    gt_idx_by_class={}
+                    pred_idx_by_class={}
 
-                    n_pred=min(len(pred_boxes),len(pred_classes))
-                    if(len(pred_scores)<n_pred):
-                        pred_scores=list(pred_scores)+[1.0]*(n_pred-len(pred_scores))
-                    n_pred=min(n_pred,len(pred_scores))
+                    for gi,cid in enumerate(gt_classes):
+                        cid=int(cid)
+                        cname=_clsname(cid)
+                        per_class.setdefault(cname,{"tp":0,"fp":0,"fn":0,"support":0,"pred_count":0})
+                        per_class[cname]["support"]+=1
+                        gt_idx_by_class.setdefault(cid,[]).append(gi)
 
-                    # build pred list
-                    preds=[]
-                    for i in range(n_pred):
-                        try:
-                            sc=float(pred_scores[i])
-                        except Exception:
-                            sc=0.0
-                        if(score_threshold is not None and sc<float(score_threshold)):
+                    for pi,cid in enumerate(pred_classes):
+                        sc=float(pred_scores[pi]) if pi<len(pred_scores) else 0.0
+                        if((score_threshold is not None) and (sc<float(score_threshold))):
                             continue
-                        try:
-                            cid=int(pred_classes[i])
-                        except Exception:
-                            continue
-                        preds.append((sc,cid,pred_boxes[i]))
-                    preds=sorted(preds,key=lambda x:x[0],reverse=True)
+                        cid=int(cid)
+                        cname=_clsname(cid)
+                        per_class.setdefault(cname,{"tp":0,"fp":0,"fn":0,"support":0,"pred_count":0})
+                        per_class[cname]["pred_count"]+=1
+                        pred_idx_by_class.setdefault(cid,[]).append(pi)
 
-                    d=bb.getDict() or {}
-                    gt_block=d.get(gt_block_key,{}) or {}
-                    gt_boxes=gt_block.get(gt_bbox_key,[]) or []
-                    gt_classes=gt_block.get(gt_cls_key,[]) or []
-                    n_gt=min(len(gt_boxes),len(gt_classes))
-                    gt_matched=[False]*n_gt
+                    if(class_aware_match):
+                        class_ids=sorted(set(list(gt_idx_by_class.keys())+list(pred_idx_by_class.keys())))
+                    else:
+                        class_ids=sorted(set(list(gt_idx_by_class.keys())+list(pred_idx_by_class.keys())))
+                        # class-unaware mode: evaluate on the union, but assign counts to predicted/GT classes.
 
-                    # ensure entries exist
-                    for i in range(n_gt):
-                        try:
-                            tcid=int(gt_classes[i])
-                        except Exception:
-                            continue
-                        per_class.setdefault(_clsname(tcid),{"tp":0,"fp":0,"fn":0,"support":0})
-                        per_class[_clsname(tcid)]["support"]+=1
-
-                    for sc,pcid,pbox in preds:
-                        # find best unmatched GT (any class) by IoU
-                        best_iou=-1.0
-                        best_j=-1
-                        for j in range(n_gt):
-                            if(gt_matched[j]):
-                                continue
-                            try:
-                                iou_val=imgLib.IoULib.IoU(gt_boxes[j],pbox)
-                            except Exception:
-                                iou_val=0.0
-                            if(iou_val>best_iou):
-                                best_iou=iou_val
-                                best_j=j
-
-                        pcn=_clsname(pcid)
-                        per_class.setdefault(pcn,{"tp":0,"fp":0,"fn":0,"support":0})
-
-                        if(best_iou>=float(iou_threshold) and best_j>=0):
-                            gt_matched[best_j]=True
-                            matched_pairs+=1
-                            try:
-                                tcid=int(gt_classes[best_j])
-                            except Exception:
-                                tcid=None
-                            tcn=_clsname(tcid) if tcid is not None else "class_unknown"
-
-                            confusion.setdefault(tcn,{})
-                            confusion[tcn][pcn]=confusion[tcn].get(pcn,0)+1
-
-                            if(tcid is not None and int(pcid)==int(tcid)):
-                                per_class[tcn]["tp"]+=1
-                                correct_pairs+=1
-                            else:
-                                # mis-classified match: FP for predicted class, FN for true class
-                                per_class[pcn]["fp"]+=1
-                                if(tcid is not None):
-                                    per_class.setdefault(tcn,{"tp":0,"fp":0,"fn":0,"support":0})
-                                    per_class[tcn]["fn"]+=1
+                    used_gt_global=set()
+                    for cid in class_ids:
+                        pred_idx_list=pred_idx_by_class.get(cid,[])
+                        if(class_aware_match):
+                            gt_idx_list=gt_idx_by_class.get(cid,[])
                         else:
-                            # unmatched prediction -> FP
-                            per_class[pcn]["fp"]+=1
+                            gt_idx_list=[gi for gi in range(len(gt_boxes)) if gi not in used_gt_global]
 
-                    # remaining GT -> FN
-                    for j in range(n_gt):
-                        if(gt_matched[j]):
-                            continue
-                        try:
-                            tcid=int(gt_classes[j])
-                        except Exception:
-                            continue
-                        tcn=_clsname(tcid)
-                        per_class.setdefault(tcn,{"tp":0,"fp":0,"fn":0,"support":0})
-                        per_class[tcn]["fn"]+=1
+                        pred_idx_list=sorted(pred_idx_list,key=lambda i:(float(pred_scores[i]) if i<len(pred_scores) else 0.0,-int(i)),reverse=True)
+                        used_gt_local=set()
 
-                # compute metrics
+                        for pi in pred_idx_list:
+                            best_gi=None
+                            best_iou=0.0
+                            for gi in gt_idx_list:
+                                if(class_aware_match):
+                                    if(gi in used_gt_local):
+                                        continue
+                                else:
+                                    if(gi in used_gt_global):
+                                        continue
+                                iou_val=imgLib.IoULib.IoU(gt_boxes[gi],pred_boxes[pi])
+                                if(iou_val>best_iou):
+                                    best_iou=float(iou_val)
+                                    best_gi=gi
+                            pred_name=_clsname(int(pred_classes[pi]))
+                            if((best_gi is not None) and (best_iou>=float(iou_threshold))):
+                                gt_name=_clsname(int(gt_classes[best_gi]))
+                                if(class_aware_match or int(pred_classes[pi])==int(gt_classes[best_gi])):
+                                    per_class[pred_name]["tp"]+=1
+                                else:
+                                    per_class[pred_name]["fp"]+=1
+                                    per_class[gt_name]["fn"]+=1
+                                if(class_aware_match):
+                                    used_gt_local.add(best_gi)
+                                else:
+                                    used_gt_global.add(best_gi)
+                            else:
+                                per_class[pred_name]["fp"]+=1
+
+                        if(class_aware_match):
+                            for gi in gt_idx_list:
+                                if(gi not in used_gt_local):
+                                    gt_name=_clsname(int(gt_classes[gi]))
+                                    per_class[gt_name]["fn"]+=1
+
+                    if(not class_aware_match):
+                        for gi in range(len(gt_boxes)):
+                            if(gi not in used_gt_global):
+                                gt_name=_clsname(int(gt_classes[gi]))
+                                per_class[gt_name]["fn"]+=1
+
+                def _safe_div(a,b):
+                    return 0.0 if float(b)<=0.0 else float(a)/(float(b)+float(eps))
+
+                for cname,v in per_class.items():
+                    tp=v.get("tp",0)
+                    fp=v.get("fp",0)
+                    fn=v.get("fn",0)
+                    v["precision"]=_safe_div(tp,tp+fp)
+                    v["recall"]=_safe_div(tp,tp+fn)
+                    v["f1"]=_safe_div(2*tp,2*tp+fp+fn)
+
+                metric_classes=[]
+                for cname,v in per_class.items():
+                    present=((v.get("support",0)>0) or (v.get("pred_count",0)>0) or (v.get("tp",0)>0) or (v.get("fp",0)>0) or (v.get("fn",0)>0))
+                    if(macro_average_mode=="present"):
+                        if(present):
+                            metric_classes.append(cname)
+                    else:
+                        if(v.get("support",0)>0):
+                            metric_classes.append(cname)
+
+                def _mean(vals):
+                    return None if len(vals)==0 else float(sum(vals))/float(len(vals))
+
                 overall_tp=sum(v.get("tp",0) for v in per_class.values())
                 overall_fp=sum(v.get("fp",0) for v in per_class.values())
                 overall_fn=sum(v.get("fn",0) for v in per_class.values())
-
-                def _safe_div(a,b):
-                    return float(a)/(float(b)+eps)
-
                 overall_precision=_safe_div(overall_tp,overall_tp+overall_fp)
                 overall_recall=_safe_div(overall_tp,overall_tp+overall_fn)
                 overall_f1=_safe_div(2*overall_tp,2*overall_tp+overall_fp+overall_fn)
-                det_accuracy=_safe_div(overall_tp,overall_tp+overall_fp+overall_fn)
-                match_accuracy=_safe_div(correct_pairs,matched_pairs) if matched_pairs>0 else None
+                jaccard=_safe_div(overall_tp,overall_tp+overall_fp+overall_fn)
 
-                # per-class derived
-                for k,v in per_class.items():
-                    tp=v.get("tp",0); fp=v.get("fp",0); fn=v.get("fn",0)
-                    v["precision"]=_safe_div(tp,tp+fp) if (tp+fp)>0 else None
-                    v["recall"]=_safe_div(tp,tp+fn) if (tp+fn)>0 else None
-                    v["f1"]=_safe_div(2*tp,2*tp+fp+fn) if (2*tp+fp+fn)>0 else None
+                confusion_df=imgLib.BBimgJson.BuildConfusionMatrixFromBBimgJsonList(
+                    bb_img_json_list=bb_img_json_list,
+                    iou_threshold=float(iou_threshold),
+                    include_background=True,
+                    background_label=background_label,
+                    orientation=imgLib.BBimgJson.BUILD_CONFUSION_MATRIX_FROM_BB_IMG_JSON_LIST_ORIENTATION_GT_PRED,
+                    class_aware_match=False,
+                    match_by_score=True,
+                    score_key=score_key,
+                    strict=strict,
+                )
 
-                # macro averages (ignore None)
-                def _mean(vals):
-                    vv=[x for x in vals if isinstance(x,(int,float))]
-                    return float(sum(vv))/float(len(vv)) if len(vv)>0 else None
-
-                macro_precision=_mean([v.get("precision") for v in per_class.values()])
-                macro_recall=_mean([v.get("recall") for v in per_class.values()])
-                macro_f1=_mean([v.get("f1") for v in per_class.values()])
+                matched_pairs=0
+                correct_pairs=0
+                if(isinstance(confusion_df,pd.DataFrame) and background_label in confusion_df.index and background_label in confusion_df.columns):
+                    core_df=confusion_df.drop(index=background_label,columns=background_label,errors="ignore")
+                    matched_pairs=int(core_df.to_numpy(dtype=np.int64).sum())
+                    correct_pairs=int(np.diag(core_df.to_numpy(dtype=np.int64)).sum()) if core_df.shape[0]>0 else 0
+                match_accuracy=None if matched_pairs<=0 else _safe_div(correct_pairs,matched_pairs)
 
                 return {
                     "iou_threshold":float(iou_threshold),
                     "score_threshold":float(score_threshold) if score_threshold is not None else None,
+                    "class_aware_match":bool(class_aware_match),
+                    "macro_average_mode":str(macro_average_mode),
                     "overall":{
                         "tp":int(overall_tp),
                         "fp":int(overall_fp),
@@ -36114,17 +36513,18 @@ class imgLib:
                         "precision":overall_precision,
                         "recall":overall_recall,
                         "f1":overall_f1,
-                        "det_accuracy":det_accuracy,
+                        "jaccard":jaccard,
+                        "csi":jaccard,
+                        "det_accuracy":jaccard,
                         "matched_pairs":int(matched_pairs),
                         "match_accuracy":match_accuracy,
-                        "macro_precision":macro_precision,
-                        "macro_recall":macro_recall,
-                        "macro_f1":macro_f1
+                        "macro_precision":_mean([per_class[k]["precision"] for k in metric_classes]),
+                        "macro_recall":_mean([per_class[k]["recall"] for k in metric_classes]),
+                        "macro_f1":_mean([per_class[k]["f1"] for k in metric_classes]),
                     },
                     "per_class":per_class,
-                    "confusion":confusion
+                    "confusion":confusion_df.to_dict(orient="index") if isinstance(confusion_df,pd.DataFrame) else {},
                 }
-
             @staticmethod
             def _calcScoreFromRecipe(score_recipe:dict,score_pack:dict,default_score:float=0.0)->tuple[float,dict]:
                 """
@@ -40961,7 +41361,11 @@ class imgLib:
                     iou_threshold:float=None,
                     include_background:bool=True,
                     background_label:str=None,
-                    orientation:str=None
+                    orientation:str=None,
+                    class_aware_match:bool=False,
+                    match_by_score:bool=False,
+                    score_key:str="scores",
+                    strict:bool=True
                 ):
                 """
                 Calculates the confusion matrix for each model.
@@ -40971,38 +41375,45 @@ class imgLib:
                     include_background (bool, optional): Whether to include background class.
                     background_label (str, optional): Label for the background class.
                     orientation (str, optional): Orientation for building the confusion matrix.
+                    class_aware_match (bool, optional): Whether to perform class-aware matching.
+                    match_by_score (bool, optional): Whether to match by score.
+                    score_key (str, optional): The key to use for scores when matching by score.
+                    strict (bool, optional): Whether to use strict matching criteria.
 
                 Returns:
                     dict: A dictionary containing confusion matrices for each model.
                 """
-                if(orientation is None):
-                    orientation=imgLib.BBimgJson.BUILD_CONFUSION_MATRIX_FROM_BB_IMG_JSON_LIST_ORIENTATION_ULTRALYTICS
-                
-                args_list=[iou_threshold,include_background,background_label,orientation]
-
-                if(self.__confusion_matrix_dict is not None):
-                    if(tuple(args_list) in self.__confusion_matrix_dict):
-                        return self.__confusion_matrix_dict[tuple(args_list)]
-                    
                 if(iou_threshold is None):
                     iou_threshold=imgLib.BBimgJson.DEFAULT_CONFUSION_MATRIX_IOU_THRESHOLD
                 if(background_label is None):
                     background_label=imgLib.BBimgJson.DEFAULT_CONFUSION_MATRIX_BACKGROUND_LABEL
+                if(orientation is None):
+                    orientation=imgLib.BBimgJson.BUILD_CONFUSION_MATRIX_FROM_BB_IMG_JSON_LIST_ORIENTATION_ULTRALYTICS
+
+                args_list=[float(iou_threshold),bool(include_background),background_label,orientation,bool(class_aware_match),bool(match_by_score),str(score_key),bool(strict)]
+
+                if(self.__confusion_matrix_dict is not None):
+                    if(tuple(args_list) in self.__confusion_matrix_dict):
+                        return pyExLib.safety_deepcopy(self.__confusion_matrix_dict[tuple(args_list)])
 
                 d={}
                 for model_name,results in self.generatorPerModel():
                     d[model_name]=imgLib.BBimgJson.BuildConfusionMatrixFromBBimgJsonList(
                         [ri for ri in results.values()],
-                        iou_threshold=iou_threshold,
+                        iou_threshold=float(iou_threshold),
                         include_background=include_background,
                         background_label=background_label,
-                        orientation=orientation
+                        orientation=orientation,
+                        class_aware_match=class_aware_match,
+                        match_by_score=match_by_score,
+                        score_key=score_key,
+                        strict=strict,
                     )
                 if(self.__lock_append and self.__cache_mode):
                     if(self.__confusion_matrix_dict is None):
                         self.__confusion_matrix_dict={}
-                    self.__confusion_matrix_dict[tuple(args_list)]=d
-                
+                    self.__confusion_matrix_dict[tuple(args_list)]=pyExLib.safety_deepcopy(d)
+
                 return pyExLib.safety_deepcopy(d)
 
             def getConfusionMatrixDict(
@@ -41046,33 +41457,37 @@ class imgLib:
                 Returns:
                     dict: {model_name: map_data_dict, ...}
                 """
-                args_list=[
-                    tuple(iou_thresholds) if isinstance(iou_thresholds,list) else None,
-                    ap_mode
-                ]
+                if(ap_mode is None):
+                    ap_mode=imgLib.BBimgJson.DEFAULT_MAP_AP_MODE
+
+                if(iou_thresholds is None):
+                    normalized_iou_thresholds=tuple(imgLib.BBimgJson.DEFAULT_MAP_IOU_THRESHOLDS)
+                elif(isinstance(iou_thresholds,(list,tuple,np.ndarray))):
+                    normalized_iou_thresholds=tuple(float(x) for x in list(iou_thresholds))
+                else:
+                    raise TypeError("iou_thresholds should be None, list, tuple, or np.ndarray!")
+
+                args_list=[normalized_iou_thresholds,ap_mode]
 
                 if(self.__map_dict is not None):
                     if(tuple(args_list) in self.__map_dict):
-                        return self.__map_dict[tuple(args_list)]
-
-                if(ap_mode is None):
-                    ap_mode=imgLib.BBimgJson.DEFAULT_MAP_AP_MODE
+                        return pyExLib.safety_deepcopy(self.__map_dict[tuple(args_list)])
 
                 d={}
                 for model_name,results in self.generatorPerModel():
                     d[model_name]=imgLib.BBimgJson.CalcMAPFromBBimgJsonList(
                         [ri for ri in results.values()],
-                        iou_thresholds=iou_thresholds,
+                        iou_thresholds=list(normalized_iou_thresholds),
                         ap_mode=ap_mode
                     )
 
                 if(self.__lock_append and self.__cache_mode):
                     if(self.__map_dict is None):
                         self.__map_dict={}
-                    self.__map_dict[tuple(args_list)]=d
+                    self.__map_dict[tuple(args_list)]=pyExLib.safety_deepcopy(d)
 
                 return pyExLib.safety_deepcopy(d)
-
+            
             def getMAPDict(
                 self,
                 iou_thresholds:list=None,
@@ -41652,7 +42067,7 @@ class imgLib:
 
                 if(self.__all_annotation_iou_df is not None):
                     if(tuple(args_list) in self.__all_annotation_iou_df):
-                        return self.__all_annotation_iou_df[tuple(args_list)]
+                        return self.__all_annotation_iou_df[tuple(args_list)].copy()
 
                 all_df=pd.DataFrame()
                 for img_name,result_obj in self.generator():
@@ -41667,7 +42082,7 @@ class imgLib:
                 if(self.__lock_append and self.__cache_mode):
                     if(self.__all_annotation_iou_df is None):
                         self.__all_annotation_iou_df={}
-                    self.__all_annotation_iou_df[tuple(args_list)]=all_df
+                    self.__all_annotation_iou_df[tuple(args_list)]=all_df.copy()
 
                 return all_df.copy()
 
@@ -41676,27 +42091,37 @@ class imgLib:
                 iou_threshold:float=None,
                 include_background:bool=True,
                 background_label:str=None,
-                is_transpose:bool=False,
+                is_transpose:bool=None,
+                orientation:str=None,
                 NEAR_ZERO:float=None,
                 include_confusion_matrix_df:bool=False,
                 include_map:bool=False,
                 map_args:dict=None,
+                include_det_metrics:bool=False,
+                det_metrics_args:dict=None,
                 include_all_annotation_iou_df:bool=False,
                 include_all_annotation_iou_dict:bool=False,
                 all_annotation_iou_df_args:dict=None,
             ):
                 """
-                Gets the evaluation metrics for the model.
+                Gets evaluation metrics for the model.
+
+                Notes:
+                    - `orientation` is preferred over `is_transpose`.
+                    - Confusion-matrix based metrics and detection metrics are different families of metrics.
 
                 Args:
                     iou_threshold (float, optional): IoU threshold for evaluation.
                     include_background (bool, optional): Whether to include background class.
                     background_label (str, optional): Label for the background class.
                     is_transpose (bool, optional): Whether to transpose the confusion matrix.
+                    orientation (str, optional): Orientation for building the confusion matrix.            
                     NEAR_ZERO (float, optional): Near zero value for the confusion matrix.
                     include_confusion_matrix_df (bool, optional): Whether to include the confusion matrix DataFrame.
                     include_map (bool, optional): Whether to include mAP in the evaluation.
                     map_args (dict, optional): Additional arguments for mAP calculation.
+                    include_det_metrics (bool, optional): Whether to include detection metrics.
+                    det_metrics_args (dict, optional): Additional arguments for detection metrics calculation.
                     include_all_annotation_iou_df (bool, optional): Whether to include all annotation IoU DataFrame.
                     include_all_annotation_iou_dict (bool, optional): Whether to include all annotation IoU as a dictionary.
                     all_annotation_iou_df_args (dict, optional): Additional arguments for all annotation IoU DataFrame.
@@ -41708,91 +42133,147 @@ class imgLib:
                     ValueError: If no results are available or if the result format is invalid.
                     TypeError: If the result format is invalid.
                 """
-                map_args_key=None
-                if(include_map):
-                    try:
-                        map_args_key=json.dumps(map_args or {},sort_keys=True,default=str)
-                    except Exception:
-                        map_args_key=str(map_args)
-
-                args_list=[iou_threshold,include_background,background_label,is_transpose,NEAR_ZERO,include_confusion_matrix_df,include_map,map_args_key]
-                
-                if(self.__evaluation_dict is not None):
-                    if(tuple(args_list) in self.__evaluation_dict):
-                        return self.__evaluation_dict[tuple(args_list)]
-
+                if(iou_threshold is None):
+                    iou_threshold=imgLib.BBimgJson.DEFAULT_CONFUSION_MATRIX_IOU_THRESHOLD
+                if(background_label is None):
+                    background_label=imgLib.BBimgJson.DEFAULT_CONFUSION_MATRIX_BACKGROUND_LABEL
                 if(NEAR_ZERO is None):
                     NEAR_ZERO=imgLib.cocoDatasetLib.datasetInfo.resultYOLOTrain.DEFAULT_NEAR_ZERO
-                
+
+                ori_gt_pred=imgLib.BBimgJson.BUILD_CONFUSION_MATRIX_FROM_BB_IMG_JSON_LIST_ORIENTATION_GT_PRED
+                ori_pred_gt=imgLib.BBimgJson.BUILD_CONFUSION_MATRIX_FROM_BB_IMG_JSON_LIST_ORIENTATION_PRED_GT
+                ori_ultra=imgLib.BBimgJson.BUILD_CONFUSION_MATRIX_FROM_BB_IMG_JSON_LIST_ORIENTATION_ULTRALYTICS
+                valid_orientations=(ori_gt_pred,ori_pred_gt,ori_ultra)
+
+                if(orientation is None):
+                    if(isinstance(is_transpose,bool)):
+                        orientation=ori_pred_gt if is_transpose else ori_gt_pred
+                    else:
+                        orientation=ori_gt_pred
+                if(orientation not in valid_orientations):
+                    raise ValueError('orientation must be "gt_pred", "pred_gt", or "ultralytics".')
+
+                if(map_args is None):
+                    map_args={}
+                elif(not isinstance(map_args,dict)):
+                    raise TypeError("map_args should be a dict!")
+                else:
+                    map_args=pyExLib.safety_deepcopy(map_args)
+
+                if(det_metrics_args is None):
+                    det_metrics_args={}
+                elif(not isinstance(det_metrics_args,dict)):
+                    raise TypeError("det_metrics_args should be a dict!")
+                else:
+                    det_metrics_args=pyExLib.safety_deepcopy(det_metrics_args)
+
+                if(all_annotation_iou_df_args is None):
+                    all_annotation_iou_df_args={}
+                elif(not isinstance(all_annotation_iou_df_args,dict)):
+                    raise TypeError("all_annotation_iou_df_args should be a dict!")
+                else:
+                    all_annotation_iou_df_args=pyExLib.safety_deepcopy(all_annotation_iou_df_args)
+
+                def _json_key(obj):
+                    try:
+                        return json.dumps(obj,sort_keys=True,default=str)
+                    except Exception:
+                        return str(obj)
+
+                args_list=[
+                    float(iou_threshold),
+                    bool(include_background),
+                    background_label,
+                    orientation,
+                    float(NEAR_ZERO),
+                    bool(include_confusion_matrix_df),
+                    bool(include_map),
+                    _json_key(map_args),
+                    bool(include_det_metrics),
+                    _json_key(det_metrics_args),
+                    bool(include_all_annotation_iou_df),
+                    bool(include_all_annotation_iou_dict),
+                    _json_key(all_annotation_iou_df_args),
+                ]
+
+                if(self.__evaluation_dict is not None):
+                    if(tuple(args_list) in self.__evaluation_dict):
+                        return pyExLib.safety_deepcopy(self.__evaluation_dict[tuple(args_list)])
+
                 cm_dict=self.calcConfusionMatrix(
-                    iou_threshold=iou_threshold,
+                    iou_threshold=float(iou_threshold),
                     include_background=include_background,
-                    background_label=background_label
+                    background_label=background_label,
+                    orientation=orientation,
                 )
 
                 map_dict=None
                 if(include_map):
-                    if(map_args is None):
-                        map_args={}
-                    elif(not isinstance(map_args,dict)):
-                        raise TypeError("map_args should be a dict!")
                     map_dict=self.calcMAP(**map_args)
 
-                result_dict={}
+                det_metrics_dict=None
+                if(include_det_metrics):
+                    det_metrics_dict={}
+                    for model_name,results in self.generatorPerModel():
+                        det_metrics_dict[model_name]=imgLib.BBimgJson.CalcDetMetricsFromBBimgJsonList(
+                            [ri for ri in results.values()],
+                            **det_metrics_args
+                        )
 
                 all_annotation_iou_df=None
-                if(include_all_annotation_iou_df):
-                    if(all_annotation_iou_df_args is None):
-                        all_annotation_iou_df_args={}
+                if(include_all_annotation_iou_df or include_all_annotation_iou_dict):
                     all_annotation_iou_df=self.getAllAnnotationIoUDataFrame(**all_annotation_iou_df_args)
 
+                result_dict={}
                 for model_name,cmi in cm_dict.items():
                     if(not isinstance(cmi,pd.DataFrame)):
                         raise ValueError(f"Confusion matrix for model {model_name} is not a DataFrame.")
-                    
+
                     cmi_np=pyExLib.DataFrameExLib.DataFrame2NdarraySafe(
                         cmi,
                         dtype=np.int64,
                         is_fillna_zero=False,
                     )
-                    cmi_cls_names={}
-                    for i,cls_name in enumerate(cmi.index):
-                        cmi_cls_names[float(i)]=cls_name
+                    cmi_cls_names={i:cls_name for i,cls_name in enumerate(list(cmi.index))}
 
                     append_dict={
                         "yolo_model_config":self.getModelDict(exclude_class_names=True)[model_name],
+                        "evaluation_orientation":orientation,
                     }
                     if(include_confusion_matrix_df):
-                        append_dict["confusion_matrix_df"]=cmi
+                        append_dict["confusion_matrix_df"]=cmi.copy()
 
                     if(include_map and isinstance(map_dict,dict) and model_name in map_dict):
-                        append_dict["map_data"]=map_dict[model_name]
-                    
+                        append_dict["map_data"]=pyExLib.safety_deepcopy(map_dict[model_name])
+
+                    if(include_det_metrics and isinstance(det_metrics_dict,dict) and model_name in det_metrics_dict):
+                        append_dict["det_metrics"]=pyExLib.safety_deepcopy(det_metrics_dict[model_name])
+
                     if((include_all_annotation_iou_df or include_all_annotation_iou_dict) and isinstance(all_annotation_iou_df,pd.DataFrame)):
                         tmp_all_annotation_iou_df=all_annotation_iou_df.loc[all_annotation_iou_df["model_name"].eq(model_name)].reset_index(drop=True)
-                        
                         if(include_all_annotation_iou_df):
-                            append_dict["all_annotation_iou_df"]=tmp_all_annotation_iou_df
+                            append_dict["all_annotation_iou_df"]=tmp_all_annotation_iou_df.copy()
                         if(include_all_annotation_iou_dict):
-                            append_dict["all_annotation_iou_dict"]=tmp_all_annotation_iou_df.to_dict(orient="dict")
+                            append_dict["all_annotation_iou_dict"]=tmp_all_annotation_iou_df.to_dict(orient="records")
 
                     result_dict[model_name]={
                         **append_dict,
                         **imgLib.cocoDatasetLib.datasetInfo.resultYOLOTrain.modelEvaluation4ConfusionMatrix(
                             cmi_np,
                             names_dict=cmi_cls_names,
-                            is_transpose=is_transpose,
-                            NEAR_ZERO=NEAR_ZERO
+                            orientation=orientation,
+                            background_label=background_label,
+                            NEAR_ZERO=NEAR_ZERO,
                         )
                     }
-                    
+
                 if(self.__lock_append and self.__cache_mode):
                     if(self.__evaluation_dict is None):
                         self.__evaluation_dict={}
-                    self.__evaluation_dict[tuple(args_list)]=result_dict
+                    self.__evaluation_dict[tuple(args_list)]=pyExLib.safety_deepcopy(result_dict)
 
-                return result_dict
-            
+                return pyExLib.safety_deepcopy(result_dict)
+
             META_ALL_IMAGES_RESULT_BB_IMG_JSON_COMBINATION_MODEL_EVALUATION="AllImagesResultBBImgJsonCombinationsModelEvaluation"
 
             def saveEvaluationJson(
@@ -41804,12 +42285,6 @@ class imgLib:
             ):
                 """
                 Saves the evaluation results to a JSON file.
-                
-                Args:
-                    file_path (str): Path to the output JSON file.
-                    indent (int, optional): Indentation level for the JSON output.
-                    minimalize_flag (bool, optional): Whether to minimalize the JSON output.
-                    evaluation_args (dict, optional): Additional arguments for evaluation.
                 """
                 if(evaluation_args is None):
                     evaluation_args={}
@@ -41818,6 +42293,7 @@ class imgLib:
 
                 evaluation_args["include_confusion_matrix_df"]=False
                 evaluation_args["include_all_annotation_iou_df"]=False
+                evaluation_args["include_all_annotation_iou_dict"]=False
 
                 IOLib.JSONLib.saveMETAJSON(
                     file_path=file_path,
@@ -41826,7 +42302,6 @@ class imgLib:
                     indent=indent,
                     minimalize_flag=minimalize_flag
                 )
-
             def getEvaluateDataFrames(
                 self,
                 include_mean_iou:bool=False,
@@ -45750,7 +46225,18 @@ class videoLib:
         MULTI_PROCESSING_TYPE_TORCH_MULTIPROCESSING="tm"
 
 
-        def __init__(self,input_path:str,output_path:str,conv_func:callable,isColor:bool=True,encode_str:str=None,wait_key_sec:int=0,batch_size:int=1,queue_max:int=0,multi_processing_type:str=MULTI_PROCESSING_TYPE_TORCH_MULTIPROCESSING):
+        def __init__(
+            self,
+            input_path:str,
+            output_path:str,
+            conv_func:callable,
+            isColor:bool=True,
+            encode_str:str=None,
+            wait_key_sec:int=0,
+            batch_size:int=1,
+            queue_max:int=0,
+            multi_processing_type:str=MULTI_PROCESSING_TYPE_TORCH_MULTIPROCESSING
+        ):
             """
             Initializes the videoStreamProc instance.
 
@@ -45915,68 +46401,6 @@ class videoLib:
             cap_input.release()
             out_video.release()
 
-    class VideoIO:
-        """
-        Class for video input/output processing.
-        """
-
-        @staticmethod
-        def video2list(video_path:str):
-            """
-            Converts a video to a list of frames.
-
-            Args:
-                video_path (str): Path to the video file.
-
-            Returns:
-                dict: Dictionary containing frames, fps, and shape.
-            """
-            
-            if(not IMPORT_OPENCV_FLAG):
-                raise RuntimeError("Error : The opencv package is not installed!")
-            
-            cap=cv2.VideoCapture(video_path)
-            fps=cap.get(cv2.CAP_PROP_FPS)
-            frames=[]
-            while True:
-                ret,frame=cap.read()
-                if not ret:
-                    break
-                frames.append(frame)
-                key=cv2.waitKey(30)
-                if(key==27):
-                    break
-
-            cap.release()
-            return {"frames":frames,"fps":fps,"shape":frames[0].shape}
-
-        @staticmethod
-        def outVideo(out_path:str,frames:list,fps:float,size:tuple=None,isColor:bool=True,encode_str:str=None):
-            """
-            Outputs a list of frames to a video file.
-
-            Args:
-                out_path (str): Path to save the video file.
-                frames (list): List of frames.
-                fps (float): Frames per second.
-                size (tuple): Size of the video.
-                isColor (bool): Whether the video is in color.
-                encode_str (str): Video encoding format.
-            """
-            if(not IMPORT_OPENCV_FLAG):
-                raise RuntimeError("Error : The opencv package is not installed!")
-
-            if(encode_str==None):
-                encode_str=videoLib.DEFAULT_VIDEO_ENCODE_STR
-
-            if(size==None):
-                size=frames[0].shape[0:2]
-            fourcc=cv2.VideoWriter_fourcc(*encode_str)
-            video=cv2.VideoWriter(filename=out_path,fourcc=fourcc,fps=fps,frameSize=(size[1],size[0]),isColor=isColor)
-            for frame in frames:
-                video.write(frame)
-            video.release()
-
     class videoProcess():
         """
         Class for video processing.
@@ -46076,6 +46500,68 @@ class videoLib:
                 encode_str=videoLib.DEFAULT_VIDEO_ENCODE_STR
 
             videoLib.VideoIO.outVideo(out_path=out_path,frames=self.__frames,fps=self.__fps,isColor=isColor,encode_str=encode_str)
+
+    class VideoIO:
+        """
+        Class for video input/output processing.
+        """
+
+        @staticmethod
+        def video2list(video_path:str):
+            """
+            Converts a video to a list of frames.
+
+            Args:
+                video_path (str): Path to the video file.
+
+            Returns:
+                dict: Dictionary containing frames, fps, and shape.
+            """
+            
+            if(not IMPORT_OPENCV_FLAG):
+                raise RuntimeError("Error : The opencv package is not installed!")
+            
+            cap=cv2.VideoCapture(video_path)
+            fps=cap.get(cv2.CAP_PROP_FPS)
+            frames=[]
+            while True:
+                ret,frame=cap.read()
+                if not ret:
+                    break
+                frames.append(frame)
+                key=cv2.waitKey(30)
+                if(key==27):
+                    break
+
+            cap.release()
+            return {"frames":frames,"fps":fps,"shape":frames[0].shape}
+
+        @staticmethod
+        def outVideo(out_path:str,frames:list,fps:float,size:tuple=None,isColor:bool=True,encode_str:str=None):
+            """
+            Outputs a list of frames to a video file.
+
+            Args:
+                out_path (str): Path to save the video file.
+                frames (list): List of frames.
+                fps (float): Frames per second.
+                size (tuple): Size of the video.
+                isColor (bool): Whether the video is in color.
+                encode_str (str): Video encoding format.
+            """
+            if(not IMPORT_OPENCV_FLAG):
+                raise RuntimeError("Error : The opencv package is not installed!")
+
+            if(encode_str==None):
+                encode_str=videoLib.DEFAULT_VIDEO_ENCODE_STR
+
+            if(size==None):
+                size=frames[0].shape[0:2]
+            fourcc=cv2.VideoWriter_fourcc(*encode_str)
+            video=cv2.VideoWriter(filename=out_path,fourcc=fourcc,fps=fps,frameSize=(size[1],size[0]),isColor=isColor)
+            for frame in frames:
+                video.write(frame)
+            video.release()
 
     class videoExLib:
         """
