@@ -1,4 +1,4 @@
-# baseLib.py v1.1.2
+# baseLib.py v1.1.3
 # - The library is a collection of various utility functions for Python programming.
 
 # standard libraries
@@ -31928,11 +31928,15 @@ class imgLib:
                     r["all_sum"]=all_sum
                     r["accuracy"]=accuracy
                     r["labels"]=labels
+                    r["confusion_matrix_labels"]=list(labels)
 
                     r["class_data"]={}
                     macro_precision_vals=[]
                     macro_recall_vals=[]
                     macro_f1_vals=[]
+                    macro_present_precision_vals=[]
+                    macro_present_recall_vals=[]
+                    macro_present_f1_vals=[]
                     weighted_precision_sum=0.0
                     weighted_recall_sum=0.0
                     weighted_f1_sum=0.0
@@ -31945,7 +31949,9 @@ class imgLib:
                         fp_num=int(gt_pred_mat[:,i].sum()-tp_num)
                         fn_num=int(gt_pred_mat[i,:].sum()-tp_num)
                         tn_num=int(gt_pred_mat.sum()-(tp_num+fp_num+fn_num))
-                        support=int(gt_pred_mat[i,:].sum())
+                        support_gt=int(gt_pred_mat[i,:].sum())
+                        support_pred=int(gt_pred_mat[:,i].sum())
+                        support=support_gt
 
                         precision_i=0.0 if (tp_num+fp_num)<=0 else float(tp_num)/(float(tp_num+fp_num)+float(NEAR_ZERO))
                         recall_i=0.0 if (tp_num+fn_num)<=0 else float(tp_num)/(float(tp_num+fn_num)+float(NEAR_ZERO))
@@ -31958,6 +31964,8 @@ class imgLib:
                             "FN":fn_num,
                             "TN":tn_num,
                             "support":support,
+                            "support_gt":support_gt,
+                            "support_pred":support_pred,
                             "precision":precision_i,
                             "recall":recall_i,
                             "f1":f1_i,
@@ -31970,10 +31978,14 @@ class imgLib:
                             macro_precision_vals.append(precision_i)
                             macro_recall_vals.append(recall_i)
                             macro_f1_vals.append(f1_i)
-                            weighted_precision_sum+=precision_i*support
-                            weighted_recall_sum+=recall_i*support
-                            weighted_f1_sum+=f1_i*support
-                            weighted_support+=support
+                            if(support_gt>0):
+                                macro_present_precision_vals.append(precision_i)
+                                macro_present_recall_vals.append(recall_i)
+                                macro_present_f1_vals.append(f1_i)
+                            weighted_precision_sum+=precision_i*support_gt
+                            weighted_recall_sum+=recall_i*support_gt
+                            weighted_f1_sum+=f1_i*support_gt
+                            weighted_support+=support_gt
 
                     def _mean(vals):
                         if(len(vals)==0):
@@ -31986,6 +31998,10 @@ class imgLib:
                     r["macro_precision"]= _mean(macro_precision_vals)
                     r["macro_recall"]= _mean(macro_recall_vals)
                     r["macro_f1"]= _mean(macro_f1_vals)
+                    r["macro_present_precision"]= _mean(macro_present_precision_vals)
+                    r["macro_present_recall"]= _mean(macro_present_recall_vals)
+                    r["macro_present_f1"]= _mean(macro_present_f1_vals)
+                    r["macro_support_positive_classes"]=int(len(macro_present_f1_vals))
                     r["weighted_precision"]= None if weighted_support<=0 else float(weighted_precision_sum)/(float(weighted_support)+float(NEAR_ZERO))
                     r["weighted_recall"]= None if weighted_support<=0 else float(weighted_recall_sum)/(float(weighted_support)+float(NEAR_ZERO))
                     r["weighted_f1"]= None if weighted_support<=0 else float(weighted_f1_sum)/(float(weighted_support)+float(NEAR_ZERO))
@@ -42239,6 +42255,7 @@ class imgLib:
                     append_dict={
                         "yolo_model_config":self.getModelDict(exclude_class_names=True)[model_name],
                         "evaluation_orientation":orientation,
+                        "confusion_matrix_labels":list(cmi.index),
                     }
                     if(include_confusion_matrix_df):
                         append_dict["confusion_matrix_df"]=cmi.copy()
@@ -42254,7 +42271,10 @@ class imgLib:
                         if(include_all_annotation_iou_df):
                             append_dict["all_annotation_iou_df"]=tmp_all_annotation_iou_df.copy()
                         if(include_all_annotation_iou_dict):
-                            append_dict["all_annotation_iou_dict"]=tmp_all_annotation_iou_df.to_dict(orient="records")
+                            append_dict["all_annotation_iou_dict"]={
+                                "orient":"records",
+                                "records":tmp_all_annotation_iou_df.to_dict(orient="records"),
+                            }
 
                     result_dict[model_name]={
                         **append_dict,
@@ -42275,6 +42295,8 @@ class imgLib:
                 return pyExLib.safety_deepcopy(result_dict)
 
             META_ALL_IMAGES_RESULT_BB_IMG_JSON_COMBINATION_MODEL_EVALUATION="AllImagesResultBBImgJsonCombinationsModelEvaluation"
+            META_ALL_IMAGES_RESULT_BB_IMG_JSON_COMBINATION_MODEL_EVALUATION_SPLIT="AllImagesResultBBImgJsonCombinationsModelEvaluationSplit"
+            META_ALL_IMAGES_RESULT_BB_IMG_JSON_COMBINATION_MODEL_EVALUATION_ITEM="AllImagesResultBBImgJsonCombinationsModelEvaluationItem"
 
             def saveEvaluationJson(
                 self,
@@ -42282,9 +42304,21 @@ class imgLib:
                 indent:int=IOLib.JSONLib.DEFAULT_INDENT,
                 minimalize_flag:bool=False,
                 evaluation_args:dict=None,
+                lightweight_mode:bool=False,
             ):
                 """
                 Saves the evaluation results to a JSON file.
+
+                Notes:
+                    - pandas DataFrames are not exported directly to JSON. When either `include_all_annotation_iou_df=True` or `include_all_annotation_iou_dict=True` is requested, annotation-IoU data is exported as `all_annotation_iou_dict`.
+                    - `lightweight_mode=True` removes bulky fields such as the confusion matrix and class-wise details.
+
+                Args:
+                    file_path (str): Path to save the evaluation JSON.
+                    indent (int, optional): Indentation level for JSON formatting.
+                    minimalize_flag (bool, optional): Whether to minimalize the JSON output.
+                    evaluation_args (dict, optional): Arguments to pass to `getEvaluationDict`.
+                    lightweight_mode (bool, optional): Whether to remove bulky fields for a lighter JSON.
                 """
                 if(evaluation_args is None):
                     evaluation_args={}
@@ -42292,16 +42326,191 @@ class imgLib:
                     evaluation_args=pyExLib.safety_deepcopy(evaluation_args)
 
                 evaluation_args["include_confusion_matrix_df"]=False
+                requested_annotation_iou=bool(
+                    evaluation_args.get("include_all_annotation_iou_df",False)
+                    or evaluation_args.get("include_all_annotation_iou_dict",False)
+                )
                 evaluation_args["include_all_annotation_iou_df"]=False
-                evaluation_args["include_all_annotation_iou_dict"]=False
+                evaluation_args["include_all_annotation_iou_dict"]=requested_annotation_iou
+
+                save_data=self.getEvaluationDict(**evaluation_args)
+
+                if(lightweight_mode):
+                    for _model_name,_pack in save_data.items():
+                        if(isinstance(_pack,dict)):
+                            _pack.pop("confusion_matrix",None)
+                            _pack.pop("class_data",None)
+                            _pack.pop("det_metrics",None)
 
                 IOLib.JSONLib.saveMETAJSON(
                     file_path=file_path,
                     meta_str=imgLib.YOLOModelLib.AllImagesResultBBImgJsonCombinationsModel.META_ALL_IMAGES_RESULT_BB_IMG_JSON_COMBINATION_MODEL_EVALUATION,
-                    data=self.getEvaluationDict(**evaluation_args),
+                    data=save_data,
                     indent=indent,
                     minimalize_flag=minimalize_flag
                 )
+
+            def saveEvaluationJsonSplit(
+                self,
+                output_dir:str|Path,
+                top_json_path:str|Path|None=None,
+                evaluation_args:dict=None,
+                indent:int=IOLib.JSONLib.DEFAULT_INDENT,
+                minimalize_flag:bool=False,
+                lightweight_mode:bool=False,
+                per_model_subdir:str="models",
+                zip_output:bool=False,
+                zip_path:str|Path|None=None,
+                include_combined_json:bool=False,
+                combined_json_name:str="evaluation.json",
+                top_json_name:str="evaluation_split.json",
+                item_file_name_func:callable=None,
+            ):
+                """
+                Saves evaluation results as split JSON files in a directory.
+
+                Structure example:
+                    ```
+                    {output_dir}/               # root output directory
+                    ├── evaluation_split.json   # top meta json / manifest
+                    ├── evaluation.json         # optional combined json
+                    └── models/
+                        ├── {model_name}.json   # individual model evaluation
+                        └── ...
+                    ```
+
+                The top json is generated with `IOLib.JSONLib.saveMETAJSON`.
+
+                Args:
+                    output_dir (str|Path): Directory to save the split evaluation JSON files.
+                    top_json_path (str|Path|None, optional): Path for the top-level JSON manifest. Defaults to `output_dir/top_json_name`.
+                    evaluation_args (dict, optional): Arguments to pass to `getEvaluationDict` for each model's evaluation.
+                    indent (int, optional): Indentation level for JSON formatting.
+                    minimalize_flag (bool, optional): Whether to minimalize the JSON output.
+                    lightweight_mode (bool, optional): Whether to remove bulky fields for lighter JSON files.
+                    per_model_subdir (str, optional): Subdirectory under `output_dir` to save individual model JSON files.
+                    zip_output (bool, optional): Whether to create a ZIP archive of the output directory.
+                    zip_path (str|Path|None, optional): Path for the ZIP archive. Defaults to `output_dir.zip`.
+                    include_combined_json (bool, optional): Whether to include a combined evaluation JSON in the output directory.
+                    combined_json_name (str, optional): Filename for the combined evaluation JSON if `include_combined_json` is True.
+                    top_json_name (str, optional): Filename for the top-level JSON manifest if `top_json_path` is not provided.
+                    item_file_name_func (callable, optional): Function that takes a model name and returns a filename for that model's JSON. Defaults to slugifying the model name.
+                """
+                if(evaluation_args is None):
+                    evaluation_args={}
+                else:
+                    evaluation_args=pyExLib.safety_deepcopy(evaluation_args)
+
+                output_dir_obj=Path(output_dir)
+                output_dir_obj.mkdir(parents=True,exist_ok=True)
+
+                if(top_json_path is None):
+                    top_json_path=output_dir_obj/Path(top_json_name)
+                else:
+                    top_json_path=Path(top_json_path)
+
+                models_dir=output_dir_obj/Path(per_model_subdir)
+                models_dir.mkdir(parents=True,exist_ok=True)
+
+                requested_annotation_iou=bool(
+                    evaluation_args.get("include_all_annotation_iou_df",False)
+                    or evaluation_args.get("include_all_annotation_iou_dict",False)
+                )
+                evaluation_args["include_confusion_matrix_df"]=False
+                evaluation_args["include_all_annotation_iou_df"]=False
+                evaluation_args["include_all_annotation_iou_dict"]=requested_annotation_iou
+
+                save_data=self.getEvaluationDict(**evaluation_args)
+
+                if(lightweight_mode):
+                    for _model_name,_pack in save_data.items():
+                        if(isinstance(_pack,dict)):
+                            _pack.pop("confusion_matrix",None)
+                            _pack.pop("class_data",None)
+                            _pack.pop("det_metrics",None)
+
+                def _default_item_file_name(model_name:str):
+                    return f"{pyExLib.slugString(str(model_name))}.json"
+
+                if(item_file_name_func is None):
+                    item_file_name_func=_default_item_file_name
+
+                manifest_models={}
+                for model_name,model_pack in save_data.items():
+                    item_name=item_file_name_func(model_name)
+                    if(not isinstance(item_name,str) or len(item_name.strip())==0):
+                        raise ValueError("item_file_name_func must return a non-empty string")
+                    item_path=models_dir/Path(item_name)
+                    item_path.parent.mkdir(parents=True,exist_ok=True)
+
+                    IOLib.JSONLib.saveMETAJSON(
+                        file_path=item_path,
+                        meta_str=imgLib.YOLOModelLib.AllImagesResultBBImgJsonCombinationsModel.META_ALL_IMAGES_RESULT_BB_IMG_JSON_COMBINATION_MODEL_EVALUATION_ITEM,
+                        data=model_pack,
+                        indent=indent,
+                        minimalize_flag=minimalize_flag
+                    )
+
+                    rel_item_path=os.path.relpath(item_path,top_json_path.parent)
+                    manifest_models[str(model_name)]={
+                        "file":rel_item_path,
+                    }
+                    if(isinstance(model_pack,dict)):
+                        manifest_models[str(model_name)]["evaluation_orientation"]=model_pack.get("evaluation_orientation",None)
+                        map_data=model_pack.get("map_data",None)
+                        if(isinstance(map_data,dict)):
+                            manifest_models[str(model_name)]["mAP50"]=map_data.get("mAP50",None)
+                            manifest_models[str(model_name)]["mAP50_95"]=map_data.get("mAP50_95",None)
+
+                if(include_combined_json):
+                    self.saveEvaluationJson(
+                        file_path=output_dir_obj/Path(combined_json_name),
+                        indent=indent,
+                        minimalize_flag=minimalize_flag,
+                        evaluation_args=evaluation_args,
+                        lightweight_mode=lightweight_mode,
+                    )
+
+                top_data={
+                    "format":"split_evaluation_json",
+                    "models_dir":os.path.relpath(models_dir,top_json_path.parent),
+                    "model_count":int(len(save_data)),
+                    "models":manifest_models,
+                    "options":{
+                        "lightweight_mode":bool(lightweight_mode),
+                        "include_combined_json":bool(include_combined_json),
+                        "requested_annotation_iou":bool(requested_annotation_iou),
+                    },
+                }
+
+                IOLib.JSONLib.saveMETAJSON(
+                    file_path=top_json_path,
+                    meta_str=imgLib.YOLOModelLib.AllImagesResultBBImgJsonCombinationsModel.META_ALL_IMAGES_RESULT_BB_IMG_JSON_COMBINATION_MODEL_EVALUATION_SPLIT,
+                    data=top_data,
+                    indent=indent,
+                    minimalize_flag=minimalize_flag
+                )
+
+                zip_created_path=None
+                if(zip_output):
+                    if(zip_path is None):
+                        zip_created_path=output_dir_obj.with_suffix(".zip")
+                    else:
+                        zip_created_path=Path(zip_path)
+                    zip_created_path.parent.mkdir(parents=True,exist_ok=True)
+                    if(zip_created_path.exists()):
+                        zip_created_path.unlink()
+                    with zipfile.ZipFile(zip_created_path,mode="w",compression=zipfile.ZIP_DEFLATED) as zf:
+                        for fp in output_dir_obj.rglob("*"):
+                            if(fp.is_file()):
+                                zf.write(fp,arcname=os.path.relpath(fp,output_dir_obj.parent))
+                return {
+                    "output_dir":str(output_dir_obj),
+                    "top_json_path":str(top_json_path),
+                    "models_dir":str(models_dir),
+                    "zip_path":(str(zip_created_path) if zip_created_path is not None else None),
+                }
+
             def getEvaluateDataFrames(
                 self,
                 include_mean_iou:bool=False,
@@ -42343,6 +42552,12 @@ class imgLib:
                 )
 
                 dfl.append(
+                    "AllMAPPerClass",
+                    pd.DataFrame(),
+                    "All mAP Per Class"
+                )
+
+                dfl.append(
                     "AllAnnotationIoUData",
                     pd.DataFrame(),
                     "All Annotation IoU Data"
@@ -42372,6 +42587,7 @@ class imgLib:
 
                 all_evaluate_data_dict={}
                 all_all_annotation_iou_df=pd.DataFrame()
+                all_map_per_class_rows=[]
 
                 for i,data_key in enumerate(data):
                     dfl.append(
@@ -42383,16 +42599,42 @@ class imgLib:
                     all_evaluate_data_dict[data_key]={}
                     all_evaluate_data_dict[data_key]["all_sum"]=data[data_key]["all_sum"]
                     all_evaluate_data_dict[data_key]["accuracy"]=data[data_key]["accuracy"]
+                    all_evaluate_data_dict[data_key]["tp_sum"]=data[data_key].get("tp_sum",None)
+                    all_evaluate_data_dict[data_key]["fp_sum"]=data[data_key].get("fp_sum",None)
+                    all_evaluate_data_dict[data_key]["fn_sum"]=data[data_key].get("fn_sum",None)
+                    all_evaluate_data_dict[data_key]["macro_precision"]=data[data_key].get("macro_precision",None)
+                    all_evaluate_data_dict[data_key]["macro_recall"]=data[data_key].get("macro_recall",None)
+                    all_evaluate_data_dict[data_key]["macro_f1"]=data[data_key].get("macro_f1",None)
+                    all_evaluate_data_dict[data_key]["macro_present_precision"]=data[data_key].get("macro_present_precision",None)
+                    all_evaluate_data_dict[data_key]["macro_present_recall"]=data[data_key].get("macro_present_recall",None)
+                    all_evaluate_data_dict[data_key]["macro_present_f1"]=data[data_key].get("macro_present_f1",None)
+                    all_evaluate_data_dict[data_key]["weighted_precision"]=data[data_key].get("weighted_precision",None)
+                    all_evaluate_data_dict[data_key]["weighted_recall"]=data[data_key].get("weighted_recall",None)
+                    all_evaluate_data_dict[data_key]["weighted_f1"]=data[data_key].get("weighted_f1",None)
                     map_data=data[data_key].get("map_data",None)
                     if(isinstance(map_data,dict)):
                         all_evaluate_data_dict[data_key]["mAP50"]=map_data.get("mAP50",None)
                         all_evaluate_data_dict[data_key]["mAP50_95"]=map_data.get("mAP50_95",None)
+                        ap50_per_class=map_data.get("AP50_per_class",{})
+                        ap5095_per_class=map_data.get("AP50_95_per_class",{})
+                        class_keys=list(dict.fromkeys(list(ap50_per_class.keys())+list(ap5095_per_class.keys())))
+                        for cls_name in class_keys:
+                            all_map_per_class_rows.append({
+                                "model_name":data_key,
+                                "class_name":cls_name,
+                                "AP50":ap50_per_class.get(cls_name,None),
+                                "AP50_95":ap5095_per_class.get(cls_name,None),
+                                "n_gt":map_data.get("n_gt_per_class",{}).get(cls_name,None),
+                                "n_pred":map_data.get("n_pred_per_class",{}).get(cls_name,None),
+                            })
                     
                     for cls_name,cls_data in data[data_key]["class_data"].items():
                         all_evaluate_data_dict[data_key][f"{cls_name}_TP"]=cls_data["TP"]
                         all_evaluate_data_dict[data_key][f"{cls_name}_FP"]=cls_data["FP"]
                         all_evaluate_data_dict[data_key][f"{cls_name}_FN"]=cls_data["FN"]
                         all_evaluate_data_dict[data_key][f"{cls_name}_TN"]=cls_data["TN"]
+                        all_evaluate_data_dict[data_key][f"{cls_name}_support_gt"]=cls_data.get("support_gt",cls_data.get("support",None))
+                        all_evaluate_data_dict[data_key][f"{cls_name}_support_pred"]=cls_data.get("support_pred",None)
                         all_evaluate_data_dict[data_key][f"{cls_name}_precision"]=cls_data["precision"]
                         all_evaluate_data_dict[data_key][f"{cls_name}_recall"]=cls_data["recall"]
                         all_evaluate_data_dict[data_key][f"{cls_name}_f1"]=cls_data["f1"]
@@ -42417,6 +42659,12 @@ class imgLib:
                         except Exception:
                             pass
                     
+                if(all_map_per_class_rows):
+                    try:
+                        dfl.renewDataFrameByKey("AllMAPPerClass",pd.DataFrame(all_map_per_class_rows))
+                    except Exception:
+                        pass
+
                 if(all_all_annotation_iou_df.shape[0]>0):
                     dfl.renewDataFrameByKey("AllAnnotationIoUData",all_all_annotation_iou_df)
                     
@@ -43093,6 +43341,9 @@ class imgLib:
                 save_all_iou_df:bool=True,
                 include_mean_iou:bool=False,
                 save_evaluation_json:bool=True,
+                save_evaluation_json_split:bool=False,
+                evaluation_json_split_dirname:str="evaluation_json_split",
+                evaluation_json_split_args:dict=None,
                 save_evaluation_excel:bool=True,
                 evaluation_args:dict=None,
                 excel_writer_args:dict=pyExLib.DataFrameExLib.DataFrameList.DEFAULT_EXCEL_WRITER_ARGS,
@@ -43137,7 +43388,10 @@ class imgLib:
                     save_img_args (dict, optional): Arguments for saving images.
                     save_all_iou_df (bool, optional): Whether to save the IoU DataFrame.
                     include_mean_iou (bool, optional): Whether to include the mean IoU in the DataFrame.
-                    save_evaluation_json (bool, optional): Whether to save the evaluation JSON.
+                    save_evaluation_json (bool, optional): Whether to save the combined evaluation JSON.
+                    save_evaluation_json_split (bool, optional): Whether to save split evaluation JSON files in a directory.
+                    evaluation_json_split_dirname (str, optional): Directory name under output_dir used for split evaluation JSON files.
+                    evaluation_json_split_args (dict, optional): Additional arguments for split evaluation JSON export.
                     save_evaluation_excel (bool, optional): Whether to save the evaluation Excel file.
                     evaluation_args (dict, optional): Additional arguments for evaluation.
                     excel_writer_args (dict, optional): Additional arguments for the Excel writer.
@@ -43192,6 +43446,13 @@ class imgLib:
                     raise TypeError("evaluation_args should be a dict!")
                 else:
                     evaluation_args=pyExLib.safety_deepcopy(evaluation_args)
+
+                if(evaluation_json_split_args is None):
+                    evaluation_json_split_args={}
+                elif(not isinstance(evaluation_json_split_args,dict)):
+                    raise TypeError("evaluation_json_split_args should be a dict!")
+                else:
+                    evaluation_json_split_args=pyExLib.safety_deepcopy(evaluation_json_split_args)
 
                 verbose_interval=0
                 if(isinstance(verbose,bool)):
@@ -43390,6 +43651,19 @@ class imgLib:
                         self.saveEvaluationJson(
                             output_dir_obj/Path("evaluation.json"),
                             evaluation_args=evaluation_args
+                        )
+
+                if(save_evaluation_json_split):
+                    if(verbose_enable):
+                        _vprint("Saving split evaluation json directory")
+                    with _vstage("stage: evaluation_json_split"):
+                        tmp_split_args=pyExLib.safety_deepcopy(evaluation_json_split_args)
+                        if(tmp_split_args.get("output_dir") is None):
+                            tmp_split_args["output_dir"]=output_dir_obj/Path(evaluation_json_split_dirname)
+                        if(tmp_split_args.get("evaluation_args") is None):
+                            tmp_split_args["evaluation_args"]=evaluation_args
+                        self.saveEvaluationJsonSplit(
+                            **tmp_split_args
                         )
 
                 if(save_evaluation_excel):
