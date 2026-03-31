@@ -1,4 +1,4 @@
-# baseLib.py v1.1.3
+# baseLib.py v1.1.4
 # - The library is a collection of various utility functions for Python programming.
 
 # standard libraries
@@ -42297,6 +42297,238 @@ class imgLib:
             META_ALL_IMAGES_RESULT_BB_IMG_JSON_COMBINATION_MODEL_EVALUATION="AllImagesResultBBImgJsonCombinationsModelEvaluation"
             META_ALL_IMAGES_RESULT_BB_IMG_JSON_COMBINATION_MODEL_EVALUATION_SPLIT="AllImagesResultBBImgJsonCombinationsModelEvaluationSplit"
             META_ALL_IMAGES_RESULT_BB_IMG_JSON_COMBINATION_MODEL_EVALUATION_ITEM="AllImagesResultBBImgJsonCombinationsModelEvaluationItem"
+            META_ALL_IMAGES_RESULT_BB_IMG_JSON_COMBINATION_MODEL_EVALUATION_README="AllImagesResultBBImgJsonCombinationsModelEvaluationReadme"
+
+            def buildEvaluationReadmeText(
+                self,
+                evaluation_args:dict=None,
+                include_split_json_notes:bool=True,
+                include_examples:bool=True,
+            ):
+                """
+                Builds an English README text that explains the exported evaluation files,
+                metric definitions, and the main calculation algorithms.
+                """
+                if(evaluation_args is None):
+                    evaluation_args={}
+                else:
+                    evaluation_args=pyExLib.safety_deepcopy(evaluation_args)
+
+                include_map=bool(evaluation_args.get("include_map",False))
+                include_annotation_iou=bool(
+                    evaluation_args.get("include_all_annotation_iou_df",False)
+                    or evaluation_args.get("include_all_annotation_iou_dict",False)
+                )
+                all_annotation_iou_df_args=evaluation_args.get("all_annotation_iou_df_args",{})
+                class_aware_iou=bool(all_annotation_iou_df_args.get("class_aware",True))
+                one_to_one_iou=bool(all_annotation_iou_df_args.get("one_to_one",True))
+                unmatched_value=all_annotation_iou_df_args.get("unmatched_value",0.0)
+
+                lines=[]
+                add=lines.append
+                add("# Evaluation Export README")
+                add("")
+                add("This directory contains evaluation outputs exported from `imgLib.YOLOModelLib.AllImagesResultBBImgJsonCombinationsModel`.")
+                add("The purpose of this document is to make downstream analysis by users and AI systems easy, explicit, and less error-prone.")
+                add("")
+                add("## Files")
+                add("")
+                add("Typical outputs may include:")
+                add("")
+                add("- `evaluation.json`: combined evaluation JSON with metadata.")
+                add("- `evaluation.xlsx`: spreadsheet export with summary sheets, per-class data, and confusion matrices.")
+                add("- `evaluation_json_split/`: optional split JSON export directory.")
+                add("- `evaluation_json_split.zip`: optional ZIP archive of the split JSON export.")
+                add("- `README.md`: this file.")
+                add("")
+                add("## Orientation and confusion matrix semantics")
+                add("")
+                add("Unless explicitly overridden, the exported evaluation uses `evaluation_orientation = gt_pred`.")
+                add("In this orientation:")
+                add("")
+                add("- rows = ground-truth classes")
+                add("- columns = predicted classes")
+                add("- diagonal cells = correct class matches")
+                add("- `__background__` = unmatched-box accounting when background export is enabled")
+                add("")
+                add("For a class `c`, one-vs-rest counts are derived from the confusion matrix as follows:")
+                add("")
+                add("- TP(c): diagonal cell for class `c`")
+                add("- FP(c): sum of column `c`, excluding TP(c)")
+                add("- FN(c): sum of row `c`, excluding TP(c)")
+                add("- TN(c): total matrix sum minus TP(c), FP(c), and FN(c)")
+                add("")
+                add("These TN values are mathematically valid for the exported confusion matrix, but they should not be interpreted as dense image-space true negatives.")
+                add("")
+                add("## Matching algorithm used for the confusion matrix")
+                add("")
+                add("The confusion matrix is built from object-level matching between ground-truth boxes and predicted boxes.")
+                add("The improved implementation supports strict validation and configurable matching behavior, including class-aware matching and score-aware ordering.")
+                add("")
+                add("High-level process:")
+                add("")
+                add("1. Validate GT and prediction arrays.")
+                add("2. Match boxes under the requested IoU threshold.")
+                add("3. Matched pairs increment `(gt_class, pred_class)`.")
+                add("4. Unmatched GT boxes increment `(gt_class, __background__)`.")
+                add("5. Unmatched predicted boxes increment `(__background__, pred_class)`.")
+                add("")
+                add("This means the confusion matrix is an object-level summary after box matching, not a raw image-level label matrix.")
+                add("")
+                add("## Core metric definitions")
+                add("")
+                add("### Per-class precision")
+                add("")
+                add("`precision = TP / (TP + FP)`")
+                add("")
+                add("### Per-class recall")
+                add("")
+                add("`recall = TP / (TP + FN)`")
+                add("")
+                add("### Per-class F1")
+                add("")
+                add("`f1 = 2 * precision * recall / (precision + recall)`")
+                add("")
+                add("### Accuracy")
+                add("")
+                add("For the exported confusion matrix, `accuracy = sum(diagonal) / sum(all cells)`.")
+                add("This is an object-level confusion-matrix accuracy, not a dense whole-image accuracy.")
+                add("")
+                add("## Macro and weighted metrics")
+                add("")
+                add("The export may contain:")
+                add("")
+                add("- `macro_precision`, `macro_recall`, `macro_f1`")
+                add("- `weighted_precision`, `weighted_recall`, `weighted_f1`")
+                add("- `macro_present_precision`, `macro_present_recall`, `macro_present_f1`")
+                add("")
+                add("Definitions:")
+                add("")
+                add("- `macro_*`: arithmetic mean across classes with equal weight per class.")
+                add("- `weighted_*`: mean weighted by `support_gt` (ground-truth instance count per class).")
+                add("- `macro_present_*`: arithmetic mean restricted to classes with `support_gt > 0`.")
+                add("")
+                add("Practical interpretation:")
+                add("")
+                add("- `weighted_*` reflects the actual class distribution in the evaluated data.")
+                add("- `macro_*` treats all classes equally and can become very small when the label space is large but only a few classes are present.")
+                add("- `macro_present_*` is usually easier to interpret when only a subset of classes appears in the evaluation set.")
+                add("")
+                add("## Support fields")
+                add("")
+                add("Per-class exports may include:")
+                add("")
+                add("- `support` or `support_gt`: number of GT instances for the class")
+                add("- `support_pred`: number of predicted instances for the class")
+                add("")
+                add("These fields help distinguish class imbalance from over-prediction or under-detection.")
+                add("")
+                if(include_map):
+                    add("## mAP metrics")
+                    add("")
+                    add("This export includes mAP data.")
+                    add("")
+                    add("- `mAP50`: mean Average Precision at IoU = 0.50")
+                    add("- `mAP50_95`: mean Average Precision averaged over IoU thresholds 0.50, 0.55, ..., 0.95")
+                    add("- `AP50_per_class`: per-class AP at IoU = 0.50")
+                    add("- `AP50_95_per_class`: per-class AP averaged over the full IoU range")
+                    add("- `per_iou`: per-threshold AP data")
+                    add("")
+                    add("The AP implementation uses score-ordered predictions with greedy one-to-one matching per class under each IoU threshold.")
+                    add("The current export uses the configured AP integration mode, typically `interp101`.")
+                    add("")
+                    add("If a class has zero GT instances, AP may appear as `null`. This means the metric is undefined for that class under the current data.")
+                    add("")
+                if(include_annotation_iou):
+                    add("## Annotation IoU export")
+                    add("")
+                    add("This export includes annotation-level IoU data in `all_annotation_iou_dict`.")
+                    add("The JSON representation uses record format so that each row can be processed independently.")
+                    add("")
+                    add("Typical fields include image name, model name, annotation id, IoU, GT class/box fields, and matched prediction class/score/box fields.")
+                    add("")
+                    add(f"Current export settings indicate: `class_aware={class_aware_iou}`, `one_to_one={one_to_one_iou}`, `unmatched_value={unmatched_value}`.")
+                    add("")
+                    add("Interpretation notes:")
+                    add("")
+                    add("- If a GT annotation has no valid matched prediction, IoU is set to the configured unmatched value.")
+                    add("- When `class_aware=True`, only predictions of the same class are considered for matching.")
+                    add("- When `one_to_one=True`, one prediction cannot be re-used for multiple GT annotations.")
+                    add("")
+                add("## Recommended interpretation order")
+                add("")
+                add("1. `mAP50` and `mAP50_95` (if exported)")
+                add("2. `weighted_f1`")
+                add("3. `macro_present_f1`")
+                add("4. confusion matrix and per-class TP/FP/FN")
+                if(include_annotation_iou):
+                    add("5. annotation-level IoU records for error analysis")
+                add("")
+                add("## Common pitfalls")
+                add("")
+                add("- Do not interpret confusion-matrix `accuracy` as a dense full-image negative/positive accuracy.")
+                add("- `macro_*` and `weighted_*` answer different questions and should not be treated as interchangeable.")
+                add("- `null` AP values usually mean a class had no GT support, not that the exporter failed.")
+                add("- When many classes are defined but only a few appear, `macro_*` can look much worse than `weighted_*` or `macro_present_*`.")
+                add("")
+                if(include_split_json_notes):
+                    add("## Split JSON export")
+                    add("")
+                    add("If the evaluation is exported in split form, the top JSON file is a manifest generated with `IOLib.JSONLib.saveMETAJSON`.")
+                    add("It contains metadata plus relative paths to per-model JSON files, making large exports easier to inspect and load incrementally.")
+                    add("")
+                if(include_examples):
+                    add("## Example downstream usage ideas")
+                    add("")
+                    add("- Rank models by `mAP50_95` and `weighted_f1`.")
+                    add("- Use `macro_present_f1` to compare balance across classes that actually appear in the dataset.")
+                    add("- Use `all_annotation_iou_dict.records` to find difficult annotations and inspect them manually.")
+                    add("- Use `support_gt` and `support_pred` to separate class imbalance issues from localization issues.")
+                    add("")
+                add("## Provenance")
+                add("")
+                add("This README was generated automatically by the library export function so that the evaluation package is self-describing.")
+                add("")
+                return "\n".join(lines)+"\n"
+
+            def saveEvaluationReadme(
+                self,
+                file_path:str|Path,
+                evaluation_args:dict=None,
+                include_split_json_notes:bool=True,
+                include_examples:bool=True,
+                meta_json_path:str|Path|None=None,
+                indent:int=IOLib.JSONLib.DEFAULT_INDENT,
+                minimalize_flag:bool=False,
+            ):
+                """
+                Saves an English README.md describing metrics and algorithms used in the export.
+                Optionally also saves a small meta JSON for the README itself.
+                """
+                file_path_obj=Path(file_path)
+                file_path_obj.parent.mkdir(parents=True,exist_ok=True)
+                text=self.buildEvaluationReadmeText(
+                    evaluation_args=evaluation_args,
+                    include_split_json_notes=include_split_json_notes,
+                    include_examples=include_examples,
+                )
+                with open(file_path_obj,mode="w",encoding="utf-8") as f:
+                    f.write(text)
+                if(meta_json_path is not None):
+                    meta_json_path_obj=Path(meta_json_path)
+                    meta_json_path_obj.parent.mkdir(parents=True,exist_ok=True)
+                    IOLib.JSONLib.saveMETAJSON(
+                        file_path=meta_json_path_obj,
+                        meta_str=imgLib.YOLOModelLib.AllImagesResultBBImgJsonCombinationsModel.META_ALL_IMAGES_RESULT_BB_IMG_JSON_COMBINATION_MODEL_EVALUATION_README,
+                        data={
+                            "readme_file":os.path.relpath(file_path_obj,meta_json_path_obj.parent),
+                            "language":"en",
+                            "format":"markdown",
+                        },
+                        indent=indent,
+                        minimalize_flag=minimalize_flag,
+                    )
+                return str(file_path_obj)
 
             def saveEvaluationJson(
                 self,
@@ -42365,6 +42597,10 @@ class imgLib:
                 combined_json_name:str="evaluation.json",
                 top_json_name:str="evaluation_split.json",
                 item_file_name_func:callable=None,
+                save_readme:bool=False,
+                readme_file_name:str="README.md",
+                readme_meta_json_name:str|None=None,
+                readme_args:dict=None,
             ):
                 """
                 Saves evaluation results as split JSON files in a directory.
@@ -42395,6 +42631,10 @@ class imgLib:
                     combined_json_name (str, optional): Filename for the combined evaluation JSON if `include_combined_json` is True.
                     top_json_name (str, optional): Filename for the top-level JSON manifest if `top_json_path` is not provided.
                     item_file_name_func (callable, optional): Function that takes a model name and returns a filename for that model's JSON. Defaults to slugifying the model name.
+                    save_readme (bool, optional): Whether to save a README.md file describing the evaluation.
+                    readme_file_name (str, optional): Filename for the README.md if `save_readme` is True.
+                    readme_meta_json_name (str|None, optional): Filename for the README meta JSON if `save_readme` is True. Defaults to None (no meta JSON).
+                    readme_args (dict, optional): Arguments to pass to `buildEvaluationReadmeText` for generating the README content.
                 """
                 if(evaluation_args is None):
                     evaluation_args={}
@@ -42411,6 +42651,11 @@ class imgLib:
 
                 models_dir=output_dir_obj/Path(per_model_subdir)
                 models_dir.mkdir(parents=True,exist_ok=True)
+
+                if(readme_args is None):
+                    readme_args={}
+                else:
+                    readme_args=pyExLib.safety_deepcopy(readme_args)
 
                 requested_annotation_iou=bool(
                     evaluation_args.get("include_all_annotation_iou_df",False)
@@ -42491,6 +42736,19 @@ class imgLib:
                     minimalize_flag=minimalize_flag
                 )
 
+                readme_path=None
+                if(save_readme):
+                    readme_path=output_dir_obj/Path(readme_file_name)
+                    readme_meta_path=(output_dir_obj/Path(readme_meta_json_name) if readme_meta_json_name is not None else None)
+                    self.saveEvaluationReadme(
+                        file_path=readme_path,
+                        evaluation_args=evaluation_args,
+                        meta_json_path=readme_meta_path,
+                        indent=indent,
+                        minimalize_flag=minimalize_flag,
+                        **readme_args,
+                )
+
                 zip_created_path=None
                 if(zip_output):
                     if(zip_path is None):
@@ -42508,6 +42766,7 @@ class imgLib:
                     "output_dir":str(output_dir_obj),
                     "top_json_path":str(top_json_path),
                     "models_dir":str(models_dir),
+                    "readme_path":(str(readme_path) if readme_path is not None else None),
                     "zip_path":(str(zip_created_path) if zip_created_path is not None else None),
                 }
 
@@ -43344,6 +43603,9 @@ class imgLib:
                 save_evaluation_json_split:bool=False,
                 evaluation_json_split_dirname:str="evaluation_json_split",
                 evaluation_json_split_args:dict=None,
+                save_evaluation_readme:bool=False,
+                evaluation_readme_filename:str="README.md",
+                evaluation_readme_args:dict=None,
                 save_evaluation_excel:bool=True,
                 evaluation_args:dict=None,
                 excel_writer_args:dict=pyExLib.DataFrameExLib.DataFrameList.DEFAULT_EXCEL_WRITER_ARGS,
@@ -43392,6 +43654,9 @@ class imgLib:
                     save_evaluation_json_split (bool, optional): Whether to save split evaluation JSON files in a directory.
                     evaluation_json_split_dirname (str, optional): Directory name under output_dir used for split evaluation JSON files.
                     evaluation_json_split_args (dict, optional): Additional arguments for split evaluation JSON export.
+                    save_evaluation_readme (bool, optional): Whether to save an English README.md describing metrics and algorithms.
+                    evaluation_readme_filename (str, optional): File name for the generated README.
+                    evaluation_readme_args (dict, optional): Additional arguments for README generation.
                     save_evaluation_excel (bool, optional): Whether to save the evaluation Excel file.
                     evaluation_args (dict, optional): Additional arguments for evaluation.
                     excel_writer_args (dict, optional): Additional arguments for the Excel writer.
@@ -43453,6 +43718,13 @@ class imgLib:
                     raise TypeError("evaluation_json_split_args should be a dict!")
                 else:
                     evaluation_json_split_args=pyExLib.safety_deepcopy(evaluation_json_split_args)
+
+                if(evaluation_readme_args is None):
+                    evaluation_readme_args={}
+                elif(not isinstance(evaluation_readme_args,dict)):
+                    raise TypeError("evaluation_readme_args should be a dict!")
+                else:
+                    evaluation_readme_args=pyExLib.safety_deepcopy(evaluation_readme_args)
 
                 verbose_interval=0
                 if(isinstance(verbose,bool)):
