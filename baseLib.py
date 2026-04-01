@@ -1,4 +1,4 @@
-# baseLib.py v1.1.5
+# baseLib.py v1.1.6
 # - The library is a collection of various utility functions for Python programming.
 
 # standard libraries
@@ -42677,7 +42677,7 @@ class imgLib:
                 def _default_item_file_name(model_name:str):
                     model_name_str=str(model_name)
                     slug=pyExLib.slugString(model_name_str) or "model"
-                    name_hash=pyExLib.sha256String(model_name_str)[:12]
+                    name_hash=hashlib.sha256(model_name_str.encode("utf-8")).hexdigest()[:12]
                     return f"{slug}_{name_hash}.json"
 
                 def _normalize_unique_item_name(item_name:str,model_name:str,used_rel_paths:set[str]):
@@ -42689,7 +42689,7 @@ class imgLib:
                     suffix=''.join(rel_path.suffixes) or ".json"
                     parent=PurePosixPath('.') if str(rel_path.parent)=='.' else rel_path.parent
                     model_name_str=str(model_name)
-                    name_hash=pyExLib.sha256String(model_name_str)[:12]
+                    name_hash=hashlib.sha256(model_name_str.encode("utf-8")).hexdigest()[:12]
                     candidate=PurePosixPath(parent)/f"{stem}_{name_hash}{suffix}"
                     if(str(candidate) not in used_rel_paths):
                         used_rel_paths.add(str(candidate))
