@@ -1,4 +1,4 @@
-# baseLib.py v1.1.6
+# baseLib.py v1.1.7
 # - The library is a collection of various utility functions for Python programming.
 
 # standard libraries
@@ -42690,13 +42690,22 @@ class imgLib:
                     parent=PurePosixPath('.') if str(rel_path.parent)=='.' else rel_path.parent
                     model_name_str=str(model_name)
                     name_hash=hashlib.sha256(model_name_str.encode("utf-8")).hexdigest()[:12]
-                    candidate=PurePosixPath(parent)/f"{stem}_{name_hash}{suffix}"
+
+                    # Avoid appending the same hash twice if the incoming stem
+                    # already ends with "_<12 hex chars>" equal to this model hash.
+                    m=re.search(r"_([0-9a-f]{12})$",stem)
+                    if(m is not None and m.group(1)==name_hash):
+                        final_stem=stem
+                    else:
+                        final_stem=f"{stem}_{name_hash}"
+
+                    candidate=PurePosixPath(parent)/f"{final_stem}{suffix}"
                     if(str(candidate) not in used_rel_paths):
                         used_rel_paths.add(str(candidate))
                         return str(candidate)
                     idx=2
                     while True:
-                        candidate2=PurePosixPath(parent)/f"{stem}_{name_hash}_{idx}{suffix}"
+                        candidate2=PurePosixPath(parent)/f"{final_stem}_{idx}{suffix}"
                         if(str(candidate2) not in used_rel_paths):
                             used_rel_paths.add(str(candidate2))
                             return str(candidate2)
