@@ -1,4 +1,4 @@
-# baseLib.py v1.1.4
+# baseLib.py v1.1.5
 # - The library is a collection of various utility functions for Python programming.
 
 # standard libraries
@@ -42675,16 +42675,41 @@ class imgLib:
                             _pack.pop("det_metrics",None)
 
                 def _default_item_file_name(model_name:str):
-                    return f"{pyExLib.slugString(str(model_name))}.json"
+                    model_name_str=str(model_name)
+                    slug=pyExLib.slugString(model_name_str) or "model"
+                    name_hash=pyExLib.sha256String(model_name_str)[:12]
+                    return f"{slug}_{name_hash}.json"
+
+                def _normalize_unique_item_name(item_name:str,model_name:str,used_rel_paths:set[str]):
+                    if(not isinstance(item_name,str) or len(item_name.strip())==0):
+                        raise ValueError("item_file_name_func must return a non-empty string")
+                    item_name=item_name.strip().replace('\\','/')
+                    rel_path=PurePosixPath(item_name)
+                    stem=rel_path.stem or "model"
+                    suffix=''.join(rel_path.suffixes) or ".json"
+                    parent=PurePosixPath('.') if str(rel_path.parent)=='.' else rel_path.parent
+                    model_name_str=str(model_name)
+                    name_hash=pyExLib.sha256String(model_name_str)[:12]
+                    candidate=PurePosixPath(parent)/f"{stem}_{name_hash}{suffix}"
+                    if(str(candidate) not in used_rel_paths):
+                        used_rel_paths.add(str(candidate))
+                        return str(candidate)
+                    idx=2
+                    while True:
+                        candidate2=PurePosixPath(parent)/f"{stem}_{name_hash}_{idx}{suffix}"
+                        if(str(candidate2) not in used_rel_paths):
+                            used_rel_paths.add(str(candidate2))
+                            return str(candidate2)
+                        idx+=1
 
                 if(item_file_name_func is None):
                     item_file_name_func=_default_item_file_name
 
                 manifest_models={}
+                used_rel_paths=set()
                 for model_name,model_pack in save_data.items():
                     item_name=item_file_name_func(model_name)
-                    if(not isinstance(item_name,str) or len(item_name.strip())==0):
-                        raise ValueError("item_file_name_func must return a non-empty string")
+                    item_name=_normalize_unique_item_name(item_name,model_name,used_rel_paths)
                     item_path=models_dir/Path(item_name)
                     item_path.parent.mkdir(parents=True,exist_ok=True)
 
