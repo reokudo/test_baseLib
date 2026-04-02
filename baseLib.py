@@ -1,4 +1,4 @@
-# baseLib.py v1.1.7
+# baseLib.py v1.1.8
 # - The library is a collection of various utility functions for Python programming.
 
 # standard libraries
@@ -42306,8 +42306,16 @@ class imgLib:
                 include_examples:bool=True,
             ):
                 """
-                Builds an English README text that explains the exported evaluation files,
-                metric definitions, and the main calculation algorithms.
+                Builds a detailed English README text that explains the exported evaluation files,
+                metric definitions, calculation algorithms, JSON structures, and interpretation guidance.
+
+                Args:
+                    evaluation_args (dict, optional): The arguments used for the evaluation, which may influence the content of the README.
+                    include_split_json_notes (bool, optional): Whether to include notes about the split JSON export.
+                    include_examples (bool, optional): Whether to include examples of the exported files and their contents.
+
+                Returns:
+                    str: The generated README text.
                 """
                 if(evaluation_args is None):
                     evaluation_args={}
@@ -42323,80 +42331,112 @@ class imgLib:
                 class_aware_iou=bool(all_annotation_iou_df_args.get("class_aware",True))
                 one_to_one_iou=bool(all_annotation_iou_df_args.get("one_to_one",True))
                 unmatched_value=all_annotation_iou_df_args.get("unmatched_value",0.0)
+                orientation=str(evaluation_args.get("orientation","gt_pred"))
+                background_label=str(evaluation_args.get("background_label","__background__"))
+                include_det_metrics=bool(evaluation_args.get("include_det_metrics",True))
+                iou_threshold=evaluation_args.get("iou_threshold",0.5)
 
                 lines=[]
                 add=lines.append
                 add("# Evaluation Export README")
                 add("")
-                add("This directory contains evaluation outputs exported from `imgLib.YOLOModelLib.AllImagesResultBBImgJsonCombinationsModel`.")
-                add("The purpose of this document is to make downstream analysis by users and AI systems easy, explicit, and less error-prone.")
+                add("This package contains evaluation outputs exported from `imgLib.YOLOModelLib.AllImagesResultBBImgJsonCombinationsModel`.")
+                add("It is designed to be self-describing so that both humans and AI systems can interpret the files correctly without guessing hidden assumptions.")
                 add("")
-                add("## Files")
+                add("The explanations below intentionally describe not only what each field means, but also how the values are produced and how they should be interpreted.")
+                add("")
+                add("## 1. Package contents")
                 add("")
                 add("Typical outputs may include:")
                 add("")
-                add("- `evaluation.json`: combined evaluation JSON with metadata.")
-                add("- `evaluation.xlsx`: spreadsheet export with summary sheets, per-class data, and confusion matrices.")
-                add("- `evaluation_json_split/`: optional split JSON export directory.")
-                add("- `evaluation_json_split.zip`: optional ZIP archive of the split JSON export.")
-                add("- `README.md`: this file.")
+                add("- `evaluation.json`: a single combined evaluation JSON file with metadata and all per-model results")
+                add("- `evaluation.xlsx`: a spreadsheet export for manual review")
+                add("- `evaluation_json_split/`: an optional split export directory for large evaluations")
+                add("- `evaluation_json_split.zip`: an optional ZIP archive of the split export")
+                add("- `README.md`: this explanatory document")
                 add("")
-                add("## Orientation and confusion matrix semantics")
+                add("The exact file set depends on export options.")
                 add("")
-                add("Unless explicitly overridden, the exported evaluation uses `evaluation_orientation = gt_pred`.")
-                add("In this orientation:")
+                add("## 2. High-level evaluation philosophy")
+                add("")
+                add("The export contains multiple complementary views of model quality:")
+                add("")
+                add("1. **mAP-based detection metrics**: useful as the main detection benchmark")
+                add("2. **confusion-matrix-based metrics**: useful for class-wise error analysis after box matching")
+                add("3. **annotation-level IoU data**: useful for detailed debugging of specific objects")
+                add("")
+                add("These metrics answer different questions. They should be interpreted together, not as interchangeable duplicates.")
+                add("")
+                add("## 3. Export configuration summary")
+                add("")
+                add(f"- confusion matrix orientation: `{orientation}`")
+                add(f"- box matching IoU threshold: `{iou_threshold}`")
+                add(f"- background label: `{background_label}`")
+                add(f"- detection metrics included: `{include_det_metrics}`")
+                add(f"- mAP included: `{include_map}`")
+                add(f"- annotation IoU export included: `{include_annotation_iou}`")
+                add("")
+                add("## 4. Orientation and confusion matrix semantics")
+                add("")
+                add("Unless explicitly overridden, the improved export uses `evaluation_orientation = gt_pred`.")
+                add("")
+                add("For `gt_pred` orientation:")
                 add("")
                 add("- rows = ground-truth classes")
                 add("- columns = predicted classes")
-                add("- diagonal cells = correct class matches")
-                add("- `__background__` = unmatched-box accounting when background export is enabled")
+                add("- diagonal cells = class-correct matched detections")
+                add(f"- `{background_label}` is used to represent unmatched GT or unmatched predictions when background export is enabled")
                 add("")
-                add("For a class `c`, one-vs-rest counts are derived from the confusion matrix as follows:")
+                add("This is an **object-level** confusion matrix after box matching. It is not a dense image segmentation matrix and not an image-level label matrix.")
                 add("")
-                add("- TP(c): diagonal cell for class `c`")
-                add("- FP(c): sum of column `c`, excluding TP(c)")
-                add("- FN(c): sum of row `c`, excluding TP(c)")
-                add("- TN(c): total matrix sum minus TP(c), FP(c), and FN(c)")
+                add("## 5. How the confusion matrix is built")
                 add("")
-                add("These TN values are mathematically valid for the exported confusion matrix, but they should not be interpreted as dense image-space true negatives.")
+                add("The confusion matrix is produced in these steps:")
                 add("")
-                add("## Matching algorithm used for the confusion matrix")
+                add("1. Validate GT and prediction arrays for each image")
+                add("2. Match GT and prediction boxes under the configured IoU threshold")
+                add("3. For each matched pair, increment `(gt_class, pred_class)`")
+                add(f"4. For each unmatched GT box, increment `(gt_class, {background_label})`")
+                add(f"5. For each unmatched predicted box, increment `({background_label}, pred_class)`")
                 add("")
-                add("The confusion matrix is built from object-level matching between ground-truth boxes and predicted boxes.")
-                add("The improved implementation supports strict validation and configurable matching behavior, including class-aware matching and score-aware ordering.")
+                add("This means the confusion matrix depends on the box matching policy. It is not a direct count of raw predictions before matching.")
                 add("")
-                add("High-level process:")
+                add("## 6. One-vs-rest TP / FP / FN / TN definitions")
                 add("")
-                add("1. Validate GT and prediction arrays.")
-                add("2. Match boxes under the requested IoU threshold.")
-                add("3. Matched pairs increment `(gt_class, pred_class)`.")
-                add("4. Unmatched GT boxes increment `(gt_class, __background__)`.")
-                add("5. Unmatched predicted boxes increment `(__background__, pred_class)`.")
+                add("For a class `c`, the exported per-class counts are derived from the confusion matrix as follows:")
                 add("")
-                add("This means the confusion matrix is an object-level summary after box matching, not a raw image-level label matrix.")
+                add("- `TP(c)`: diagonal value of class `c`")
+                add("- `FP(c)`: sum of column `c` except the diagonal")
+                add("- `FN(c)`: sum of row `c` except the diagonal")
+                add("- `TN(c)`: total matrix sum minus `TP(c)`, `FP(c)`, and `FN(c)`")
                 add("")
-                add("## Core metric definitions")
+                add("Important caution:")
                 add("")
-                add("### Per-class precision")
+                add("These TN values are mathematically valid with respect to the exported confusion matrix, but they should **not** be interpreted as dense image-space negatives or all possible background locations in the image.")
                 add("")
-                add("`precision = TP / (TP + FP)`")
+                add("## 7. Core per-class metrics")
                 add("")
-                add("### Per-class recall")
+                add("For each class, the export may contain:")
                 add("")
-                add("`recall = TP / (TP + FN)`")
+                add("- `precision = TP / (TP + FP)`")
+                add("- `recall = TP / (TP + FN)`")
+                add("- `f1 = 2 * precision * recall / (precision + recall)`")
+                add("- `support_gt`: number of GT instances for the class")
+                add("- `support_pred`: number of predicted instances for the class")
                 add("")
-                add("### Per-class F1")
+                add("`support_gt` and `support_pred` are especially useful when class imbalance is severe.")
                 add("")
-                add("`f1 = 2 * precision * recall / (precision + recall)`")
+                add("## 8. Accuracy")
                 add("")
-                add("### Accuracy")
+                add("The exported `accuracy` is computed from the object-level confusion matrix:")
                 add("")
-                add("For the exported confusion matrix, `accuracy = sum(diagonal) / sum(all cells)`.")
-                add("This is an object-level confusion-matrix accuracy, not a dense whole-image accuracy.")
+                add("`accuracy = sum(diagonal) / sum(all confusion-matrix cells)`")
                 add("")
-                add("## Macro and weighted metrics")
+                add("This should be interpreted as a matched-object confusion-matrix accuracy, not a dense pixel accuracy and not a generic full-image accuracy.")
                 add("")
-                add("The export may contain:")
+                add("## 9. Macro, weighted, and present-class metrics")
+                add("")
+                add("The export may contain three families of aggregate class metrics:")
                 add("")
                 add("- `macro_precision`, `macro_recall`, `macro_f1`")
                 add("- `weighted_precision`, `weighted_recall`, `weighted_f1`")
@@ -42404,90 +42444,125 @@ class imgLib:
                 add("")
                 add("Definitions:")
                 add("")
-                add("- `macro_*`: arithmetic mean across classes with equal weight per class.")
-                add("- `weighted_*`: mean weighted by `support_gt` (ground-truth instance count per class).")
-                add("- `macro_present_*`: arithmetic mean restricted to classes with `support_gt > 0`.")
+                add("- `macro_*`: arithmetic mean across classes with equal class weight")
+                add("- `weighted_*`: arithmetic mean weighted by `support_gt`")
+                add("- `macro_present_*`: arithmetic mean restricted to classes with `support_gt > 0`")
                 add("")
-                add("Practical interpretation:")
+                add("Interpretation guidance:")
                 add("")
-                add("- `weighted_*` reflects the actual class distribution in the evaluated data.")
-                add("- `macro_*` treats all classes equally and can become very small when the label space is large but only a few classes are present.")
-                add("- `macro_present_*` is usually easier to interpret when only a subset of classes appears in the evaluation set.")
-                add("")
-                add("## Support fields")
-                add("")
-                add("Per-class exports may include:")
-                add("")
-                add("- `support` or `support_gt`: number of GT instances for the class")
-                add("- `support_pred`: number of predicted instances for the class")
-                add("")
-                add("These fields help distinguish class imbalance from over-prediction or under-detection.")
+                add("- `weighted_*` is closer to the observed class distribution in the evaluated dataset")
+                add("- `macro_*` emphasizes balance across the full class space")
+                add("- `macro_present_*` is often the easiest to interpret when the label space is large but only a subset of classes appears in the evaluated data")
                 add("")
                 if(include_map):
-                    add("## mAP metrics")
+                    add("## 10. mAP metrics")
                     add("")
-                    add("This export includes mAP data.")
+                    add("This export includes mean Average Precision (mAP) data.")
                     add("")
-                    add("- `mAP50`: mean Average Precision at IoU = 0.50")
-                    add("- `mAP50_95`: mean Average Precision averaged over IoU thresholds 0.50, 0.55, ..., 0.95")
+                    add("Included fields may contain:")
+                    add("")
+                    add("- `mAP50`: mean AP at IoU = 0.50")
+                    add("- `mAP50_95`: mean AP averaged over IoU thresholds 0.50, 0.55, ..., 0.95")
                     add("- `AP50_per_class`: per-class AP at IoU = 0.50")
                     add("- `AP50_95_per_class`: per-class AP averaged over the full IoU range")
-                    add("- `per_iou`: per-threshold AP data")
+                    add("- `per_iou`: detailed per-threshold AP data")
+                    add("- `n_gt_per_class`: GT support used by AP calculation")
+                    add("- `n_pred_per_class`: prediction count used during AP evaluation")
                     add("")
-                    add("The AP implementation uses score-ordered predictions with greedy one-to-one matching per class under each IoU threshold.")
-                    add("The current export uses the configured AP integration mode, typically `interp101`.")
+                    add("### 10.1 AP calculation algorithm")
                     add("")
-                    add("If a class has zero GT instances, AP may appear as `null`. This means the metric is undefined for that class under the current data.")
+                    add("At each IoU threshold and for each class separately:")
+                    add("")
+                    add("1. Collect predictions of that class from all evaluated images")
+                    add("2. Sort them by descending confidence score")
+                    add("3. Greedily match predictions to previously unmatched GT boxes of the same class")
+                    add("4. Build the precision-recall curve")
+                    add("5. Integrate the curve using the configured AP mode, typically `interp101`")
+                    add("")
+                    add("This AP pipeline is conceptually different from confusion-matrix averaging, so `mAP` and `weighted_f1` may rank models differently.")
+                    add("")
+                    add("If a class has zero GT instances, AP may appear as `null`. This means the metric is undefined for that class under the current evaluation set.")
                     add("")
                 if(include_annotation_iou):
-                    add("## Annotation IoU export")
+                    add("## 11. Annotation-level IoU export")
                     add("")
-                    add("This export includes annotation-level IoU data in `all_annotation_iou_dict`.")
-                    add("The JSON representation uses record format so that each row can be processed independently.")
+                    add("This export includes annotation-level IoU records in `all_annotation_iou_dict`.")
+                    add("The JSON representation uses:")
                     add("")
-                    add("Typical fields include image name, model name, annotation id, IoU, GT class/box fields, and matched prediction class/score/box fields.")
+                    add("```json")
+                    add('{"orient": "records", "records": [...]}')
+                    add("```")
                     add("")
-                    add(f"Current export settings indicate: `class_aware={class_aware_iou}`, `one_to_one={one_to_one_iou}`, `unmatched_value={unmatched_value}`.")
+                    add("Each record usually contains:")
                     add("")
-                    add("Interpretation notes:")
+                    add("- image identifier")
+                    add("- model identifier")
+                    add("- annotation id")
+                    add("- IoU value")
+                    add("- GT class and GT box coordinates")
+                    add("- matched prediction index, class, score, and box coordinates")
                     add("")
-                    add("- If a GT annotation has no valid matched prediction, IoU is set to the configured unmatched value.")
-                    add("- When `class_aware=True`, only predictions of the same class are considered for matching.")
-                    add("- When `one_to_one=True`, one prediction cannot be re-used for multiple GT annotations.")
+                    add(f"Current annotation IoU settings: `class_aware={class_aware_iou}`, `one_to_one={one_to_one_iou}`, `unmatched_value={unmatched_value}`.")
                     add("")
-                add("## Recommended interpretation order")
+                    add("### 11.1 Matching semantics for annotation IoU")
+                    add("")
+                    add("- If `class_aware=True`, only predictions of the same class are eligible")
+                    add("- If `one_to_one=True`, one prediction cannot be re-used for multiple GT annotations")
+                    add("- If no valid match exists, IoU becomes the configured unmatched value")
+                    add("")
+                    add("This table is excellent for debugging specific missed detections, weak localizations, and class-specific failures.")
                 add("")
-                add("1. `mAP50` and `mAP50_95` (if exported)")
-                add("2. `weighted_f1`")
-                add("3. `macro_present_f1`")
-                add("4. confusion matrix and per-class TP/FP/FN")
-                if(include_annotation_iou):
-                    add("5. annotation-level IoU records for error analysis")
+                add("## 12. JSON structures")
                 add("")
-                add("## Common pitfalls")
+                add("### 12.1 Combined JSON")
                 add("")
-                add("- Do not interpret confusion-matrix `accuracy` as a dense full-image negative/positive accuracy.")
-                add("- `macro_*` and `weighted_*` answer different questions and should not be treated as interchangeable.")
-                add("- `null` AP values usually mean a class had no GT support, not that the exporter failed.")
-                add("- When many classes are defined but only a few appear, `macro_*` can look much worse than `weighted_*` or `macro_present_*`.")
+                add("`evaluation.json` is a metadata-wrapped JSON produced by `IOLib.JSONLib.saveMETAJSON`.")
+                add("Its `data` field maps model names to per-model evaluation objects.")
+                add("")
+                add("### 12.2 Split JSON")
+                add("")
+                add("In split export mode, a top manifest JSON is produced together with one JSON file per model.")
+                add("The top manifest contains metadata, relative paths, and light summary information such as orientation and optional mAP summary values.")
+                add("This makes large evaluation sets easier to load incrementally and easier to merge later.")
                 add("")
                 if(include_split_json_notes):
-                    add("## Split JSON export")
+                    add("## 13. How split ZIP merging should be interpreted")
                     add("")
-                    add("If the evaluation is exported in split form, the top JSON file is a manifest generated with `IOLib.JSONLib.saveMETAJSON`.")
-                    add("It contains metadata plus relative paths to per-model JSON files, making large exports easier to inspect and load incrementally.")
+                    add("When multiple split ZIP archives are merged, the merged package is simply a re-packaged collection of per-model JSON items under a new manifest.")
+                    add("The merge process does not recompute metrics. It preserves the already-exported per-model evaluation results and creates a new top-level manifest that references all collected model files.")
                     add("")
-                if(include_examples):
-                    add("## Example downstream usage ideas")
-                    add("")
-                    add("- Rank models by `mAP50_95` and `weighted_f1`.")
-                    add("- Use `macro_present_f1` to compare balance across classes that actually appear in the dataset.")
-                    add("- Use `all_annotation_iou_dict.records` to find difficult annotations and inspect them manually.")
-                    add("- Use `support_gt` and `support_pred` to separate class imbalance issues from localization issues.")
-                    add("")
-                add("## Provenance")
+                add("## 14. Recommended interpretation order")
                 add("")
-                add("This README was generated automatically by the library export function so that the evaluation package is self-describing.")
+                add("A practical reading order is:")
+                add("")
+                add("1. `mAP50_95` and `mAP50` for overall detection quality")
+                add("2. `weighted_f1` for dataset-distribution-weighted classification balance")
+                add("3. `macro_present_f1` for balance across classes that actually appear")
+                add("4. confusion matrices and per-class TP/FP/FN for error structure")
+                if(include_annotation_iou):
+                    add("5. annotation-level IoU records for case-by-case debugging")
+                add("")
+                add("## 15. Common pitfalls and non-equivalences")
+                add("")
+                add("- `mAP` and confusion-matrix metrics are not the same family of metrics")
+                add("- confusion-matrix `accuracy` is not a dense whole-image accuracy")
+                add("- `weighted_*` and `macro_*` answer different questions")
+                add("- `null` AP values normally indicate zero GT support, not exporter failure")
+                add("- low `macro_*` in a large label space may simply reflect many absent classes")
+                add("- TN values in object-level confusion matrices should be interpreted carefully")
+                add("")
+                if(include_examples):
+                    add("## 16. Suggested downstream analysis tasks")
+                    add("")
+                    add("- rank models by `mAP50_95` and compare ties using `weighted_f1`")
+                    add("- inspect `macro_present_f1` to detect class imbalance in quality")
+                    add("- inspect `support_gt` and `support_pred` to separate imbalance from over-prediction")
+                    add("- sort `all_annotation_iou_dict.records` by IoU ascending to find difficult annotations")
+                    add("- compare per-class AP with per-class F1 to distinguish localization failures from confusion failures")
+                    add("")
+                add("## 17. Provenance")
+                add("")
+                add("This README is auto-generated by the export utility so that the evaluation package remains self-describing even when moved, zipped, merged, or processed by external systems.")
                 add("")
                 return "\n".join(lines)+"\n"
 
@@ -42803,6 +42878,374 @@ class imgLib:
                     "readme_path":(str(readme_path) if readme_path is not None else None),
                     "zip_path":(str(zip_created_path) if zip_created_path is not None else None),
                 }
+
+            @staticmethod
+            def _loadMetaJsonDataOnly(file_path:str|Path):
+                """
+                Loads a META JSON file and returns the `data` payload when present.
+
+                Args:
+                    file_path (str|Path): Path to the META JSON file.
+
+                Returns:
+                    The `data` field from the META JSON if it exists and is a dictionary, otherwise the entire JSON object.
+                """
+                file_path_obj=Path(file_path)
+                with open(file_path_obj,mode="r",encoding="utf-8") as f:
+                    obj=json.load(f)
+                if(isinstance(obj,dict) and isinstance(obj.get("data",None),dict)):
+                    return obj.get("data")
+                return obj
+
+            @staticmethod
+            def _resolveEvaluationSplitManifest(top_json_path:str|Path):
+                """
+                Loads a split evaluation manifest and returns `(top_json_path, manifest_data)`.
+
+                Args:
+                    top_json_path (str|Path): Path to the top-level JSON manifest of a split evaluation package.
+
+                Returns:
+                    A tuple `(top_json_path, manifest_data)` where `manifest_data` is the dictionary loaded from the top JSON manifest.
+                """
+                top_json_path=Path(top_json_path)
+                data=imgLib.YOLOModelLib.AllImagesResultBBImgJsonCombinationsModel._loadMetaJsonDataOnly(top_json_path)
+                if(not isinstance(data,dict)):
+                    raise ValueError("Invalid split evaluation manifest data")
+                if(str(data.get("format",None))!="split_evaluation_json"):
+                    raise ValueError("The provided top JSON is not a split evaluation manifest")
+                return top_json_path,data
+
+            @staticmethod
+            def mergeEvaluationJsonSplits(
+                input_paths:list,
+                output_dir:str|Path,
+                top_json_name:str="evaluation_split.json",
+                per_model_subdir:str="models",
+                zip_output:bool=False,
+                zip_path:str|Path|None=None,
+                save_readme:bool=False,
+                readme_file_name:str="README.md",
+                readme_meta_json_name:str|None=None,
+                indent:int=IOLib.JSONLib.DEFAULT_INDENT,
+                minimalize_flag:bool=False,
+                collision_policy:str="error",
+            ):
+                """
+                Merges multiple split evaluation packages (directories, top manifest JSON files, or ZIP archives containing a split package) into one split evaluation directory.
+
+                Args:
+                    input_paths (list): A list of paths. Each element may be:
+                        - A directory containing a split evaluation package (identified by the presence of `evaluation_split.json` or `top_json_name`).
+                        - A path to a top-level JSON manifest of a split evaluation package.
+                        - A ZIP archive containing a split evaluation package.
+                    output_dir (str|Path): Directory to save the merged split evaluation package.
+                    top_json_name (str, optional): Filename for the top-level JSON manifest in the merged package. Defaults to "evaluation_split.json".
+                    per_model_subdir (str, optional): Subdirectory under `output_dir` to save individual model JSON files. Defaults to "models".
+                    zip_output (bool, optional): Whether to create a ZIP archive of the merged output directory. Defaults to False.
+                    zip_path (str|Path|None, optional): Path for the ZIP archive if `zip_output` is True. Defaults to `output_dir.zip`.
+                    save_readme (bool, optional): Whether to save a README.md file describing the merged evaluation. Defaults to False.
+                    readme_file_name (str, optional): Filename for the README.md if `save_readme` is True. Defaults to "README.md".
+                    readme_meta_json_name (str|None, optional): Filename for the README meta JSON if `save_readme` is True. Defaults to None (no meta JSON).
+                    indent (int, optional): Indentation level for JSON formatting. Defaults to `IOLib.JSONLib.DEFAULT_INDENT`.
+                    minimalize_flag (bool, optional): Whether to minimalize the JSON output. Defaults to False.
+                    collision_policy (str, optional): Policy for handling duplicate model names across input packages. Must be one of:
+                        - "error": Raise an error if a duplicate model name is encountered.
+                        - "keep_first": Keep the first occurrence of a model name and ignore subsequent duplicates.
+                        - "overwrite": Overwrite the existing model with the new one if a duplicate is encountered.
+                        - "keep_all": Preserve all duplicates by assigning unique entry IDs and file names to each occurrence.
+                """
+                if(not isinstance(input_paths,(list,tuple)) or len(input_paths)==0):
+                    raise ValueError("input_paths must be a non-empty list or tuple")
+                collision_policy=str(collision_policy or "error")
+                if(collision_policy not in ("error","keep_first","overwrite","keep_all")):
+                    raise ValueError("collision_policy must be one of: error, keep_first, overwrite, keep_all")
+
+                output_dir_obj=Path(output_dir)
+                output_dir_obj.mkdir(parents=True,exist_ok=True)
+                models_dir=output_dir_obj/Path(per_model_subdir)
+                models_dir.mkdir(parents=True,exist_ok=True)
+                top_json_path=output_dir_obj/Path(top_json_name)
+
+                temp_dirs=[]
+                def _cleanup_temp_dirs():
+                    for td in temp_dirs:
+                        try:
+                            shutil.rmtree(td,ignore_errors=True)
+                        except Exception:
+                            pass
+
+                try:
+                    used_rel_paths=set()
+                    merged_manifest_models={}
+                    merged_sources=[]
+                    model_name_to_source={}
+                    duplicate_name_counts={}
+
+                    def _default_item_file_name(model_name:str):
+                        model_name_str=str(model_name)
+                        slug=pyExLib.slugString(model_name_str) or "model"
+                        name_hash=hashlib.sha256(model_name_str.encode("utf-8")).hexdigest()[:12]
+                        return f"{slug}_{name_hash}.json"
+
+                    def _normalize_unique_item_name(item_name:str,model_name:str,extra_unique_seed:str|None=None):
+                        if(not isinstance(item_name,str) or len(item_name.strip())==0):
+                            raise ValueError("item file name must be a non-empty string")
+                        item_name=item_name.strip().replace('\\','/')
+                        rel_path=PurePosixPath(item_name)
+                        stem=rel_path.stem or "model"
+                        suffix=''.join(rel_path.suffixes) or ".json"
+                        parent=PurePosixPath('.') if str(rel_path.parent)=='.' else rel_path.parent
+                        model_name_str=str(model_name)
+                        base_hash=hashlib.sha256(model_name_str.encode("utf-8")).hexdigest()[:12]
+                        final_stem=stem
+                        m=re.search(r"_([0-9a-f]{12})$",final_stem)
+                        if(not (m is not None and m.group(1)==base_hash)):
+                            final_stem=f"{final_stem}_{base_hash}"
+                        if(isinstance(extra_unique_seed,str) and len(extra_unique_seed)>0):
+                            extra_hash=hashlib.sha256(extra_unique_seed.encode("utf-8")).hexdigest()[:8]
+                            m2=re.search(r"_([0-9a-f]{8})$",final_stem)
+                            if(not (m2 is not None and m2.group(1)==extra_hash)):
+                                final_stem=f"{final_stem}_{extra_hash}"
+                        candidate=PurePosixPath(parent)/f"{final_stem}{suffix}"
+                        if(str(candidate) not in used_rel_paths):
+                            used_rel_paths.add(str(candidate))
+                            return str(candidate)
+                        idx=2
+                        while True:
+                            candidate2=PurePosixPath(parent)/f"{final_stem}_{idx}{suffix}"
+                            if(str(candidate2) not in used_rel_paths):
+                                used_rel_paths.add(str(candidate2))
+                                return str(candidate2)
+                            idx+=1
+
+                    def _iter_manifest_items(models_obj):
+                        if(isinstance(models_obj,dict)):
+                            for k,v in models_obj.items():
+                                if(not isinstance(v,dict)):
+                                    continue
+                                model_name=str(v.get("model_name",k))
+                                entry_id=str(v.get("entry_id",k))
+                                yield entry_id,model_name,v
+                        elif(isinstance(models_obj,list)):
+                            for idx,v in enumerate(models_obj):
+                                if(not isinstance(v,dict)):
+                                    continue
+                                model_name=str(v.get("model_name",f"model_{idx:06d}"))
+                                entry_id=str(v.get("entry_id",f"entry_{idx:06d}"))
+                                yield entry_id,model_name,v
+                        else:
+                            raise ValueError("Invalid models section in manifest")
+
+                    for src_idx,src in enumerate(input_paths):
+                        src_path=Path(src)
+                        if(not src_path.exists()):
+                            raise FileNotFoundError(f"Input split package not found: {src_path}")
+
+                        source_kind=None
+                        manifest_path=None
+                        source_root=None
+                        if(src_path.is_file() and src_path.suffix.lower()==".zip"):
+                            source_kind="zip"
+                            tmpdir=tempfile.mkdtemp(prefix="merge_eval_split_")
+                            temp_dirs.append(tmpdir)
+                            with zipfile.ZipFile(src_path,mode="r") as zf:
+                                zf.extractall(tmpdir)
+                            candidate_manifests=list(Path(tmpdir).rglob(top_json_name))
+                            if(len(candidate_manifests)==0):
+                                candidate_manifests=list(Path(tmpdir).rglob("evaluation_split.json"))
+                            if(len(candidate_manifests)==0):
+                                raise FileNotFoundError(f"No split evaluation manifest found in zip: {src_path}")
+                            manifest_path=candidate_manifests[0]
+                            source_root=manifest_path.parent
+                        elif(src_path.is_file() and src_path.suffix.lower()==".json"):
+                            source_kind="top_json"
+                            manifest_path=src_path
+                            source_root=src_path.parent
+                        elif(src_path.is_dir()):
+                            source_kind="dir"
+                            candidate=src_path/Path(top_json_name)
+                            if(candidate.exists()):
+                                manifest_path=candidate
+                            else:
+                                candidate=src_path/Path("evaluation_split.json")
+                                if(candidate.exists()):
+                                    manifest_path=candidate
+                                else:
+                                    manifests=list(src_path.rglob("evaluation_split.json"))
+                                    if(len(manifests)==0):
+                                        raise FileNotFoundError(f"No split evaluation manifest found in directory: {src_path}")
+                                    manifest_path=manifests[0]
+                            source_root=manifest_path.parent
+                        else:
+                            raise ValueError(f"Unsupported input path: {src_path}")
+
+                        _,manifest_data=imgLib.YOLOModelLib.AllImagesResultBBImgJsonCombinationsModel._resolveEvaluationSplitManifest(manifest_path)
+                        source_id=f"src{src_idx+1:04d}"
+                        models_obj=manifest_data.get("models",{})
+                        model_count=sum(1 for _ in _iter_manifest_items(models_obj))
+                        source_record={
+                            "source_id":source_id,
+                            "input_path":str(src_path),
+                            "source_kind":source_kind,
+                            "manifest_path":str(manifest_path),
+                            "model_count":int(model_count),
+                        }
+                        merged_sources.append(source_record)
+
+                        for item_idx,(src_entry_id,model_name,item_info) in enumerate(_iter_manifest_items(models_obj),1):
+                            if(model_name in model_name_to_source):
+                                if(collision_policy=="error"):
+                                    prev=model_name_to_source.get(model_name,"unknown")
+                                    raise ValueError(f"Duplicate model name during merge: {model_name} (previous source: {prev}, new source: {src_path})")
+                                elif(collision_policy=="keep_first"):
+                                    continue
+                                elif(collision_policy=="overwrite"):
+                                    pass
+                                elif(collision_policy=="keep_all"):
+                                    pass
+                            rel_file=item_info.get("file",None)
+                            if(not isinstance(rel_file,str) or len(rel_file.strip())==0):
+                                raise ValueError(f"Invalid file entry for model '{model_name}' in manifest: {manifest_path}")
+                            src_item_path=(manifest_path.parent/Path(rel_file)).resolve()
+                            if(not src_item_path.exists()):
+                                raise FileNotFoundError(f"Referenced model JSON not found: {src_item_path}")
+
+                            duplicate_name_counts[model_name]=duplicate_name_counts.get(model_name,0)+1
+                            duplicate_index=duplicate_name_counts[model_name]
+                            if(collision_policy=="keep_all"):
+                                unique_seed=f"{source_id}|{src_entry_id}|{duplicate_index}|{src_item_path}"
+                            else:
+                                unique_seed=None
+                            dest_rel=_normalize_unique_item_name(_default_item_file_name(model_name),model_name,extra_unique_seed=unique_seed)
+                            dest_item_path=models_dir/Path(dest_rel)
+                            dest_item_path.parent.mkdir(parents=True,exist_ok=True)
+                            shutil.copy2(src_item_path,dest_item_path)
+
+                            new_item_info=pyExLib.safety_deepcopy(item_info)
+                            new_item_info["file"]=os.path.relpath(dest_item_path,top_json_path.parent)
+                            new_item_info["merged_from_input_path"]=str(src_path)
+                            new_item_info["merged_from_manifest_path"]=str(manifest_path)
+                            new_item_info["source_id"]=source_id
+                            new_item_info["source_index"]=int(src_idx)
+                            new_item_info["source_entry_id"]=str(src_entry_id)
+                            new_item_info["model_name"]=str(model_name)
+                            new_item_info["duplicate_index_for_model_name"]=int(duplicate_index)
+                            new_item_info["is_duplicate_model_name"]=bool(duplicate_index>1)
+
+                            if(collision_policy=="keep_all"):
+                                entry_id_seed=f"{source_id}|{src_entry_id}|{model_name}|{duplicate_index}|{src_item_path}"
+                                entry_hash=hashlib.sha256(entry_id_seed.encode("utf-8")).hexdigest()[:12]
+                                merged_key=f"{pyExLib.slugString(model_name) or 'model'}__{source_id}__{entry_hash}"
+                                new_item_info["entry_id"]=merged_key
+                                merged_manifest_models[merged_key]=new_item_info
+                            else:
+                                new_item_info["entry_id"]=str(model_name)
+                            merged_manifest_models[model_name]=new_item_info
+                            model_name_to_source[model_name]=str(src_path)
+
+                    top_data={
+                        "format":"split_evaluation_json",
+                        "models_dir":os.path.relpath(models_dir,top_json_path.parent),
+                        "model_count":int(len(merged_manifest_models)),
+                        "models":merged_manifest_models,
+                        "merge_info":{
+                            "is_merged":True,
+                            "collision_policy":collision_policy,
+                            "source_count":int(len(merged_sources)),
+                            "sources":merged_sources,
+                            "contains_duplicate_model_names":bool(any(v>1 for v in duplicate_name_counts.values())),
+                            "duplicate_model_name_counts":{k:int(v) for k,v in duplicate_name_counts.items() if v>1},
+                        },
+                        "options":{
+                            "zip_output":bool(zip_output),
+                        },
+                    }
+
+                    IOLib.JSONLib.saveMETAJSON(
+                        file_path=top_json_path,
+                        meta_str=imgLib.YOLOModelLib.AllImagesResultBBImgJsonCombinationsModel.META_ALL_IMAGES_RESULT_BB_IMG_JSON_COMBINATION_MODEL_EVALUATION_SPLIT,
+                        data=top_data,
+                        indent=indent,
+                        minimalize_flag=minimalize_flag,
+                    )
+
+                    readme_path=None
+                    if(save_readme):
+                        readme_path=output_dir_obj/Path(readme_file_name)
+                        readme_meta_path=(output_dir_obj/Path(readme_meta_json_name) if readme_meta_json_name is not None else None)
+                        lines=[]
+                        add=lines.append
+                        add("# Merged Evaluation Split Package")
+                        add("")
+                        add("This directory was generated by merging multiple split evaluation packages.")
+                        add("")
+                        add("## What was merged")
+                        add("")
+                        add(f"- number of source packages: {len(merged_sources)}")
+                        add(f"- number of merged model items: {len(merged_manifest_models)}")
+                        add(f"- collision policy: `{collision_policy}`")
+                        if(collision_policy=="keep_all"):
+                            add("- duplicate model names are preserved as separate entries with unique `entry_id` values")
+                        add("")
+                        add("## Source packages")
+                        add("")
+                        for i,src_rec in enumerate(merged_sources,1):
+                            add(f"{i}. `{src_rec['input_path']}` ({src_rec['source_kind']}, models={src_rec['model_count']})")
+                        add("")
+                        add("## Semantics")
+                        add("")
+                        add("The merge operation does not recompute evaluation metrics.")
+                        add("It only re-packages previously exported per-model evaluation JSON files under one manifest.")
+                        add("")
+                        add("This means all metric values remain exactly as they were in the original exports.")
+                        add("")
+                        add("## Manifest")
+                        add("")
+                        add("The top `evaluation_split.json` file is a meta JSON produced with `IOLib.JSONLib.saveMETAJSON`.")
+                        add("Its `data.models` section maps each merged entry to a per-model JSON file.")
+                        add("When `collision_policy=keep_all`, `data.models` is keyed by unique entry IDs rather than raw model names.")
+                        add("")
+                        with open(readme_path,mode="w",encoding="utf-8") as f:
+                            f.write("\n".join(lines)+"\n")
+                        if(readme_meta_path is not None):
+                            IOLib.JSONLib.saveMETAJSON(
+                                file_path=readme_meta_path,
+                                meta_str=imgLib.YOLOModelLib.AllImagesResultBBImgJsonCombinationsModel.META_ALL_IMAGES_RESULT_BB_IMG_JSON_COMBINATION_MODEL_EVALUATION_README,
+                                data={
+                                    "readme_file":os.path.relpath(readme_path,readme_meta_path.parent),
+                                    "language":"en",
+                                    "format":"markdown",
+                                    "kind":"merged_split_readme",
+                                },
+                                indent=indent,
+                                minimalize_flag=minimalize_flag,
+                            )
+
+                    zip_created_path=None
+                    if(zip_output):
+                        if(zip_path is None):
+                            zip_created_path=output_dir_obj.with_suffix(".zip")
+                        else:
+                            zip_created_path=Path(zip_path)
+                        zip_created_path.parent.mkdir(parents=True,exist_ok=True)
+                        if(zip_created_path.exists()):
+                            zip_created_path.unlink()
+                        with zipfile.ZipFile(zip_created_path,mode="w",compression=zipfile.ZIP_DEFLATED) as zf:
+                            for fp in output_dir_obj.rglob("*"):
+                                if(fp.is_file()):
+                                    zf.write(fp,arcname=os.path.relpath(fp,output_dir_obj.parent))
+                    return {
+                        "output_dir":str(output_dir_obj),
+                        "top_json_path":str(top_json_path),
+                        "models_dir":str(models_dir),
+                        "readme_path":(str(readme_path) if save_readme else None),
+                        "zip_path":(str(zip_created_path) if zip_output else None),
+                        "model_count":int(len(merged_manifest_models)),
+                        "source_count":int(len(merged_sources)),
+                    }
+                finally:
+                    _cleanup_temp_dirs()
 
             def getEvaluateDataFrames(
                 self,
