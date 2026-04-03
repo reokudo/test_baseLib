@@ -1,4 +1,4 @@
-# baseLib.py v1.1.8
+# baseLib.py v1.1.9
 # - The library is a collection of various utility functions for Python programming.
 
 # standard libraries
@@ -10594,6 +10594,50 @@ class IOLib:
 
         __ADDITIONALLY_CONFIG_TYPE_RENEW="renew"
 
+
+        @staticmethod
+        def _sanitizeJSONSafe(obj):
+            """
+            Recursively converts NaN/Inf/-Inf values into JSON-safe values.
+            - float("nan"), float("inf"), float("-inf") -> None
+            - numpy floating values are also sanitized when possible
+
+            Args:
+                obj: The object to sanitize.
+
+            Returns:
+                The sanitized object.
+            """
+            try:
+                import numpy as _np  # local import to avoid hard dependency assumptions
+                _np_float_types=(float,_np.floating)
+                _np_int_types=(int,_np.integer)
+                _np_bool_types=(bool,_np.bool_)
+            except Exception:
+                _np_float_types=(float,)
+                _np_int_types=(int,)
+                _np_bool_types=(bool,)
+
+            if(obj is None or isinstance(obj,(str,*_np_int_types,*_np_bool_types))):
+                return obj
+
+            if(isinstance(obj,_np_float_types)):
+                v=float(obj)
+                if(math.isnan(v) or math.isinf(v)):
+                    return None
+                return v
+
+            if(isinstance(obj,dict)):
+                return {k:IOLib.JSONLib._sanitizeJSONSafe(v) for k,v in obj.items()}
+
+            if(isinstance(obj,(list,tuple))):
+                return [IOLib.JSONLib._sanitizeJSONSafe(v) for v in obj]
+
+            if(isinstance(obj,set)):
+                return [IOLib.JSONLib._sanitizeJSONSafe(v) for v in sorted(obj,key=lambda x:str(x))]
+
+            return obj
+
         @staticmethod
         def saveMETAJSON(
             file_path:str,
@@ -10644,7 +10688,7 @@ class IOLib:
                     IOLib.JSONLib.META_DATE_KEY:now_time_str,
                     IOLib.JSONLib.META_UPDATE_LOGS_KEY:update_logs_data
                 },
-                IOLib.JSONLib.DATA_KEY:data
+                IOLib.JSONLib.DATA_KEY:IOLib.JSONLib._sanitizeJSONSafe(data)
             }
             if(minimalize_flag):
                 indent=None
@@ -10657,7 +10701,8 @@ class IOLib:
                     cls=json_cls,
                     indent=indent,
                     separators=separators,
-                    ensure_ascii=False
+                    ensure_ascii=False,
+                    allow_nan=False
                 )
 
         @staticmethod
