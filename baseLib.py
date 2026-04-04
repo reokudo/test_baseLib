@@ -17999,16 +17999,16 @@ class mathLib:
                 raise TypeError("The lengths of xs and ys aren't equal!")
     
         @staticmethod
-        def cosineDistance(vector1,vector2):
+        def cosineSimularity(vector1:list,vector2:list):
             """
-            Calculates cosine distance.
+            Calculates cosine Simularity.
 
             Args:
                 vector1 (list): The first vector.
                 vector2 (list): The second vector.
 
             Returns:
-                float: Cosine distance.
+                float: Cosine simularity.
 
             Raises:
                 TypeError: If the vectors have different dimensions.
@@ -18023,9 +18023,25 @@ class mathLib:
 
             if(magnitude1==0 or magnitude2==0):
                 raise ValueError("Vectors must not be zero vectors.")
-            
-            cosine_similarity=dot_product/(magnitude1*magnitude2)
-            return 1-cosine_similarity
+            return dot_product/(magnitude1*magnitude2)
+
+        @staticmethod
+        def cosineDistance(vector1:list,vector2:list):
+            """
+            Calculates cosine distance.
+
+            Args:
+                vector1 (list): The first vector.
+                vector2 (list): The second vector.
+
+            Returns:
+                float: Cosine distance.
+
+            Raises:
+                TypeError: If the vectors have different dimensions.
+                ValueError: If the vectors are zero vectors.
+            """
+            return 1-mathLib.distanceLib.cosineSimularity(vector1,vector2)
 
         @staticmethod
         def MinkowskiDistanceBetweenAllPoints(points:list,p:int=2):
@@ -18071,6 +18087,74 @@ class mathLib:
                 v&=v-1
                 cnt+=1
             return cnt
+
+        class levenshtein:
+            """
+            Class for Levenshtein distance calculations.
+            """
+
+            @staticmethod
+            def vector(
+                vec1:list,
+                vec2:list,
+                cost_func=None,
+            ):
+                """
+                Calculates the Levenshtein distance between two vectors with a custom cost function.
+
+                Args:
+                    vec1 (list): The first vector.
+                    vec2 (list): The second vector.
+
+                Returns:
+                    float: Levenshtein distance.
+                """
+                if(cost_func is None):
+                    cost_func=mathLib.distanceLib.cosineDistance
+
+                try:
+                    if(vec1==vec2):
+                        return 0.0
+                except:
+                    pass
+
+                m=len(vec1)
+                n=len(vec2)
+                dp=np.zeros((m+1,n+1),dtype=float)
+                
+                for i in range(m+1):
+                    dp[i][0]=i
+                for j in range(n+1):
+                    dp[0][j]=j
+                    
+                for i in range(1,m+1):
+                    for j in range(1,n+1):
+                        cost=cost_func(vec1[i-1],vec2[j-1])
+                        dp[i][j]=min(
+                            dp[i-1][j]+1,
+                            dp[i][j-1]+1,
+                            dp[i-1][j-1]+cost
+                        )
+                
+                return dp[m][n]
+            
+            @staticmethod
+            def string(s1:str,s2:str):
+                """
+                Calculates the Levenshtein distance between two strings.
+
+                Args:
+                    s1 (str): The first string.
+                    s2 (str): The second string.
+
+                Returns:
+                    int: Levenshtein distance.
+                """
+                return mathLib.distanceLib.levenshtein.vector(
+                    s1,
+                    s2,
+                    cost_func=lambda a,b:0 if a==b else 1
+                )
 
     @_protectedClass.fileStoreMyLibRegister
     class TuringMachine(_FileStore.FileStoreParser):
