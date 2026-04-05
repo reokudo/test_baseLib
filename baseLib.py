@@ -1,4 +1,4 @@
-# baseLib.py v1.1.11
+# baseLib.py v1.1.12
 # - The library is a collection of various utility functions for Python programming.
 
 # standard libraries
@@ -49793,3 +49793,866 @@ class videoLib:
                 video_clip=video_clip.set_audio(audio_clip)
             video_clip.write_videofile(output_movie)
             os.remove(tmp_movie)
+
+    class TemporalYOLOPipeline:
+        """
+        VideoPipeline wrapper that performs temporal YOLO ensemble detection.
+
+        Combines ``imgLib.ensembleModel.procYOLOPredict`` for per-frame detection
+        with a temporal reasoning layer to improve detection robustness and handle
+        occlusion.  The internal ``videoLib.VideoPipeline`` drives the video I/O
+        loop while a stateful processor maintains a rolling detection history and
+        optional tracking state.
+
+        Temporal modes
+        --------------
+        - ``TEMPORAL_MODE_NONE``   – pass-through (no temporal reasoning).
+        - ``TEMPORAL_MODE_VOTE``   – keep a detection only when it has appeared
+          in at least ``vote_threshold`` of the recent ``temporal_window`` frames.
+        - ``TEMPORAL_MODE_SMOOTH`` – smooth bounding-box coordinates as a weighted
+          average with past matched detections.
+        - ``TEMPORAL_MODE_TRACK``  – IoU-based tracker; propagates a track through
+          short occlusion gaps (up to ``max_missing_frames`` frames).
+
+        Each processed ``FramePacket`` carries detection results in its ``meta``
+        dict under the keys ``"detections"`` (post-temporal) and
+        ``"raw_detections"`` (pre-temporal, direct ``procYOLOPredict`` output).
+
+        FileStore
+        ---------
+        Call ``saveStateToFileStore`` / ``getState`` to obtain a
+        ``TemporalYOLOPipelineState`` object that is fully compatible with
+        ``IOLib.FileStore``.  The pipeline can be reconstructed from that state
+        via ``fromState`` (YOLO models must be supplied again since they are not
+        serializable).
+
+        Example:
+            >>> config=videoLib.TemporalYOLOPipeline.TemporalYOLOPipelineConfig(
+            ...     ensemble_mode=imgLib.ensembleModel.ENSEMBLE_MODE_WBF,
+            ...     temporal_mode=videoLib.TemporalYOLOPipeline.TEMPORAL_MODE_TRACK,
+            ...     temporal_window=5,
+            ...     max_missing_frames=3,
+            ...     source_type="file",
+            ...     source_args={"input_path": "input.mp4"},
+            ...     sink_type="null",
+            ... )
+            >>> pipeline=videoLib.TemporalYOLOPipeline(models=[model], config=config)
+            >>> state=pipeline.run()
+        """
+
+        TEMPORAL_MODE_NONE="none"
+        TEMPORAL_MODE_VOTE="vote"
+        TEMPORAL_MODE_SMOOTH="smooth"
+        TEMPORAL_MODE_TRACK="track"
+
+        @_protectedClass.fileStoreMyLibRegister
+        @dataclass
+        class TemporalYOLOPipelineConfig(_FileStore.FileStoreParser):
+            """
+            Configuration data for TemporalYOLOPipeline.
+
+            Attributes:
+                ensemble_mode (str): Ensemble mode passed to ``imgLib.ensembleModel.procYOLOPredict``.
+                iou_threshold (float): IoU threshold for ensemble processing.
+                multi_class_mode (str or None): Multi-class mode for ensemble processing.
+                gpu_flag (bool): Whether to use GPU during YOLO inference.
+                ensemble_args (dict or None): Mode-specific ensemble arguments.
+                yolo_args (dict or None): Arguments forwarded to each ``model.predict`` call.
+                yolo_additional_args (dict or None): Additional inference control arguments.
+                check_model_names_flag (bool): Whether to validate that all models share the same class names.
+                temporal_mode (str): Temporal reasoning mode.  One of ``TEMPORAL_MODE_*`` constants.
+                temporal_window (int): Number of past frames kept in the detection history.
+                temporal_iou_threshold (float): IoU threshold used when matching detections across frames.
+                vote_threshold (int): Minimum number of frames a detection must appear in to be kept (vote mode).
+                smooth_weights (list or None): Per-lag weights for temporal smoothing (most-recent first).
+                    If ``None``, exponential decay with ratio 0.5 is used.
+                max_missing_frames (int): Maximum consecutive frames a track may be absent before deletion (track mode).
+                bbox_draw_flag (bool): Whether to draw bounding boxes onto the output frame inside the processor.
+                    When ``True``, the ``frame`` stored in each processed ``FramePacket`` already contains the
+                    drawn bboxes, so the pipeline output can be written directly to a video sink without a
+                    separate drawing pass.  ``meta["detections"]`` is still populated regardless of this flag.
+                bbox_conf_threshold (float): Minimum confidence score for a detection to be drawn when
+                    ``bbox_draw_flag`` is ``True``.
+                source_type (str): VideoPipeline source type.
+                source_args (dict or None): VideoPipeline source arguments.
+                sink_type (str or None): VideoPipeline sink type.
+                sink_args (dict or None): VideoPipeline sink arguments.
+                is_color (bool): Whether the output video is color.
+                encode_str (str or None): FourCC code.
+                wait_key_sec (int): Wait time passed to ``cv2.waitKey()``.
+                batch_size (int): Batch size for the internal pipeline (must be 1 for stateful temporal modes).
+                raw_buffer_maxlen (int): Maximum size of the raw frame buffer.
+                processed_buffer_maxlen (int): Maximum size of the processed frame buffer.
+                output_buffer_maxlen (int): Maximum size of the output frame buffer.
+                input_buffer_policy (str): Buffer overflow policy for the input side.
+                output_buffer_policy (str): Buffer overflow policy for the output side.
+                save_input_asset_flag (bool): Whether to include the input file as FileAsset in state export.
+                save_output_asset_flag (bool): Whether to include the output file as FileAsset in state export.
+                save_buffer_snapshot_flag (bool): Whether to include buffer snapshots in state export.
+            """
+
+            __fs_version__=1
+
+            ensemble_mode:str=imgLib.ensembleModel.ENSEMBLE_MODE_ONE_MODEL
+            iou_threshold:float=imgLib.ensembleModel.DEFAULT_IOU_THRESHOLD
+            multi_class_mode:str|None=None
+            gpu_flag:bool=True
+            ensemble_args:dict|None=None
+            yolo_args:dict|None=None
+            yolo_additional_args:dict|None=None
+            check_model_names_flag:bool=True
+            temporal_mode:str="none"
+            temporal_window:int=5
+            temporal_iou_threshold:float=0.5
+            vote_threshold:int=2
+            smooth_weights:list|None=None
+            max_missing_frames:int=3
+            bbox_draw_flag:bool=False
+            bbox_conf_threshold:float=0.25
+            source_type:str="file"
+            source_args:dict|None=None
+            sink_type:str|None="null"
+            sink_args:dict|None=None
+            is_color:bool=True
+            encode_str:str|None=None
+            wait_key_sec:int=0
+            batch_size:int=1
+            raw_buffer_maxlen:int=0
+            processed_buffer_maxlen:int=0
+            output_buffer_maxlen:int=0
+            input_buffer_policy:str="drop_oldest"
+            output_buffer_policy:str="drop_oldest"
+            save_input_asset_flag:bool=False
+            save_output_asset_flag:bool=False
+            save_buffer_snapshot_flag:bool=False
+
+        @_protectedClass.fileStoreMyLibRegister
+        @dataclass
+        class TemporalYOLOPipelineState(_FileStore.FileStoreParser):
+            """
+            Serializable state for TemporalYOLOPipeline.
+
+            Attributes:
+                config (videoLib.TemporalYOLOPipeline.TemporalYOLOPipelineConfig or None): Pipeline configuration.
+                pipeline_state (videoLib.VideoPipelineState or None): Underlying VideoPipeline state.
+            """
+
+            __fs_version__=1
+
+            config:Any=None
+            pipeline_state:Any=None
+
+        class _TrackInfo:
+            """
+            Internal container for a single object track used by TEMPORAL_MODE_TRACK.
+
+            Attributes:
+                track_id (int): Unique track identifier.
+                bbox (list): Current bounding box ``[x1, y1, x2, y2]``.
+                score (float): Detection confidence of the last matched detection.
+                cls (int): Class identifier.
+                missing_count (int): Number of consecutive frames the track has been unmatched.
+            """
+
+            def __init__(self,track_id:int,bbox:list,score:float,cls:int):
+                """
+                Initializes a _TrackInfo instance.
+
+                Args:
+                    track_id (int): Unique identifier for this track.
+                    bbox (list): Initial bounding box ``[x1, y1, x2, y2]``.
+                    score (float): Initial detection confidence.
+                    cls (int): Class identifier.
+                """
+                self.track_id=track_id
+                self.bbox=bbox
+                self.score=score
+                self.cls=cls
+                self.missing_count=0
+
+        class _TemporalProcessor:
+            """
+            Stateful callable that wraps ``imgLib.ensembleModel.procYOLOPredict``
+            with temporal reasoning.
+
+            Maintains a rolling detection history and, in ``TEMPORAL_MODE_TRACK``,
+            an explicit track list.  Designed for use as the ``processor`` argument
+            of ``videoLib.VideoPipeline`` in ``frame_packet`` mode.
+            """
+
+            def __init__(self,models:list,config):
+                """
+                Initializes the _TemporalProcessor.
+
+                Args:
+                    models (list): List of YOLO models.
+                    config (videoLib.TemporalYOLOPipeline.TemporalYOLOPipelineConfig): Configuration.
+                """
+                self.__models=models
+                self.__config=config
+                self.__det_history=deque(maxlen=max(1,int(config.temporal_window)))
+                self.__tracks=[]
+                self.__next_track_id=0
+
+            def __call__(self,packet:"videoLib.FramePacket")->"videoLib.FramePacket":
+                """
+                Processes a single FramePacket.
+
+                Runs ``procYOLOPredict`` on the current frame, applies the configured
+                temporal reasoning, and returns a new FramePacket whose ``meta`` dict
+                contains:
+
+                - ``"raw_detections"`` – direct output of ``procYOLOPredict`` (dict).
+                - ``"detections"``     – temporally post-processed detections (dict).
+
+                Args:
+                    packet (videoLib.FramePacket): Input frame packet.
+
+                Returns:
+                    videoLib.FramePacket: Processed frame packet with detection metadata.
+                """
+                raw_results=imgLib.ensembleModel.procYOLOPredict(
+                    models=self.__models,
+                    mode=self.__config.ensemble_mode,
+                    predict_data=packet.frame,
+                    iou_threshold=self.__config.iou_threshold,
+                    multi_class_mode=self.__config.multi_class_mode,
+                    gpu_flag=self.__config.gpu_flag,
+                    ensemble_args=self.__config.ensemble_args,
+                    yolo_args=self.__config.yolo_args,
+                    yolo_additional_args=self.__config.yolo_additional_args,
+                    check_model_names_flag=self.__config.check_model_names_flag,
+                )
+                current_dets=(raw_results[0] if(raw_results and len(raw_results)>0) else {"bboxes":[],"scores":[],"classes":[]})
+
+                temporal_mode=self.__config.temporal_mode
+                if(temporal_mode==videoLib.TemporalYOLOPipeline.TEMPORAL_MODE_NONE):
+                    temporal_dets=current_dets
+                elif(temporal_mode==videoLib.TemporalYOLOPipeline.TEMPORAL_MODE_VOTE):
+                    temporal_dets=self.__applyVote(current_dets)
+                elif(temporal_mode==videoLib.TemporalYOLOPipeline.TEMPORAL_MODE_SMOOTH):
+                    temporal_dets=self.__applySmooth(current_dets)
+                elif(temporal_mode==videoLib.TemporalYOLOPipeline.TEMPORAL_MODE_TRACK):
+                    temporal_dets=self.__applyTrack(current_dets)
+                else:
+                    raise ValueError(f"Unknown temporal_mode: {temporal_mode}")
+
+                self.__det_history.append(current_dets)
+
+                meta=dict(packet.meta) if(packet.meta is not None) else {}
+                meta["raw_detections"]=current_dets
+                meta["detections"]=temporal_dets
+
+                out_frame=packet.frame
+                if(self.__config.bbox_draw_flag):
+                    out_frame=self.__drawBboxOnFrame(packet.frame,temporal_dets)
+
+                return videoLib.FramePacket(
+                    index=packet.index,
+                    frame=out_frame,
+                    timestamp=packet.timestamp,
+                    source_timestamp=packet.source_timestamp,
+                    processed_timestamp=time.time(),
+                    meta=meta,
+                )
+
+            def __drawBboxOnFrame(self,frame:"np.ndarray",dets:dict)->"np.ndarray":
+                """
+                Draws bounding boxes from a detection dict onto a frame.
+
+                Only detections whose score is greater than or equal to
+                ``config.bbox_conf_threshold`` are drawn.  In
+                ``TEMPORAL_MODE_TRACK``, the track ID is prepended to each label.
+
+                Args:
+                    frame (np.ndarray): Original frame image.
+                    dets (dict): Detection dict with keys ``"bboxes"``, ``"scores"``,
+                        ``"classes"``, and optionally ``"cls_names_dict"`` and
+                        ``"track_ids"``.
+
+                Returns:
+                    np.ndarray: Frame with bounding boxes drawn.
+                """
+                bboxes=dets.get("bboxes",[])
+                scores=dets.get("scores",[])
+                classes=dets.get("classes",[])
+                cls_names=dets.get("cls_names_dict",None)
+                track_ids=dets.get("track_ids",None)
+
+                if(not bboxes):
+                    return frame.copy() if(isinstance(frame,np.ndarray)) else frame
+
+                conf_thr=self.__config.bbox_conf_threshold
+                n=len(bboxes)
+                tids=(track_ids if(track_ids is not None) else [None]*n)
+
+                keep_bboxes=[]
+                keep_labels=[]
+                for bbox,score,cls,tid in zip(bboxes,scores,classes,tids):
+                    if(score<conf_thr):
+                        continue
+                    name=(cls_names[cls] if(cls_names and cls in cls_names) else str(cls))
+                    label=(f"#{tid} {name} {score:.2f}" if(tid is not None) else f"{name} {score:.2f}")
+                    keep_bboxes.append(bbox)
+                    keep_labels.append(label)
+
+                if(not keep_bboxes):
+                    return frame.copy() if(isinstance(frame,np.ndarray)) else frame
+
+                return imgLib.drawRect(
+                    img=frame,
+                    box_coords_list=keep_bboxes,
+                    flag_center=False,
+                    copy_flag=True,
+                    label_flag=True,
+                    label_list=keep_labels,
+                )
+
+            @staticmethod
+            def _computeIoU(box_a:list,box_b:list)->float:
+                """
+                Computes Intersection-over-Union between two bounding boxes.
+
+                Args:
+                    box_a (list): Bounding box ``[x1, y1, x2, y2]``.
+                    box_b (list): Bounding box ``[x1, y1, x2, y2]``.
+
+                Returns:
+                    float: IoU value in ``[0.0, 1.0]``.
+                """
+                ix1=max(box_a[0],box_b[0])
+                iy1=max(box_a[1],box_b[1])
+                ix2=min(box_a[2],box_b[2])
+                iy2=min(box_a[3],box_b[3])
+                inter=max(0.0,ix2-ix1)*max(0.0,iy2-iy1)
+                if(inter<=0.0):
+                    return 0.0
+                area_a=max(0.0,box_a[2]-box_a[0])*max(0.0,box_a[3]-box_a[1])
+                area_b=max(0.0,box_b[2]-box_b[0])*max(0.0,box_b[3]-box_b[1])
+                union=area_a+area_b-inter
+                if(union<=0.0):
+                    return 0.0
+                return inter/union
+
+            def __applyVote(self,current_dets:dict)->dict:
+                """
+                Keeps detections that appear in at least ``vote_threshold`` frames
+                within the detection history window.
+
+                For each detection in the current frame a vote count is incremented
+                whenever a detection of the same class with IoU >=
+                ``temporal_iou_threshold`` exists in a past frame.  The current
+                frame itself counts as one vote.
+
+                Args:
+                    current_dets (dict): Detection dict from the current frame.
+
+                Returns:
+                    dict: Filtered detection dict.
+                """
+                bboxes=current_dets.get("bboxes",[])
+                scores=current_dets.get("scores",[])
+                classes=current_dets.get("classes",[])
+
+                if(not bboxes or len(self.__det_history)==0):
+                    return current_dets
+
+                iou_thr=self.__config.temporal_iou_threshold
+                vote_thr=max(1,int(self.__config.vote_threshold))
+
+                keep_bboxes=[]
+                keep_scores=[]
+                keep_classes=[]
+
+                for bbox,score,cls in zip(bboxes,scores,classes):
+                    votes=1
+                    for past_dets in self.__det_history:
+                        past_bboxes=past_dets.get("bboxes",[])
+                        past_classes=past_dets.get("classes",[])
+                        matched=False
+                        for past_bbox,past_cls in zip(past_bboxes,past_classes):
+                            if(past_cls==cls and self._computeIoU(bbox,past_bbox)>=iou_thr):
+                                matched=True
+                                break
+                        if(matched):
+                            votes+=1
+                    if(votes>=vote_thr):
+                        keep_bboxes.append(bbox)
+                        keep_scores.append(score)
+                        keep_classes.append(cls)
+
+                result={"bboxes":keep_bboxes,"scores":keep_scores,"classes":keep_classes}
+                for k in ("cls_names_dict","img_wh"):
+                    if(k in current_dets):
+                        result[k]=current_dets[k]
+                return result
+
+            def __applySmooth(self,current_dets:dict)->dict:
+                """
+                Smooths bounding-box coordinates using a weighted average with past
+                matched detections.
+
+                For each current detection, the best-matching past detection (by IoU
+                and same class) in each history frame is found.  If the IoU exceeds
+                ``temporal_iou_threshold``, that past bbox is blended in with the
+                weight given by ``smooth_weights`` (index 0 = most-recent past).
+                When ``smooth_weights`` is ``None``, exponential decay (ratio 0.5)
+                is used.
+
+                Args:
+                    current_dets (dict): Detection dict from the current frame.
+
+                Returns:
+                    dict: Detection dict with smoothed bounding boxes.
+                """
+                bboxes=current_dets.get("bboxes",[])
+                scores=current_dets.get("scores",[])
+                classes=current_dets.get("classes",[])
+
+                if(not bboxes or len(self.__det_history)==0):
+                    return current_dets
+
+                iou_thr=self.__config.temporal_iou_threshold
+                history_list=list(reversed(list(self.__det_history)))
+                n_hist=len(history_list)
+
+                user_weights=self.__config.smooth_weights
+                if(user_weights is not None and len(user_weights)>=n_hist):
+                    weights=[float(w) for w in user_weights[:n_hist]]
+                else:
+                    weights=[0.5**k for k in range(n_hist)]
+
+                smoothed_bboxes=[]
+                for bbox,score,cls in zip(bboxes,scores,classes):
+                    total_weight=1.0
+                    wbbox=[float(c) for c in bbox]
+                    for k,past_dets in enumerate(history_list):
+                        if(k>=len(weights)):
+                            break
+                        past_bboxes=past_dets.get("bboxes",[])
+                        past_classes=past_dets.get("classes",[])
+                        best_iou=-1.0
+                        best_bbox=None
+                        for past_bbox,past_cls in zip(past_bboxes,past_classes):
+                            if(past_cls!=cls):
+                                continue
+                            iou=self._computeIoU(bbox,past_bbox)
+                            if(iou>best_iou):
+                                best_iou=iou
+                                best_bbox=past_bbox
+                        if(best_bbox is not None and best_iou>=iou_thr):
+                            w=weights[k]
+                            for j in range(4):
+                                wbbox[j]+=w*best_bbox[j]
+                            total_weight+=w
+                    smoothed_bboxes.append([c/total_weight for c in wbbox])
+
+                result={"bboxes":smoothed_bboxes,"scores":scores,"classes":classes}
+                for k in ("cls_names_dict","img_wh"):
+                    if(k in current_dets):
+                        result[k]=current_dets[k]
+                return result
+
+            def __applyTrack(self,current_dets:dict)->dict:
+                """
+                Runs a greedy IoU-based tracker and returns all currently active
+                tracks, including those that are temporarily occluded.
+
+                Algorithm
+                ---------
+                1. Match each existing track to the detection with the highest IoU
+                   (same class, IoU >= ``temporal_iou_threshold``).
+                2. Update matched tracks; increment ``missing_count`` for unmatched tracks.
+                3. Create new tracks for detections that were not matched to any track.
+                4. Remove tracks whose ``missing_count`` exceeds ``max_missing_frames``.
+                5. Return all active tracks.  Occluded tracks (missing_count > 0)
+                   propagate their last known bounding box and score.
+
+                The output dict contains an extra key ``"track_ids"`` (list of int)
+                aligned with ``"bboxes"``, ``"scores"``, and ``"classes"``.
+
+                Args:
+                    current_dets (dict): Detection dict from the current frame.
+
+                Returns:
+                    dict: Detection dict representing the current tracker state.
+                """
+                bboxes=current_dets.get("bboxes",[])
+                scores=current_dets.get("scores",[])
+                classes=current_dets.get("classes",[])
+
+                iou_thr=self.__config.temporal_iou_threshold
+                max_miss=max(0,int(self.__config.max_missing_frames))
+
+                matched_det_indices=set()
+
+                for track in self.__tracks:
+                    best_iou=-1.0
+                    best_d_i=-1
+                    for d_i,(bbox,cls) in enumerate(zip(bboxes,classes)):
+                        if(d_i in matched_det_indices):
+                            continue
+                        if(cls!=track.cls):
+                            continue
+                        iou=self._computeIoU(track.bbox,bbox)
+                        if(iou>best_iou):
+                            best_iou=iou
+                            best_d_i=d_i
+                    if(best_d_i>=0 and best_iou>=iou_thr):
+                        track.bbox=list(bboxes[best_d_i])
+                        track.score=float(scores[best_d_i])
+                        track.missing_count=0
+                        matched_det_indices.add(best_d_i)
+                    else:
+                        track.missing_count+=1
+
+                for d_i,(bbox,score,cls) in enumerate(zip(bboxes,scores,classes)):
+                    if(d_i not in matched_det_indices):
+                        self.__tracks.append(videoLib.TemporalYOLOPipeline._TrackInfo(
+                            track_id=self.__next_track_id,
+                            bbox=list(bbox),
+                            score=float(score),
+                            cls=cls,
+                        ))
+                        self.__next_track_id+=1
+
+                self.__tracks=[t for t in self.__tracks if(t.missing_count<=max_miss)]
+
+                out_bboxes=[]
+                out_scores=[]
+                out_classes=[]
+                out_track_ids=[]
+                for track in self.__tracks:
+                    out_bboxes.append(track.bbox)
+                    out_scores.append(track.score)
+                    out_classes.append(track.cls)
+                    out_track_ids.append(track.track_id)
+
+                result={
+                    "bboxes":out_bboxes,
+                    "scores":out_scores,
+                    "classes":out_classes,
+                    "track_ids":out_track_ids,
+                }
+                for k in ("cls_names_dict","img_wh"):
+                    if(k in current_dets):
+                        result[k]=current_dets[k]
+                return result
+
+        def __init__(self,models:list,config,file_store:object|None=None):
+            """
+            Initializes the TemporalYOLOPipeline.
+
+            Args:
+                models (list): Non-empty list of YOLO models used for detection.
+                    Models are not serialized; they must be supplied again when
+                    reconstructing from state via ``fromState``.
+                config (videoLib.TemporalYOLOPipeline.TemporalYOLOPipelineConfig):
+                    Pipeline configuration.
+                file_store (object or None): Optional ``IOLib.FileStore`` instance
+                    stored for reference.
+
+            Raises:
+                TypeError: If ``config`` is not a ``TemporalYOLOPipelineConfig``.
+                ValueError: If ``models`` is empty or not a list.
+            """
+            if(not isinstance(models,list) or len(models)==0):
+                raise ValueError("models must be a non-empty list of YOLO models")
+            if(not isinstance(config,videoLib.TemporalYOLOPipeline.TemporalYOLOPipelineConfig)):
+                raise TypeError("config must be videoLib.TemporalYOLOPipeline.TemporalYOLOPipelineConfig")
+
+            self.__models=models
+            self.__config=pyExLib.safety_deepcopy(config)
+            self.__file_store=file_store
+
+            processor=videoLib.TemporalYOLOPipeline._TemporalProcessor(
+                models=self.__models,
+                config=self.__config,
+            )
+            pipeline_config=videoLib.VideoPipelineConfig(
+                source_type=self.__config.source_type,
+                source_args=self.__config.source_args,
+                sink_type=self.__config.sink_type,
+                sink_args=self.__config.sink_args,
+                is_color=self.__config.is_color,
+                encode_str=self.__config.encode_str,
+                wait_key_sec=self.__config.wait_key_sec,
+                batch_size=self.__config.batch_size,
+                raw_buffer_maxlen=self.__config.raw_buffer_maxlen,
+                processed_buffer_maxlen=self.__config.processed_buffer_maxlen,
+                output_buffer_maxlen=self.__config.output_buffer_maxlen,
+                input_buffer_policy=self.__config.input_buffer_policy,
+                output_buffer_policy=self.__config.output_buffer_policy,
+                save_input_asset_flag=self.__config.save_input_asset_flag,
+                save_output_asset_flag=self.__config.save_output_asset_flag,
+                save_buffer_snapshot_flag=self.__config.save_buffer_snapshot_flag,
+            )
+            self.__pipeline=videoLib.VideoPipeline(
+                config=pipeline_config,
+                processor=processor,
+                processor_mode=videoLib._ProcessorAdapter.MODE_FRAME_PACKET,
+                file_store=file_store,
+            )
+
+        def run(self)->"videoLib.VideoPipelineState":
+            """
+            Runs the pipeline synchronously.
+
+            Returns:
+                videoLib.VideoPipelineState: Underlying pipeline state after execution.
+            """
+            return self.__pipeline.run()
+
+        def start(self)->threading.Thread:
+            """
+            Starts the pipeline in a background thread.
+
+            Returns:
+                threading.Thread: Worker thread.
+
+            Raises:
+                RuntimeError: If the pipeline is already running.
+            """
+            return self.__pipeline.start()
+
+        def join(self,timeout:float|None=None):
+            """
+            Waits for the background thread to finish.
+
+            Args:
+                timeout (float or None): Join timeout in seconds.
+            """
+            self.__pipeline.join(timeout=timeout)
+
+        def stop(self):
+            """
+            Requests the pipeline to stop.
+            """
+            self.__pipeline.stop()
+
+        def close(self):
+            """
+            Stops the pipeline and waits for the background thread.
+            """
+            self.__pipeline.close()
+
+        def isRunning(self)->bool:
+            """
+            Returns whether the pipeline is currently running.
+
+            Returns:
+                bool: True if running.
+            """
+            return self.__pipeline.isRunning()
+
+        def getPipeline(self)->"videoLib.VideoPipeline":
+            """
+            Returns the internal ``VideoPipeline`` instance.
+
+            Returns:
+                videoLib.VideoPipeline: Internal pipeline.
+            """
+            return self.__pipeline
+
+        def getConfig(self)->"videoLib.TemporalYOLOPipeline.TemporalYOLOPipelineConfig":
+            """
+            Returns a copy of the pipeline configuration.
+
+            Returns:
+                videoLib.TemporalYOLOPipeline.TemporalYOLOPipelineConfig: Configuration copy.
+            """
+            return pyExLib.safety_deepcopy(self.__config)
+
+        def getLatestDetections(self,copy_flag:bool=True)->dict|None:
+            """
+            Returns the temporally post-processed detections from the most recently
+            processed frame.
+
+            Args:
+                copy_flag (bool): Whether to return a deep copy.
+
+            Returns:
+                dict or None: Detection dict with keys ``"bboxes"``, ``"scores"``,
+                ``"classes"`` (and ``"track_ids"`` in track mode), or ``None`` when
+                no frame has been processed yet.
+            """
+            packet=self.__pipeline.getLatestFramePacket(kind="processed",copy_flag=copy_flag)
+            if(packet is None or packet.meta is None):
+                return None
+            dets=packet.meta.get("detections")
+            if(copy_flag):
+                return pyExLib.safety_deepcopy(dets)
+            return dets
+
+        def getLatestFrame(self,kind:str="processed",copy_flag:bool=True)->np.ndarray|None:
+            """
+            Returns the latest frame from the specified buffer.
+
+            Args:
+                kind (str): Buffer name (``"raw"``, ``"processed"``, or ``"output"``).
+                copy_flag (bool): Whether to return a copied frame.
+
+            Returns:
+                np.ndarray or None: Latest frame, or ``None`` if the buffer is empty.
+            """
+            return self.__pipeline.getLatestFrame(kind=kind,copy_flag=copy_flag)
+
+        def getLatestFramePacket(self,kind:str="processed",copy_flag:bool=True)->"videoLib.FramePacket|None":
+            """
+            Returns the latest FramePacket from the specified buffer.
+
+            Args:
+                kind (str): Buffer name.
+                copy_flag (bool): Whether to return a copied packet.
+
+            Returns:
+                videoLib.FramePacket or None: Latest packet.
+            """
+            return self.__pipeline.getLatestFramePacket(kind=kind,copy_flag=copy_flag)
+
+        def getBufferedFramePackets(self,kind:str="processed",latest_n:int|None=None,copy_flag:bool=True)->list:
+            """
+            Returns buffered FramePacket objects.
+
+            Args:
+                kind (str): Buffer name.
+                latest_n (int or None): Number of latest packets to return.
+                copy_flag (bool): Whether to return copied packets.
+
+            Returns:
+                list: List of FramePacket objects.
+            """
+            return self.__pipeline.getBufferedFramePackets(kind=kind,latest_n=latest_n,copy_flag=copy_flag)
+
+        def getBufferedDetections(self,latest_n:int|None=None,copy_flag:bool=True)->list:
+            """
+            Returns a list of temporally post-processed detection dicts from the
+            processed frame buffer, one entry per buffered frame.
+
+            Frames for which no detection metadata is available yield ``None``
+            in the returned list.
+
+            Args:
+                latest_n (int or None): Number of latest frames to include.
+                copy_flag (bool): Whether to return deep copies.
+
+            Returns:
+                list: List of detection dicts (or ``None``) in chronological order.
+            """
+            packets=self.__pipeline.getBufferedFramePackets(kind="processed",latest_n=latest_n,copy_flag=copy_flag)
+            result=[(p.meta.get("detections") if(p.meta is not None) else None) for p in packets]
+            if(copy_flag):
+                return pyExLib.safety_deepcopy(result)
+            return result
+
+        def snapshotBuffer(self,kind:str="processed",latest_n:int|None=None)->"videoLib.FrameBufferSnapshot":
+            """
+            Returns a FileStore-compatible snapshot of the specified buffer.
+
+            Args:
+                kind (str): Buffer name.
+                latest_n (int or None): Number of latest packets to include.
+
+            Returns:
+                videoLib.FrameBufferSnapshot: Buffer snapshot.
+            """
+            return self.__pipeline.snapshotBuffer(kind=kind,latest_n=latest_n)
+
+        def saveBufferToFileStore(self,store,kind:str="processed",latest_n:int|None=None)->"videoLib.FrameBufferSnapshot":
+            """
+            Builds a FileStore-compatible snapshot of the specified buffer.
+
+            Args:
+                store (IOLib.FileStore): FileStore instance.
+                kind (str): Buffer name.
+                latest_n (int or None): Number of latest packets to include.
+
+            Returns:
+                videoLib.FrameBufferSnapshot: Buffer snapshot.
+
+            Raises:
+                ValueError: If ``store`` is not a FileStore instance.
+            """
+            return self.__pipeline.saveBufferToFileStore(store=store,kind=kind,latest_n=latest_n)
+
+        def getState(self,include_buffers:bool=False,latest_n:int|None=None,include_input_asset:bool|None=None,include_output_asset:bool|None=None)->"videoLib.TemporalYOLOPipeline.TemporalYOLOPipelineState":
+            """
+            Returns a serializable pipeline state.
+
+            Args:
+                include_buffers (bool): Whether to include buffer snapshots in the state.
+                latest_n (int or None): Maximum number of packets to include per snapshot.
+                include_input_asset (bool or None): Whether to include the input FileAsset.
+                    If ``None``, falls back to ``config.save_input_asset_flag``.
+                include_output_asset (bool or None): Whether to include the output FileAsset.
+                    If ``None``, falls back to ``config.save_output_asset_flag``.
+
+            Returns:
+                videoLib.TemporalYOLOPipeline.TemporalYOLOPipelineState: Serializable state.
+            """
+            pipeline_state=self.__pipeline.getState(
+                include_buffers=include_buffers,
+                latest_n=latest_n,
+                include_input_asset=include_input_asset,
+                include_output_asset=include_output_asset,
+            )
+            return videoLib.TemporalYOLOPipeline.TemporalYOLOPipelineState(
+                config=pyExLib.safety_deepcopy(self.__config),
+                pipeline_state=pipeline_state,
+            )
+
+        def saveStateToFileStore(self,store,include_buffers:bool=True,latest_n:int|None=None,include_input_asset:bool|None=None,include_output_asset:bool|None=None)->"videoLib.TemporalYOLOPipeline.TemporalYOLOPipelineState":
+            """
+            Builds a FileStore-compatible state object.
+
+            Args:
+                store (IOLib.FileStore): FileStore instance.
+                include_buffers (bool): Whether to include buffer snapshots.
+                latest_n (int or None): Maximum number of packets per snapshot.
+                include_input_asset (bool or None): Whether to include the input FileAsset.
+                include_output_asset (bool or None): Whether to include the output FileAsset.
+
+            Returns:
+                videoLib.TemporalYOLOPipeline.TemporalYOLOPipelineState: Serializable state.
+
+            Raises:
+                ValueError: If ``store`` is not a FileStore instance.
+            """
+            if(not isinstance(store,_FileStore)):
+                raise ValueError("store must be a FileStore instance")
+            return self.getState(
+                include_buffers=include_buffers,
+                latest_n=latest_n,
+                include_input_asset=include_input_asset,
+                include_output_asset=include_output_asset,
+            )
+
+        @classmethod
+        def fromState(cls,state,models:list,file_store:object|None=None)->"videoLib.TemporalYOLOPipeline":
+            """
+            Creates a TemporalYOLOPipeline from a previously saved state.
+
+            The internal VideoPipeline is rebuilt from the stored configuration.
+            Note that the temporal processor state (detection history, tracks) is
+            **not** restored; the pipeline starts fresh temporal reasoning from
+            the first frame.
+
+            Args:
+                state (videoLib.TemporalYOLOPipeline.TemporalYOLOPipelineState):
+                    Previously saved pipeline state.
+                models (list): Non-empty list of YOLO models.  Models are not
+                    serialized and must be supplied explicitly.
+                file_store (object or None): Optional FileStore instance.
+
+            Returns:
+                videoLib.TemporalYOLOPipeline: Restored pipeline.
+
+            Raises:
+                TypeError: If ``state`` is not a ``TemporalYOLOPipelineState``.
+                ValueError: If ``state.config`` is not a ``TemporalYOLOPipelineConfig``.
+            """
+            if(not isinstance(state,videoLib.TemporalYOLOPipeline.TemporalYOLOPipelineState)):
+                raise TypeError("state must be videoLib.TemporalYOLOPipeline.TemporalYOLOPipelineState")
+            if(not isinstance(state.config,videoLib.TemporalYOLOPipeline.TemporalYOLOPipelineConfig)):
+                raise ValueError("state.config must be videoLib.TemporalYOLOPipeline.TemporalYOLOPipelineConfig")
+            return cls(models=models,config=state.config,file_store=file_store)
