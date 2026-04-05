@@ -34,7 +34,7 @@ from importlib import metadata as importlib_metadata
 from pathlib import Path
 from pathlib import PurePosixPath
 from collections.abc import Iterable, Mapping, Sequence
-from collections import Counter
+from collections import Counter, deque
 import random
 from dataclasses import dataclass
 import inspect
@@ -47360,6 +47360,7 @@ class imgLib:
                     lines.append(bytes_grid[y].tobytes().decode("ascii"))
             return "\n".join(lines)
         
+
 class videoLib:
     """
     Class for video processing.
@@ -47367,15 +47368,1604 @@ class videoLib:
 
     DEFAULT_VIDEO_ENCODE_STR="mp4v"
 
+    @dataclass
+    class FramePacket:
+        """
+        Data container for a single video frame.
+
+        Attributes:
+            index (int): Frame index.
+            frame (np.ndarray): Frame image.
+            timestamp (float or None): Timestamp assigned by the pipeline.
+            source_timestamp (float or None): Timestamp from the source if available.
+            processed_timestamp (float or None): Timestamp assigned after processing.
+            meta (dict or None): Additional metadata associated with the frame.
+        """
+
+        index:int
+        frame:np.ndarray
+        timestamp:float|None=None
+        source_timestamp:float|None=None
+        processed_timestamp:float|None=None
+        meta:dict|None=None
+
+    @_protectedClass.fileStoreMyLibRegister
+    @dataclass
+    class VideoPipelineConfig(_FileStore.FileStoreParser):
+        """
+        Configuration data for VideoPipeline.
+
+        Attributes:
+            source_type (str): Source type. Supported values are 'file', 'camera', and 'frame_list'.
+            source_args (dict or None): Arguments for the source.
+            sink_type (str or None): Sink type. Supported values are 'file', 'display', 'memory', and 'null'.
+            sink_args (dict or None): Arguments for the sink.
+            is_color (bool): Whether the output video is color.
+            encode_str (str or None): FourCC code.
+            wait_key_sec (int): Wait time passed to cv2.waitKey().
+            batch_size (int): Batch size for processing.
+            worker_num (int): Reserved worker count for future extension.
+            use_thread (bool): Reserved flag for future threaded execution.
+            input_queue_maxlen (int): Reserved input queue length.
+            output_queue_maxlen (int): Reserved output queue length.
+            raw_buffer_maxlen (int): Maximum size of the raw frame buffer.
+            processed_buffer_maxlen (int): Maximum size of the processed frame buffer.
+            output_buffer_maxlen (int): Maximum size of the output frame buffer.
+            input_buffer_policy (str): Buffer overflow policy for the input side.
+            output_buffer_policy (str): Buffer overflow policy for the output side.
+            enable_reorder_output (bool): Reserved flag for future reordering support.
+            save_input_asset_flag (bool): Whether to include the input file as FileAsset in state export.
+            save_output_asset_flag (bool): Whether to include the output file as FileAsset in state export.
+            save_buffer_snapshot_flag (bool): Whether to include buffer snapshots in state export.
+        """
+
+        __fs_version__=1
+
+        source_type:str="file"
+        source_args:dict|None=None
+        sink_type:str|None="file"
+        sink_args:dict|None=None
+        is_color:bool=True
+        encode_str:str|None=None
+        wait_key_sec:int=0
+        batch_size:int=1
+        worker_num:int=1
+        use_thread:bool=True
+        input_queue_maxlen:int=0
+        output_queue_maxlen:int=0
+        raw_buffer_maxlen:int=0
+        processed_buffer_maxlen:int=0
+        output_buffer_maxlen:int=0
+        input_buffer_policy:str="drop_oldest"
+        output_buffer_policy:str="drop_oldest"
+        enable_reorder_output:bool=True
+        save_input_asset_flag:bool=False
+        save_output_asset_flag:bool=False
+        save_buffer_snapshot_flag:bool=False
+
+    @_protectedClass.fileStoreMyLibRegister
+    @dataclass
+    class FrameBufferSnapshot(_FileStore.FileStoreParser):
+        """
+        Snapshot data for a frame buffer.
+
+        Attributes:
+            buffer_name (str): Buffer name.
+            start_index (int or None): First frame index in the snapshot.
+            end_index (int or None): Last frame index in the snapshot.
+            fps (float or None): Frames per second associated with the snapshot.
+            frames (Any): Stored frame sequence. Typically ndarray or list.
+            metas (list or None): Metadata list corresponding to each frame.
+            timestamps (list or None): Timestamp list corresponding to each frame.
+        """
+
+        __fs_version__=1
+
+        buffer_name:str="processed"
+        start_index:int|None=None
+        end_index:int|None=None
+        fps:float|None=None
+        frames:Any=None
+        metas:list|None=None
+        timestamps:list|None=None
+
+    @_protectedClass.fileStoreMyLibRegister
+    @dataclass
+    class VideoPipelineState(_FileStore.FileStoreParser):
+        """
+        Serializable state for VideoPipeline.
+
+        Attributes:
+            config (videoLib.VideoPipelineConfig or None): Pipeline configuration.
+            processed_frame_count (int): Number of processed frames.
+            dropped_input_count (int): Number of dropped input frames.
+            dropped_output_count (int): Number of dropped output frames.
+            fps (float or None): Frames per second.
+            frame_shape (tuple or None): Frame shape.
+            frame_count_hint (int or None): Optional frame count hint.
+            start_time (float or None): Start timestamp.
+            end_time (float or None): End timestamp.
+            last_error (str or None): Last error message.
+            input_asset (Any): Optional input file asset.
+            output_asset (Any): Optional output file asset.
+            latest_raw_index (int or None): Latest raw frame index.
+            latest_processed_index (int or None): Latest processed frame index.
+            latest_output_index (int or None): Latest output frame index.
+            raw_buffer_snapshot (videoLib.FrameBufferSnapshot or None): Raw buffer snapshot.
+            processed_buffer_snapshot (videoLib.FrameBufferSnapshot or None): Processed buffer snapshot.
+            output_buffer_snapshot (videoLib.FrameBufferSnapshot or None): Output buffer snapshot.
+        """
+
+        __fs_version__=1
+
+        config:Any=None
+        processed_frame_count:int=0
+        dropped_input_count:int=0
+        dropped_output_count:int=0
+        fps:float|None=None
+        frame_shape:tuple|None=None
+        frame_count_hint:int|None=None
+        start_time:float|None=None
+        end_time:float|None=None
+        last_error:str|None=None
+        input_asset:Any=None
+        output_asset:Any=None
+        latest_raw_index:int|None=None
+        latest_processed_index:int|None=None
+        latest_output_index:int|None=None
+        raw_buffer_snapshot:Any=None
+        processed_buffer_snapshot:Any=None
+        output_buffer_snapshot:Any=None
+
+    @_protectedClass.fileStoreMyLibRegister
+    @dataclass
+    class VideoProcessState(_FileStore.FileStoreParser):
+        """
+        Serializable state for videoProcess.
+
+        Attributes:
+            input_path (str or None): Input path used to initialize the instance.
+            fps (float or None): Frames per second.
+            shape (tuple or None): Frame shape.
+            raw_frames (Any): Original frame list.
+            frames (Any): Current frame list.
+        """
+
+        __fs_version__=1
+
+        input_path:str|None=None
+        fps:float|None=None
+        shape:tuple|None=None
+        raw_frames:Any=None
+        frames:Any=None
+
+    class _RingFrameBuffer:
+        """
+        Ring buffer for storing recent FramePacket objects.
+        """
+
+        POLICY_DROP_OLDEST="drop_oldest"
+        POLICY_DROP_NEWEST="drop_newest"
+        POLICY_BLOCK="block"
+        POLICY_LATEST_ONLY="latest_only"
+
+        def __init__(self,maxlen:int=0,policy:str=POLICY_DROP_OLDEST,copy_frame:bool=False):
+            """
+            Initializes the _RingFrameBuffer instance.
+
+            Args:
+                maxlen (int): Maximum number of packets to keep. If less than or equal to 0, buffering is disabled.
+                policy (str): Overflow policy.
+                copy_frame (bool): Whether to copy frames when storing packets.
+            """
+            self.__maxlen=max(0,int(maxlen))
+            self.__policy=policy
+            self.__copy_frame=copy_frame
+            self.__lock=threading.Lock()
+            self.__buffer=deque(maxlen=self.__maxlen if(self.__maxlen>0) else None)
+            self.__dropped_count=0
+
+        @staticmethod
+        def _copyPacket(packet,copy_frame:bool=False):
+            """
+            Copies a FramePacket.
+
+            Args:
+                packet (videoLib.FramePacket): Packet to copy.
+                copy_frame (bool): Whether to copy the frame array.
+
+            Returns:
+                videoLib.FramePacket: Copied packet.
+            """
+            if(packet is None):
+                return None
+            frame=packet.frame.copy() if(copy_frame and isinstance(packet.frame,np.ndarray)) else packet.frame
+            meta=None if(packet.meta is None) else pyExLib.safety_deepcopy(packet.meta)
+            return videoLib.FramePacket(
+                index=packet.index,
+                frame=frame,
+                timestamp=packet.timestamp,
+                source_timestamp=packet.source_timestamp,
+                processed_timestamp=packet.processed_timestamp,
+                meta=meta,
+            )
+
+        def append(self,packet):
+            """
+            Appends a packet to the buffer.
+
+            Args:
+                packet (videoLib.FramePacket): Packet to append.
+
+            Returns:
+                bool: True if the packet was stored, False otherwise.
+            """
+            if(self.__maxlen<=0 or packet is None):
+                return False
+
+            packet_store=videoLib._RingFrameBuffer._copyPacket(packet,copy_frame=self.__copy_frame)
+
+            with self.__lock:
+                if(self.__policy==videoLib._RingFrameBuffer.POLICY_LATEST_ONLY):
+                    self.__buffer.clear()
+                    self.__buffer.append(packet_store)
+                    return True
+
+                if(len(self.__buffer)<self.__maxlen):
+                    self.__buffer.append(packet_store)
+                    return True
+
+                if(self.__policy==videoLib._RingFrameBuffer.POLICY_DROP_NEWEST):
+                    self.__dropped_count+=1
+                    return False
+
+                if(self.__policy==videoLib._RingFrameBuffer.POLICY_BLOCK):
+                    self.__buffer.popleft()
+                    self.__buffer.append(packet_store)
+                    self.__dropped_count+=1
+                    return True
+
+                self.__buffer.popleft()
+                self.__buffer.append(packet_store)
+                self.__dropped_count+=1
+                return True
+
+        def latest(self,copy_flag:bool=True):
+            """
+            Returns the latest packet.
+
+            Args:
+                copy_flag (bool): Whether to return a copied packet.
+
+            Returns:
+                videoLib.FramePacket or None: Latest packet.
+            """
+            with self.__lock:
+                if(len(self.__buffer)<=0):
+                    return None
+                packet=self.__buffer[-1]
+            if(copy_flag):
+                return videoLib._RingFrameBuffer._copyPacket(packet,copy_frame=True)
+            return packet
+
+        def items(self,latest_n:int|None=None,copy_flag:bool=True):
+            """
+            Returns packets stored in the buffer.
+
+            Args:
+                latest_n (int or None): Number of latest packets to return.
+                copy_flag (bool): Whether to return copied packets.
+
+            Returns:
+                list: Packet list.
+            """
+            with self.__lock:
+                items=list(self.__buffer)
+            if(latest_n is not None and latest_n>=0):
+                items=items[-latest_n:]
+            if(copy_flag):
+                return [videoLib._RingFrameBuffer._copyPacket(p,copy_frame=True) for p in items]
+            return items
+
+        def clear(self):
+            """
+            Clears the buffer.
+            """
+            with self.__lock:
+                self.__buffer.clear()
+
+        def droppedCount(self):
+            """
+            Returns the number of dropped packets.
+
+            Returns:
+                int: Number of dropped packets.
+            """
+            with self.__lock:
+                return int(self.__dropped_count)
+
+        def __len__(self):
+            """
+            Returns the current number of packets.
+
+            Returns:
+                int: Current number of packets.
+            """
+            with self.__lock:
+                return len(self.__buffer)
+
+    class _SourceBase:
+        """
+        Base class for frame sources.
+        """
+
+        def open(self):
+            """
+            Opens the source.
+            """
+            raise NotImplementedError
+
+        def read(self):
+            """
+            Reads a packet from the source.
+
+            Returns:
+                videoLib.FramePacket or None: Read packet or None if the source is exhausted.
+            """
+            raise NotImplementedError
+
+        def close(self):
+            """
+            Closes the source.
+            """
+            raise NotImplementedError
+
+        def getMeta(self):
+            """
+            Returns source metadata.
+
+            Returns:
+                dict: Metadata dictionary.
+            """
+            return {}
+
+    class _FileVideoSource(_SourceBase):
+        """
+        File based video source.
+        """
+
+        def __init__(self,input_path:str|Path):
+            """
+            Initializes the _FileVideoSource instance.
+
+            Args:
+                input_path (str or Path): Input video path.
+            """
+            self.__input_path=str(input_path)
+            self.__cap=None
+            self.__index=0
+            self.__meta={}
+
+        def open(self):
+            """
+            Opens the file video source.
+
+            Raises:
+                RuntimeError: If OpenCV is not installed.
+                FileNotFoundError: If the file does not exist.
+                ValueError: If the source cannot be opened.
+            """
+            if(not IMPORT_OPENCV_FLAG):
+                raise RuntimeError("Error : The opencv package is not installed!")
+            if(not Path(self.__input_path).exists()):
+                raise FileNotFoundError(f"Input video file not found: {self.__input_path}")
+
+            self.__cap=cv2.VideoCapture(self.__input_path)
+            if(not self.__cap.isOpened()):
+                raise ValueError(f"Failed to open input video: {self.__input_path}")
+
+            fps=float(self.__cap.get(cv2.CAP_PROP_FPS))
+            width=int(self.__cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height=int(self.__cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            frame_count=int(self.__cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            self.__meta={
+                "fps":fps,
+                "width":width,
+                "height":height,
+                "frame_shape":(height,width,3),
+                "frame_count_hint":frame_count,
+                "source_path":self.__input_path,
+            }
+            self.__index=0
+
+        def read(self):
+            """
+            Reads a packet from the file.
+
+            Returns:
+                videoLib.FramePacket or None: Read packet or None if the file is exhausted.
+            """
+            if(self.__cap is None):
+                raise ValueError("Source is not opened")
+            ret,frame=self.__cap.read()
+            if(not ret):
+                return None
+            packet=videoLib.FramePacket(
+                index=self.__index,
+                frame=frame,
+                timestamp=time.time(),
+                source_timestamp=None,
+                processed_timestamp=None,
+                meta=None,
+            )
+            self.__index+=1
+            return packet
+
+        def close(self):
+            """
+            Closes the file source.
+            """
+            if(self.__cap is not None):
+                self.__cap.release()
+                self.__cap=None
+
+        def getMeta(self):
+            """
+            Returns source metadata.
+
+            Returns:
+                dict: Metadata dictionary.
+            """
+            return dict(self.__meta)
+
+    class _CameraVideoSource(_SourceBase):
+        """
+        Camera based video source.
+        """
+
+        def __init__(self,camera_index:int=0,backend:int|None=None,width:int|None=None,height:int|None=None,fps:float|None=None):
+            """
+            Initializes the _CameraVideoSource instance.
+
+            Args:
+                camera_index (int): Camera index.
+                backend (int or None): Optional OpenCV backend.
+                width (int or None): Requested width.
+                height (int or None): Requested height.
+                fps (float or None): Requested fps.
+            """
+            self.__camera_index=int(camera_index)
+            self.__backend=backend
+            self.__width=width
+            self.__height=height
+            self.__fps=fps
+            self.__cap=None
+            self.__index=0
+            self.__meta={}
+
+        def open(self):
+            """
+            Opens the camera source.
+
+            Raises:
+                RuntimeError: If OpenCV is not installed.
+                ValueError: If the camera cannot be opened.
+            """
+            if(not IMPORT_OPENCV_FLAG):
+                raise RuntimeError("Error : The opencv package is not installed!")
+
+            if(self.__backend is None):
+                self.__cap=cv2.VideoCapture(self.__camera_index)
+            else:
+                self.__cap=cv2.VideoCapture(self.__camera_index,self.__backend)
+
+            if(not self.__cap.isOpened()):
+                raise ValueError(f"Failed to open camera: {self.__camera_index}")
+
+            if(self.__width is not None):
+                self.__cap.set(cv2.CAP_PROP_FRAME_WIDTH,int(self.__width))
+            if(self.__height is not None):
+                self.__cap.set(cv2.CAP_PROP_FRAME_HEIGHT,int(self.__height))
+            if(self.__fps is not None):
+                self.__cap.set(cv2.CAP_PROP_FPS,float(self.__fps))
+
+            width=int(self.__cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height=int(self.__cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fps=float(self.__cap.get(cv2.CAP_PROP_FPS))
+            self.__meta={
+                "fps":fps,
+                "width":width,
+                "height":height,
+                "frame_shape":(height,width,3),
+                "frame_count_hint":None,
+                "camera_index":self.__camera_index,
+            }
+            self.__index=0
+
+        def read(self):
+            """
+            Reads a packet from the camera.
+
+            Returns:
+                videoLib.FramePacket or None: Read packet or None if reading fails.
+            """
+            if(self.__cap is None):
+                raise ValueError("Source is not opened")
+            ret,frame=self.__cap.read()
+            if(not ret):
+                return None
+            now=time.time()
+            packet=videoLib.FramePacket(
+                index=self.__index,
+                frame=frame,
+                timestamp=now,
+                source_timestamp=now,
+                processed_timestamp=None,
+                meta=None,
+            )
+            self.__index+=1
+            return packet
+
+        def close(self):
+            """
+            Closes the camera source.
+            """
+            if(self.__cap is not None):
+                self.__cap.release()
+                self.__cap=None
+
+        def getMeta(self):
+            """
+            Returns source metadata.
+
+            Returns:
+                dict: Metadata dictionary.
+            """
+            return dict(self.__meta)
+
+    class _FrameListSource(_SourceBase):
+        """
+        Frame list based source.
+        """
+
+        def __init__(self,frames:list,fps:float|int=30.0):
+            """
+            Initializes the _FrameListSource instance.
+
+            Args:
+                frames (list): Frame list.
+                fps (float or int): Frames per second.
+            """
+            self.__frames=list(frames)
+            self.__fps=float(fps)
+            self.__index=0
+            self.__meta={
+                "fps":float(fps),
+                "width":None,
+                "height":None,
+                "frame_shape":None,
+                "frame_count_hint":len(self.__frames),
+            }
+            if(len(self.__frames)>0 and isinstance(self.__frames[0],np.ndarray)):
+                shape=tuple(self.__frames[0].shape)
+                self.__meta["frame_shape"]=shape
+                if(len(shape)>=2):
+                    self.__meta["height"]=int(shape[0])
+                    self.__meta["width"]=int(shape[1])
+
+        def open(self):
+            """
+            Opens the frame list source.
+            """
+            self.__index=0
+
+        def read(self):
+            """
+            Reads a packet from the frame list.
+
+            Returns:
+                videoLib.FramePacket or None: Read packet or None if the list is exhausted.
+            """
+            if(self.__index>=len(self.__frames)):
+                return None
+            frame=self.__frames[self.__index]
+            packet=videoLib.FramePacket(
+                index=self.__index,
+                frame=frame,
+                timestamp=time.time(),
+                source_timestamp=None,
+                processed_timestamp=None,
+                meta=None,
+            )
+            self.__index+=1
+            return packet
+
+        def close(self):
+            """
+            Closes the frame list source.
+            """
+            pass
+
+        def getMeta(self):
+            """
+            Returns source metadata.
+
+            Returns:
+                dict: Metadata dictionary.
+            """
+            return dict(self.__meta)
+
+    class _SinkBase:
+        """
+        Base class for frame sinks.
+        """
+
+        def open(self,meta:dict|None=None):
+            """
+            Opens the sink.
+
+            Args:
+                meta (dict or None): Metadata dictionary.
+            """
+            raise NotImplementedError
+
+        def write(self,packet):
+            """
+            Writes a packet to the sink.
+
+            Args:
+                packet (videoLib.FramePacket): Packet to write.
+
+            Returns:
+                bool: True to continue, False to stop.
+            """
+            raise NotImplementedError
+
+        def close(self):
+            """
+            Closes the sink.
+            """
+            raise NotImplementedError
+
+    class _NullSink(_SinkBase):
+        """
+        Sink that discards all frames.
+        """
+
+        def open(self,meta:dict|None=None):
+            """
+            Opens the sink.
+
+            Args:
+                meta (dict or None): Metadata dictionary.
+            """
+            pass
+
+        def write(self,packet):
+            """
+            Discards a packet.
+
+            Args:
+                packet (videoLib.FramePacket): Packet to discard.
+
+            Returns:
+                bool: Always True.
+            """
+            return True
+
+        def close(self):
+            """
+            Closes the sink.
+            """
+            pass
+
+    class _MemorySink(_SinkBase):
+        """
+        Sink that stores packets in memory.
+        """
+
+        def __init__(self,copy_packets:bool=True,maxlen:int=0):
+            """
+            Initializes the _MemorySink instance.
+
+            Args:
+                copy_packets (bool): Whether to store copied packets.
+                maxlen (int): Maximum number of packets to keep. If less than or equal to 0, all packets are kept.
+            """
+            self.__copy_packets=copy_packets
+            self.__maxlen=max(0,int(maxlen))
+            self.__lock=threading.Lock()
+            self.__packets=[]
+
+        def open(self,meta:dict|None=None):
+            """
+            Opens the sink.
+
+            Args:
+                meta (dict or None): Metadata dictionary.
+            """
+            with self.__lock:
+                self.__packets=[]
+
+        def write(self,packet):
+            """
+            Stores a packet.
+
+            Args:
+                packet (videoLib.FramePacket): Packet to store.
+
+            Returns:
+                bool: Always True.
+            """
+            if(self.__copy_packets):
+                packet_store=videoLib._RingFrameBuffer._copyPacket(packet,copy_frame=True)
+            else:
+                packet_store=packet
+            with self.__lock:
+                self.__packets.append(packet_store)
+                if(self.__maxlen>0 and len(self.__packets)>self.__maxlen):
+                    self.__packets=self.__packets[-self.__maxlen:]
+            return True
+
+        def getPackets(self,copy_flag:bool=True):
+            """
+            Returns stored packets.
+
+            Args:
+                copy_flag (bool): Whether to return copied packets.
+
+            Returns:
+                list: Packet list.
+            """
+            with self.__lock:
+                packets=list(self.__packets)
+            if(copy_flag):
+                return [videoLib._RingFrameBuffer._copyPacket(p,copy_frame=True) for p in packets]
+            return packets
+
+        def getFrames(self,copy_flag:bool=True):
+            """
+            Returns stored frames.
+
+            Args:
+                copy_flag (bool): Whether to return copied frames.
+
+            Returns:
+                list: Frame list.
+            """
+            packets=self.getPackets(copy_flag=copy_flag)
+            if(copy_flag):
+                return [p.frame.copy() if(isinstance(p.frame,np.ndarray)) else pyExLib.safety_deepcopy(p.frame) for p in packets]
+            return [p.frame for p in packets]
+
+        def close(self):
+            """
+            Closes the sink.
+            """
+            pass
+
+    class _FileVideoSink(_SinkBase):
+        """
+        File based video sink.
+        """
+
+        def __init__(self,output_path:str|Path,is_color:bool=True,encode_str:str|None=None,fps:float|None=None,size:tuple|None=None):
+            """
+            Initializes the _FileVideoSink instance.
+
+            Args:
+                output_path (str or Path): Output video path.
+                is_color (bool): Whether the output is color.
+                encode_str (str or None): FourCC code.
+                fps (float or None): Optional fps override.
+                size (tuple or None): Optional size override.
+            """
+            self.__output_path=str(output_path)
+            self.__is_color=is_color
+            self.__encode_str=encode_str or videoLib.DEFAULT_VIDEO_ENCODE_STR
+            self.__fps=fps
+            self.__size=size
+            self.__writer=None
+
+        def open(self,meta:dict|None=None):
+            """
+            Opens the sink.
+
+            Args:
+                meta (dict or None): Metadata dictionary.
+
+            Raises:
+                RuntimeError: If OpenCV is not installed.
+                ValueError: If output metadata is insufficient.
+            """
+            if(not IMPORT_OPENCV_FLAG):
+                raise RuntimeError("Error : The opencv package is not installed!")
+            meta=meta or {}
+            fps=float(self.__fps if(self.__fps is not None) else meta.get("fps",30.0) or 30.0)
+            size=self.__size
+            if(size is None):
+                width=meta.get("width")
+                height=meta.get("height")
+                frame_shape=meta.get("frame_shape")
+                if(width is None or height is None):
+                    if(frame_shape is not None and len(frame_shape)>=2):
+                        height=int(frame_shape[0])
+                        width=int(frame_shape[1])
+                if(width is None or height is None):
+                    raise ValueError("Output video size could not be determined")
+                size=(int(height),int(width))
+            size=(int(size[0]),int(size[1]))
+            Path(self.__output_path).parent.mkdir(parents=True,exist_ok=True)
+            fourcc=cv2.VideoWriter_fourcc(*self.__encode_str)
+            self.__writer=cv2.VideoWriter(filename=self.__output_path,fourcc=fourcc,fps=fps,frameSize=(size[1],size[0]),isColor=self.__is_color)
+            if(not self.__writer.isOpened()):
+                raise ValueError(f"Failed to open output video: {self.__output_path}")
+
+        def write(self,packet):
+            """
+            Writes a packet to the output file.
+
+            Args:
+                packet (videoLib.FramePacket): Packet to write.
+
+            Returns:
+                bool: Always True.
+            """
+            if(self.__writer is None):
+                raise ValueError("Sink is not opened")
+            self.__writer.write(packet.frame)
+            return True
+
+        def close(self):
+            """
+            Closes the output file.
+            """
+            if(self.__writer is not None):
+                self.__writer.release()
+                self.__writer=None
+
+    class _DisplaySink(_SinkBase):
+        """
+        Sink that displays frames using OpenCV.
+        """
+
+        def __init__(self,window_name:str="video",wait_key_sec:int=1,destroy_window_flag:bool=True):
+            """
+            Initializes the _DisplaySink instance.
+
+            Args:
+                window_name (str): Window name.
+                wait_key_sec (int): Delay passed to cv2.waitKey().
+                destroy_window_flag (bool): Whether to destroy the window on close.
+            """
+            self.__window_name=window_name
+            self.__wait_key_sec=wait_key_sec
+            self.__destroy_window_flag=destroy_window_flag
+
+        def open(self,meta:dict|None=None):
+            """
+            Opens the display sink.
+
+            Args:
+                meta (dict or None): Metadata dictionary.
+            """
+            if(not IMPORT_OPENCV_FLAG):
+                raise RuntimeError("Error : The opencv package is not installed!")
+            cv2.namedWindow(self.__window_name,cv2.WINDOW_NORMAL)
+
+        def write(self,packet):
+            """
+            Displays a frame.
+
+            Args:
+                packet (videoLib.FramePacket): Packet to display.
+
+            Returns:
+                bool: False if ESC is pressed, otherwise True.
+            """
+            cv2.imshow(self.__window_name,packet.frame)
+            key=cv2.waitKey(max(1,int(self.__wait_key_sec)))
+            if(key==27):
+                return False
+            return True
+
+        def close(self):
+            """
+            Closes the display sink.
+            """
+            if(self.__destroy_window_flag and IMPORT_OPENCV_FLAG):
+                try:
+                    cv2.destroyWindow(self.__window_name)
+                except Exception:
+                    pass
+
+    class _ProcessorAdapter:
+        """
+        Adapter that normalizes legacy and packet based processor functions.
+        """
+
+        MODE_LEGACY_FRAME="legacy_frame"
+        MODE_LEGACY_BATCH="legacy_batch"
+        MODE_FRAME_PACKET="frame_packet"
+        MODE_FRAME_PACKET_BATCH="frame_packet_batch"
+
+        def __init__(self,func:Callable|None=None,mode:str=MODE_FRAME_PACKET,batch_size:int=1):
+            """
+            Initializes the _ProcessorAdapter instance.
+
+            Args:
+                func (callable or None): Processor function.
+                mode (str): Processing mode.
+                batch_size (int): Batch size.
+            """
+            self.__func=func
+            self.__mode=mode
+            self.__batch_size=max(1,int(batch_size))
+
+        def processPackets(self,packets:list):
+            """
+            Processes packets.
+
+            Args:
+                packets (list): List of FramePacket objects.
+
+            Returns:
+                list: Processed FramePacket list.
+            """
+            if(not isinstance(packets,list)):
+                raise TypeError("packets must be a list")
+            if(len(packets)<=0):
+                return []
+
+            if(self.__func is None):
+                now=time.time()
+                return [
+                    videoLib.FramePacket(
+                        index=p.index,
+                        frame=p.frame,
+                        timestamp=p.timestamp,
+                        source_timestamp=p.source_timestamp,
+                        processed_timestamp=now,
+                        meta=None if(p.meta is None) else pyExLib.safety_deepcopy(p.meta),
+                    ) for p in packets
+                ]
+
+            if(self.__mode==videoLib._ProcessorAdapter.MODE_LEGACY_FRAME):
+                outs=[self.__func(p.frame,p.index) for p in packets]
+            elif(self.__mode==videoLib._ProcessorAdapter.MODE_LEGACY_BATCH):
+                outs=self.__func([p.frame for p in packets],packets[0].index)
+            elif(self.__mode==videoLib._ProcessorAdapter.MODE_FRAME_PACKET):
+                outs=[self.__func(p) for p in packets]
+            elif(self.__mode==videoLib._ProcessorAdapter.MODE_FRAME_PACKET_BATCH):
+                outs=self.__func(packets)
+            else:
+                raise ValueError(f"Unknown processor mode: {self.__mode}")
+
+            if(isinstance(outs,tuple)):
+                outs=list(outs)
+            elif(not isinstance(outs,list)):
+                outs=[outs]
+
+            if(len(outs)!=len(packets)):
+                if(len(packets)==1 and len(outs)==1):
+                    pass
+                else:
+                    raise ValueError("The number of processor outputs does not match the input packet count")
+
+            now=time.time()
+            r=[]
+            for packet,out in zip(packets,outs):
+                if(isinstance(out,videoLib.FramePacket)):
+                    if(out.processed_timestamp is None):
+                        out.processed_timestamp=now
+                    r.append(out)
+                else:
+                    r.append(videoLib.FramePacket(
+                        index=packet.index,
+                        frame=out,
+                        timestamp=packet.timestamp,
+                        source_timestamp=packet.source_timestamp,
+                        processed_timestamp=now,
+                        meta=None if(packet.meta is None) else pyExLib.safety_deepcopy(packet.meta),
+                    ))
+            return r
+
+    class VideoPipeline:
+        """
+        Unified pipeline for file and real-time video processing.
+        """
+
+        SOURCE_TYPE_FILE="file"
+        SOURCE_TYPE_CAMERA="camera"
+        SOURCE_TYPE_FRAME_LIST="frame_list"
+
+        SINK_TYPE_FILE="file"
+        SINK_TYPE_DISPLAY="display"
+        SINK_TYPE_MEMORY="memory"
+        SINK_TYPE_NULL="null"
+
+        def __init__(self,config,processor:Callable|None=None,processor_mode:str="frame_packet",file_store:object|None=None):
+            """
+            Initializes the VideoPipeline instance.
+
+            Args:
+                config (videoLib.VideoPipelineConfig): Pipeline configuration.
+                processor (callable or None): Processor function.
+                processor_mode (str): Processing mode.
+                file_store (object or None): Optional FileStore instance used only for validation convenience.
+            """
+            if(not isinstance(config,videoLib.VideoPipelineConfig)):
+                raise TypeError("config must be videoLib.VideoPipelineConfig")
+
+            self.__config=pyExLib.safety_deepcopy(config)
+            if(self.__config.encode_str is None):
+                self.__config.encode_str=videoLib.DEFAULT_VIDEO_ENCODE_STR
+            self.__processor_adapter=videoLib._ProcessorAdapter(func=processor,mode=processor_mode,batch_size=self.__config.batch_size)
+            self.__file_store=file_store
+
+            raw_buffer_maxlen=self.__config.raw_buffer_maxlen if(self.__config.raw_buffer_maxlen>0) else max(0,int(self.__config.input_queue_maxlen))
+            output_buffer_maxlen=self.__config.output_buffer_maxlen if(self.__config.output_buffer_maxlen>0) else max(0,int(self.__config.output_queue_maxlen))
+
+            self.__raw_buffer=videoLib._RingFrameBuffer(maxlen=raw_buffer_maxlen,policy=self.__config.input_buffer_policy,copy_frame=True)
+            self.__processed_buffer=videoLib._RingFrameBuffer(maxlen=max(0,int(self.__config.processed_buffer_maxlen)),policy=self.__config.output_buffer_policy,copy_frame=True)
+            self.__output_buffer=videoLib._RingFrameBuffer(maxlen=output_buffer_maxlen,policy=self.__config.output_buffer_policy,copy_frame=True)
+
+            self.__source=self.__buildSource()
+            self.__sink=self.__buildSink()
+            self.__stop_event=threading.Event()
+            self.__thread=None
+            self.__running_flag=False
+            self.__state_lock=threading.Lock()
+            self.__state=videoLib.VideoPipelineState(config=pyExLib.safety_deepcopy(self.__config))
+            self.__source_meta={}
+
+        def __buildSource(self):
+            """
+            Creates the source instance.
+
+            Returns:
+                object: Source instance.
+            """
+            source_args=self.__config.source_args or {}
+            source_type=self.__config.source_type
+
+            if(source_type==videoLib.VideoPipeline.SOURCE_TYPE_FILE):
+                input_path=source_args.get("input_path")
+                if(input_path is None):
+                    input_asset=source_args.get("input_asset")
+                    if(isinstance(input_asset,IOLib.FileAsset)):
+                        input_path=str(input_asset.openPath())
+                if(input_path is None):
+                    raise ValueError("input_path is required for file source")
+                return videoLib._FileVideoSource(input_path=input_path)
+            elif(source_type==videoLib.VideoPipeline.SOURCE_TYPE_CAMERA):
+                return videoLib._CameraVideoSource(
+                    camera_index=source_args.get("camera_index",0),
+                    backend=source_args.get("backend"),
+                    width=source_args.get("width"),
+                    height=source_args.get("height"),
+                    fps=source_args.get("fps"),
+                )
+            elif(source_type==videoLib.VideoPipeline.SOURCE_TYPE_FRAME_LIST):
+                frames=source_args.get("frames")
+                if(frames is None):
+                    raise ValueError("frames is required for frame_list source")
+                return videoLib._FrameListSource(frames=frames,fps=source_args.get("fps",30.0))
+            else:
+                raise ValueError(f"Unsupported source_type: {source_type}")
+
+        def __buildSink(self):
+            """
+            Creates the sink instance.
+
+            Returns:
+                object: Sink instance.
+            """
+            sink_type=self.__config.sink_type or videoLib.VideoPipeline.SINK_TYPE_NULL
+            sink_args=self.__config.sink_args or {}
+
+            if(sink_type==videoLib.VideoPipeline.SINK_TYPE_FILE):
+                output_path=sink_args.get("output_path")
+                if(output_path is None):
+                    raise ValueError("output_path is required for file sink")
+                return videoLib._FileVideoSink(
+                    output_path=output_path,
+                    is_color=self.__config.is_color,
+                    encode_str=self.__config.encode_str,
+                    fps=sink_args.get("fps"),
+                    size=sink_args.get("size"),
+                )
+            elif(sink_type==videoLib.VideoPipeline.SINK_TYPE_DISPLAY):
+                return videoLib._DisplaySink(
+                    window_name=sink_args.get("window_name","video"),
+                    wait_key_sec=sink_args.get("wait_key_sec",self.__config.wait_key_sec if(self.__config.wait_key_sec>0) else 1),
+                    destroy_window_flag=sink_args.get("destroy_window_flag",True),
+                )
+            elif(sink_type==videoLib.VideoPipeline.SINK_TYPE_MEMORY):
+                return videoLib._MemorySink(
+                    copy_packets=sink_args.get("copy_packets",True),
+                    maxlen=sink_args.get("maxlen",0),
+                )
+            elif(sink_type==videoLib.VideoPipeline.SINK_TYPE_NULL or sink_type is None):
+                return videoLib._NullSink()
+            else:
+                raise ValueError(f"Unsupported sink_type: {sink_type}")
+
+        def __updateMetaFromSource(self):
+            """
+            Updates pipeline state metadata from the source.
+            """
+            self.__source_meta=self.__source.getMeta() or {}
+            with self.__state_lock:
+                self.__state.fps=self.__source_meta.get("fps")
+                self.__state.frame_shape=self.__source_meta.get("frame_shape")
+                self.__state.frame_count_hint=self.__source_meta.get("frame_count_hint")
+
+        def __recordRawPacket(self,packet):
+            """
+            Records a raw packet in the state and raw buffer.
+
+            Args:
+                packet (videoLib.FramePacket): Raw packet.
+            """
+            self.__raw_buffer.append(packet)
+            with self.__state_lock:
+                self.__state.latest_raw_index=packet.index
+                self.__state.dropped_input_count=self.__raw_buffer.droppedCount()
+
+        def __recordProcessedPacket(self,packet):
+            """
+            Records a processed packet in the state and processed buffer.
+
+            Args:
+                packet (videoLib.FramePacket): Processed packet.
+            """
+            self.__processed_buffer.append(packet)
+            with self.__state_lock:
+                self.__state.latest_processed_index=packet.index
+                self.__state.processed_frame_count+=1
+
+        def __recordOutputPacket(self,packet):
+            """
+            Records an output packet in the state and output buffer.
+
+            Args:
+                packet (videoLib.FramePacket): Output packet.
+            """
+            self.__output_buffer.append(packet)
+            with self.__state_lock:
+                self.__state.latest_output_index=packet.index
+                self.__state.dropped_output_count=self.__output_buffer.droppedCount()
+
+        def __flushBatch(self,batch:list):
+            """
+            Processes and writes the current batch.
+
+            Args:
+                batch (list): Packet batch.
+
+            Returns:
+                bool: True to continue, False to stop.
+            """
+            if(len(batch)<=0):
+                return True
+            processed_packets=self.__processor_adapter.processPackets(batch)
+            for packet in processed_packets:
+                self.__recordProcessedPacket(packet)
+                continue_flag=self.__sink.write(packet)
+                self.__recordOutputPacket(packet)
+                if(not continue_flag):
+                    return False
+            return True
+
+        def __runLoop(self):
+            """
+            Internal run loop.
+            """
+            batch=[]
+            try:
+                self.__source.open()
+                self.__updateMetaFromSource()
+                self.__sink.open(meta=self.__source_meta)
+                with self.__state_lock:
+                    self.__state.start_time=time.time()
+                    self.__state.end_time=None
+                    self.__state.last_error=None
+                while(not self.__stop_event.is_set()):
+                    packet=self.__source.read()
+                    if(packet is None):
+                        break
+                    self.__recordRawPacket(packet)
+                    batch.append(packet)
+                    if(len(batch)>=max(1,int(self.__config.batch_size))):
+                        continue_flag=self.__flushBatch(batch)
+                        batch=[]
+                        if(not continue_flag):
+                            self.__stop_event.set()
+                            break
+                if(len(batch)>0 and not self.__stop_event.is_set()):
+                    continue_flag=self.__flushBatch(batch)
+                    if(not continue_flag):
+                        self.__stop_event.set()
+            except Exception as e:
+                with self.__state_lock:
+                    self.__state.last_error=str(e)
+                raise
+            finally:
+                try:
+                    self.__sink.close()
+                finally:
+                    self.__source.close()
+                with self.__state_lock:
+                    self.__state.end_time=time.time()
+                self.__running_flag=False
+
+        def run(self):
+            """
+            Runs the pipeline synchronously.
+
+            Returns:
+                videoLib.VideoPipelineState: Pipeline state after execution.
+            """
+            self.__stop_event.clear()
+            self.__running_flag=True
+            self.__runLoop()
+            return self.getState(include_buffers=self.__config.save_buffer_snapshot_flag)
+
+        def start(self):
+            """
+            Starts the pipeline in a background thread.
+
+            Returns:
+                threading.Thread: Worker thread.
+
+            Raises:
+                RuntimeError: If the pipeline is already running.
+            """
+            if(self.__running_flag):
+                raise RuntimeError("Pipeline is already running")
+            self.__stop_event.clear()
+            self.__running_flag=True
+            self.__thread=threading.Thread(target=self.__runLoop,daemon=True)
+            self.__thread.start()
+            return self.__thread
+
+        def join(self,timeout:float|None=None):
+            """
+            Waits for the background thread to finish.
+
+            Args:
+                timeout (float or None): Join timeout.
+            """
+            if(self.__thread is not None):
+                self.__thread.join(timeout)
+
+        def stop(self):
+            """
+            Requests the pipeline to stop.
+            """
+            self.__stop_event.set()
+
+        def close(self):
+            """
+            Stops the pipeline and closes background resources.
+            """
+            self.stop()
+            self.join()
+
+        def isRunning(self):
+            """
+            Returns whether the pipeline is running.
+
+            Returns:
+                bool: True if the pipeline is running.
+            """
+            return bool(self.__running_flag)
+
+        def getConfig(self):
+            """
+            Returns the pipeline configuration.
+
+            Returns:
+                videoLib.VideoPipelineConfig: Configuration copy.
+            """
+            return pyExLib.safety_deepcopy(self.__config)
+
+        def getState(self,include_buffers:bool=False,latest_n:int|None=None,include_input_asset:bool|None=None,include_output_asset:bool|None=None):
+            """
+            Returns a serializable pipeline state.
+
+            Args:
+                include_buffers (bool): Whether to include buffer snapshots.
+                latest_n (int or None): Maximum number of packets to include in each snapshot.
+                include_input_asset (bool or None): Whether to include input FileAsset.
+                include_output_asset (bool or None): Whether to include output FileAsset.
+
+            Returns:
+                videoLib.VideoPipelineState: Serializable state.
+            """
+            with self.__state_lock:
+                state=pyExLib.safety_deepcopy(self.__state)
+            state.config=pyExLib.safety_deepcopy(self.__config)
+
+            if(include_buffers or self.__config.save_buffer_snapshot_flag):
+                state.raw_buffer_snapshot=self.snapshotBuffer(kind="raw",latest_n=latest_n)
+                state.processed_buffer_snapshot=self.snapshotBuffer(kind="processed",latest_n=latest_n)
+                state.output_buffer_snapshot=self.snapshotBuffer(kind="output",latest_n=latest_n)
+
+            if(include_input_asset is None):
+                include_input_asset=self.__config.save_input_asset_flag
+            if(include_output_asset is None):
+                include_output_asset=self.__config.save_output_asset_flag
+
+            if(include_input_asset):
+                state.input_asset=self.__makeInputAsset()
+            if(include_output_asset):
+                state.output_asset=self.__makeOutputAsset()
+            return state
+
+        def saveStateToFileStore(self,store,include_buffers:bool=True,latest_n:int|None=None,include_input_asset:bool|None=None,include_output_asset:bool|None=None):
+            """
+            Builds a FileStore compatible state object.
+
+            Args:
+                store (IOLib.FileStore): FileStore instance.
+                include_buffers (bool): Whether to include buffer snapshots.
+                latest_n (int or None): Maximum number of packets to include in each snapshot.
+                include_input_asset (bool or None): Whether to include input FileAsset.
+                include_output_asset (bool or None): Whether to include output FileAsset.
+
+            Returns:
+                videoLib.VideoPipelineState: State object compatible with FileStore.
+            """
+            if(not isinstance(store,_FileStore)):
+                raise ValueError("store must be a FileStore instance")
+            return self.getState(
+                include_buffers=include_buffers,
+                latest_n=latest_n,
+                include_input_asset=include_input_asset,
+                include_output_asset=include_output_asset,
+            )
+
+        @classmethod
+        def fromState(cls,state,processor:Callable|None=None,file_store:object|None=None):
+            """
+            Creates a pipeline from a saved state.
+
+            Args:
+                state (videoLib.VideoPipelineState): Saved pipeline state.
+                processor (callable or None): Processor function to use after restoration.
+                file_store (object or None): Optional FileStore instance.
+
+            Returns:
+                videoLib.VideoPipeline: Restored pipeline.
+            """
+            if(not isinstance(state,videoLib.VideoPipelineState)):
+                raise TypeError("state must be videoLib.VideoPipelineState")
+            if(not isinstance(state.config,videoLib.VideoPipelineConfig)):
+                raise ValueError("state.config must be videoLib.VideoPipelineConfig")
+            obj=cls(config=state.config,processor=processor,file_store=file_store)
+            obj.__state=pyExLib.safety_deepcopy(state)
+            return obj
+
+        def __bufferByName(self,kind:str):
+            """
+            Returns a buffer by name.
+
+            Args:
+                kind (str): Buffer name.
+
+            Returns:
+                videoLib._RingFrameBuffer: Buffer instance.
+            """
+            if(kind=="raw"):
+                return self.__raw_buffer
+            elif(kind=="processed"):
+                return self.__processed_buffer
+            elif(kind=="output"):
+                return self.__output_buffer
+            else:
+                raise ValueError(f"Unknown buffer kind: {kind}")
+
+        def getLatestFramePacket(self,kind:str="processed",copy_flag:bool=True):
+            """
+            Returns the latest packet from the specified buffer.
+
+            Args:
+                kind (str): Buffer name.
+                copy_flag (bool): Whether to return a copied packet.
+
+            Returns:
+                videoLib.FramePacket or None: Latest packet.
+            """
+            return self.__bufferByName(kind).latest(copy_flag=copy_flag)
+
+        def getLatestFrame(self,kind:str="processed",copy_flag:bool=True):
+            """
+            Returns the latest frame from the specified buffer.
+
+            Args:
+                kind (str): Buffer name.
+                copy_flag (bool): Whether to return a copied frame.
+
+            Returns:
+                np.ndarray or None: Latest frame.
+            """
+            packet=self.getLatestFramePacket(kind=kind,copy_flag=copy_flag)
+            if(packet is None):
+                return None
+            if(copy_flag and isinstance(packet.frame,np.ndarray)):
+                return packet.frame.copy()
+            return packet.frame
+
+        def getBufferedFramePackets(self,kind:str="processed",latest_n:int|None=None,copy_flag:bool=True):
+            """
+            Returns buffered packets.
+
+            Args:
+                kind (str): Buffer name.
+                latest_n (int or None): Number of latest packets to return.
+                copy_flag (bool): Whether to return copied packets.
+
+            Returns:
+                list: Packet list.
+            """
+            return self.__bufferByName(kind).items(latest_n=latest_n,copy_flag=copy_flag)
+
+        def getBufferedFrames(self,kind:str="processed",latest_n:int|None=None,copy_flag:bool=True):
+            """
+            Returns buffered frames.
+
+            Args:
+                kind (str): Buffer name.
+                latest_n (int or None): Number of latest frames to return.
+                copy_flag (bool): Whether to return copied frames.
+
+            Returns:
+                list: Frame list.
+            """
+            packets=self.getBufferedFramePackets(kind=kind,latest_n=latest_n,copy_flag=copy_flag)
+            if(copy_flag):
+                return [p.frame.copy() if(isinstance(p.frame,np.ndarray)) else pyExLib.safety_deepcopy(p.frame) for p in packets]
+            return [p.frame for p in packets]
+
+        def clearBuffer(self,kind:str="processed"):
+            """
+            Clears the specified buffer.
+
+            Args:
+                kind (str): Buffer name.
+            """
+            self.__bufferByName(kind).clear()
+
+        def snapshotBuffer(self,kind:str="processed",latest_n:int|None=None):
+            """
+            Returns a FileStore compatible snapshot of a buffer.
+
+            Args:
+                kind (str): Buffer name.
+                latest_n (int or None): Number of latest packets to include.
+
+            Returns:
+                videoLib.FrameBufferSnapshot: Buffer snapshot.
+            """
+            packets=self.getBufferedFramePackets(kind=kind,latest_n=latest_n,copy_flag=True)
+            if(len(packets)<=0):
+                return videoLib.FrameBufferSnapshot(
+                    buffer_name=kind,
+                    start_index=None,
+                    end_index=None,
+                    fps=self.__state.fps,
+                    frames=np.empty((0,),dtype=np.uint8),
+                    metas=[],
+                    timestamps=[],
+                )
+
+            frames=[p.frame for p in packets]
+            try:
+                frame_store=np.stack(frames,axis=0)
+            except Exception:
+                frame_store=frames
+            return videoLib.FrameBufferSnapshot(
+                buffer_name=kind,
+                start_index=packets[0].index,
+                end_index=packets[-1].index,
+                fps=self.__state.fps,
+                frames=frame_store,
+                metas=[None if(p.meta is None) else pyExLib.safety_deepcopy(p.meta) for p in packets],
+                timestamps=[p.timestamp for p in packets],
+            )
+
+        def saveBufferToFileStore(self,store,kind:str="processed",latest_n:int|None=None):
+            """
+            Builds a FileStore compatible buffer snapshot.
+
+            Args:
+                store (IOLib.FileStore): FileStore instance.
+                kind (str): Buffer name.
+                latest_n (int or None): Number of latest packets to include.
+
+            Returns:
+                videoLib.FrameBufferSnapshot: Buffer snapshot.
+            """
+            if(not isinstance(store,_FileStore)):
+                raise ValueError("store must be a FileStore instance")
+            return self.snapshotBuffer(kind=kind,latest_n=latest_n)
+
+        def getMemoryPackets(self,copy_flag:bool=True):
+            """
+            Returns packets stored in the memory sink.
+
+            Args:
+                copy_flag (bool): Whether to return copied packets.
+
+            Returns:
+                list: Packet list.
+            """
+            if(isinstance(self.__sink,videoLib._MemorySink)):
+                return self.__sink.getPackets(copy_flag=copy_flag)
+            return []
+
+        def getMemoryFrames(self,copy_flag:bool=True):
+            """
+            Returns frames stored in the memory sink.
+
+            Args:
+                copy_flag (bool): Whether to return copied frames.
+
+            Returns:
+                list: Frame list.
+            """
+            if(isinstance(self.__sink,videoLib._MemorySink)):
+                return self.__sink.getFrames(copy_flag=copy_flag)
+            return []
+
+        def __makeInputAsset(self):
+            """
+            Creates a FileAsset for the input file if possible.
+
+            Returns:
+                IOLib.FileAsset or None: Input file asset.
+            """
+            source_args=self.__config.source_args or {}
+            input_path=source_args.get("input_path")
+            if(input_path is None):
+                return None
+            p=Path(input_path)
+            if(not p.exists() or not p.is_file()):
+                return None
+            try:
+                return IOLib.FileAsset(p)
+            except Exception:
+                return None
+
+        def __makeOutputAsset(self):
+            """
+            Creates a FileAsset for the output file if possible.
+
+            Returns:
+                IOLib.FileAsset or None: Output file asset.
+            """
+            sink_args=self.__config.sink_args or {}
+            output_path=sink_args.get("output_path")
+            if(output_path is None):
+                return None
+            p=Path(output_path)
+            if(not p.exists() or not p.is_file()):
+                return None
+            try:
+                return IOLib.FileAsset(p)
+            except Exception:
+                return None
+
     class videoStreamProc():
         """
-        Video Processing Related Class.
+        Wrapper class for stream oriented video processing.
         """
 
         MULTI_PROCESSING_TYPE_MULTIPROCESSING="m"
         MULTI_PROCESSING_TYPE_THREADING="t"
         MULTI_PROCESSING_TYPE_TORCH_MULTIPROCESSING="tm"
-
 
         def __init__(
             self,
@@ -47387,7 +48977,13 @@ class videoLib:
             wait_key_sec:int=0,
             batch_size:int=1,
             queue_max:int=0,
-            multi_processing_type:str=MULTI_PROCESSING_TYPE_TORCH_MULTIPROCESSING
+            multi_processing_type:str=MULTI_PROCESSING_TYPE_TORCH_MULTIPROCESSING,
+            raw_buffer_maxlen:int=0,
+            processed_buffer_maxlen:int=0,
+            output_buffer_maxlen:int=0,
+            input_buffer_policy:str="drop_oldest",
+            output_buffer_policy:str="drop_oldest",
+            file_store:object|None=None,
         ):
             """
             Initializes the videoStreamProc instance.
@@ -47395,187 +48991,392 @@ class videoLib:
             Args:
                 input_path (str): Path to the input video file.
                 output_path (str): Path to the output video file.
-                conv_func (function): Conversion function to apply to each frame.
+                conv_func (callable): Conversion function to apply to each frame.
                 isColor (bool): Whether the video is in color.
-                encode_str (str): Video encoding format.
-                wait_key_sec (int): Wait time in seconds between frames.
+                encode_str (str or None): Video encoding format.
+                wait_key_sec (int): Wait time passed to cv2.waitKey().
                 batch_size (int): Batch size for processing.
-                queue_max (int): Maximum size of the queue.
-                multi_processing_type (str): Type of multiprocessing to use.
+                queue_max (int): Compatibility parameter now also used as a buffer hint.
+                multi_processing_type (str): Compatibility parameter kept for existing code.
+                raw_buffer_maxlen (int): Maximum number of raw buffered frames.
+                processed_buffer_maxlen (int): Maximum number of processed buffered frames.
+                output_buffer_maxlen (int): Maximum number of output buffered frames.
+                input_buffer_policy (str): Input buffer overflow policy.
+                output_buffer_policy (str): Output buffer overflow policy.
+                file_store (object or None): Optional FileStore instance.
+            """
+            self.__multi_processing_type=multi_processing_type
+            self.__conv_func=conv_func
+            self.__setupPipeline(
+                source_type=videoLib.VideoPipeline.SOURCE_TYPE_FILE,
+                source_args={"input_path":input_path},
+                sink_type=videoLib.VideoPipeline.SINK_TYPE_FILE,
+                sink_args={"output_path":output_path},
+                conv_func=conv_func,
+                processor_mode=videoLib._ProcessorAdapter.MODE_LEGACY_FRAME if(batch_size<=1) else videoLib._ProcessorAdapter.MODE_LEGACY_BATCH,
+                isColor=isColor,
+                encode_str=encode_str,
+                wait_key_sec=wait_key_sec,
+                batch_size=batch_size,
+                queue_max=queue_max,
+                raw_buffer_maxlen=raw_buffer_maxlen,
+                processed_buffer_maxlen=processed_buffer_maxlen,
+                output_buffer_maxlen=output_buffer_maxlen,
+                input_buffer_policy=input_buffer_policy,
+                output_buffer_policy=output_buffer_policy,
+                file_store=file_store,
+            )
+
+        def __setupPipeline(
+            self,
+            source_type:str,
+            source_args:dict,
+            sink_type:str|None,
+            sink_args:dict|None,
+            conv_func:callable,
+            processor_mode:str,
+            isColor:bool,
+            encode_str:str|None,
+            wait_key_sec:int,
+            batch_size:int,
+            queue_max:int,
+            raw_buffer_maxlen:int,
+            processed_buffer_maxlen:int,
+            output_buffer_maxlen:int,
+            input_buffer_policy:str,
+            output_buffer_policy:str,
+            file_store:object|None,
+        ):
+            """
+            Internal helper to initialize the pipeline.
+
+            Args:
+                source_type (str): Source type.
+                source_args (dict): Source arguments.
+                sink_type (str or None): Sink type.
+                sink_args (dict or None): Sink arguments.
+                conv_func (callable): Conversion function.
+                processor_mode (str): Processor mode.
+                isColor (bool): Whether the output is color.
+                encode_str (str or None): Video encoding format.
+                wait_key_sec (int): Wait time passed to cv2.waitKey().
+                batch_size (int): Batch size.
+                queue_max (int): Buffer hint.
+                raw_buffer_maxlen (int): Raw buffer length.
+                processed_buffer_maxlen (int): Processed buffer length.
+                output_buffer_maxlen (int): Output buffer length.
+                input_buffer_policy (str): Input buffer policy.
+                output_buffer_policy (str): Output buffer policy.
+                file_store (object or None): Optional FileStore.
             """
             if(encode_str==None):
                 encode_str=videoLib.DEFAULT_VIDEO_ENCODE_STR
 
-            self.__input_path=input_path
-            self.__output_path=output_path
-            self.__conv_func=conv_func
-            self.__isColor=isColor
-            self.__encode_str=encode_str
-            self.__wait_key_sec=wait_key_sec
-            self.__batch_size=batch_size
-            self.__multi_processing_type=multi_processing_type
-            
-            #temporary measures due to unable multiprocessing
-            self.__queue_max=queue_max
+            self.__config=videoLib.VideoPipelineConfig(
+                source_type=source_type,
+                source_args=source_args,
+                sink_type=sink_type,
+                sink_args=sink_args,
+                is_color=isColor,
+                encode_str=encode_str,
+                wait_key_sec=wait_key_sec,
+                batch_size=batch_size,
+                input_queue_maxlen=queue_max,
+                output_queue_maxlen=queue_max,
+                raw_buffer_maxlen=raw_buffer_maxlen,
+                processed_buffer_maxlen=processed_buffer_maxlen,
+                output_buffer_maxlen=output_buffer_maxlen,
+                input_buffer_policy=input_buffer_policy,
+                output_buffer_policy=output_buffer_policy,
+            )
+            self.__pipeline=videoLib.VideoPipeline(
+                config=self.__config,
+                processor=conv_func,
+                processor_mode=processor_mode,
+                file_store=file_store,
+            )
+
+        @classmethod
+        def fromCamera(
+            cls,
+            camera_index:int,
+            conv_func:callable,
+            output_path:str|None=None,
+            isColor:bool=True,
+            encode_str:str=None,
+            wait_key_sec:int=1,
+            batch_size:int=1,
+            queue_max:int=0,
+            multi_processing_type:str=MULTI_PROCESSING_TYPE_TORCH_MULTIPROCESSING,
+            display_flag:bool=True,
+            window_name:str="video",
+            width:int|None=None,
+            height:int|None=None,
+            fps:float|None=None,
+            raw_buffer_maxlen:int=0,
+            processed_buffer_maxlen:int=0,
+            output_buffer_maxlen:int=0,
+            input_buffer_policy:str="drop_oldest",
+            output_buffer_policy:str="drop_oldest",
+            file_store:object|None=None,
+        ):
+            """
+            Creates a videoStreamProc instance configured for camera input.
+
+            Args:
+                camera_index (int): Camera index.
+                conv_func (callable): Conversion function to apply to each frame.
+                output_path (str or None): Optional output video path.
+                isColor (bool): Whether the output is color.
+                encode_str (str or None): Video encoding format.
+                wait_key_sec (int): Wait time passed to cv2.waitKey().
+                batch_size (int): Batch size for processing.
+                queue_max (int): Compatibility parameter now also used as a buffer hint.
+                multi_processing_type (str): Compatibility parameter kept for existing code.
+                display_flag (bool): Whether to display frames when no output file is used.
+                window_name (str): OpenCV window name.
+                width (int or None): Requested camera width.
+                height (int or None): Requested camera height.
+                fps (float or None): Requested camera fps.
+                raw_buffer_maxlen (int): Maximum number of raw buffered frames.
+                processed_buffer_maxlen (int): Maximum number of processed buffered frames.
+                output_buffer_maxlen (int): Maximum number of output buffered frames.
+                input_buffer_policy (str): Input buffer overflow policy.
+                output_buffer_policy (str): Output buffer overflow policy.
+                file_store (object or None): Optional FileStore instance.
+
+            Returns:
+                videoLib.videoStreamProc: Configured instance.
+            """
+            obj=cls.__new__(cls)
+            obj.__multi_processing_type=multi_processing_type
+            obj.__conv_func=conv_func
+            sink_type=videoLib.VideoPipeline.SINK_TYPE_DISPLAY if(display_flag and output_path is None) else (videoLib.VideoPipeline.SINK_TYPE_FILE if(output_path is not None) else videoLib.VideoPipeline.SINK_TYPE_NULL)
+            sink_args={"window_name":window_name,"wait_key_sec":wait_key_sec} if(sink_type==videoLib.VideoPipeline.SINK_TYPE_DISPLAY) else ({"output_path":output_path} if(sink_type==videoLib.VideoPipeline.SINK_TYPE_FILE) else {})
+            obj.__setupPipeline(
+                source_type=videoLib.VideoPipeline.SOURCE_TYPE_CAMERA,
+                source_args={
+                    "camera_index":camera_index,
+                    "width":width,
+                    "height":height,
+                    "fps":fps,
+                },
+                sink_type=sink_type,
+                sink_args=sink_args,
+                conv_func=conv_func,
+                processor_mode=videoLib._ProcessorAdapter.MODE_LEGACY_FRAME if(batch_size<=1) else videoLib._ProcessorAdapter.MODE_LEGACY_BATCH,
+                isColor=isColor,
+                encode_str=encode_str,
+                wait_key_sec=wait_key_sec,
+                batch_size=batch_size,
+                queue_max=queue_max,
+                raw_buffer_maxlen=raw_buffer_maxlen,
+                processed_buffer_maxlen=processed_buffer_maxlen,
+                output_buffer_maxlen=output_buffer_maxlen,
+                input_buffer_policy=input_buffer_policy,
+                output_buffer_policy=output_buffer_policy,
+                file_store=file_store,
+            )
+            return obj
 
         def run(self):
             """
-            Runs the video processing.
+            Runs the stream processing.
 
-            Raises:
-                ImportError: If torch is not installed when using torch multiprocessing.
+            Returns:
+                videoLib.VideoPipelineState: Pipeline state after execution.
             """
-            if(not IMPORT_OPENCV_FLAG):
-                raise RuntimeError("Error : The opencv package is not installed!")
+            return self.__pipeline.run()
 
-            cap_input=cv2.VideoCapture(self.__input_path)
+        def start(self):
+            """
+            Starts the processing in a background thread.
 
-            fps=cap_input.get(cv2.CAP_PROP_FPS)
-            w=int(cap_input.get(cv2.CAP_PROP_FRAME_WIDTH))
-            h=int(cap_input.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            Returns:
+                threading.Thread: Worker thread.
+            """
+            return self.__pipeline.start()
 
-            fourcc=cv2.VideoWriter_fourcc(*self.__encode_str)
-            out_video=cv2.VideoWriter(filename=self.__output_path,fourcc=fourcc,fps=fps,frameSize=(w,h),isColor=self.__isColor)
-            frame_count=int(cap_input.get(cv2.CAP_PROP_FRAME_COUNT))
+        def join(self,timeout:float|None=None):
+            """
+            Waits for the background worker to finish.
 
-            counter=0
+            Args:
+                timeout (float or None): Join timeout.
+            """
+            self.__pipeline.join(timeout=timeout)
 
-            #batch size
-            if(self.__batch_size<=1):
-                default_work=lambda frame,counter:out_video.write(self.__conv_func(frame,counter))
-                batch_proc_flag=True
-            else:
-                default_work=lambda frames,counter:[out_video.write(fi) for fi in self.__conv_func(frames,counter)]
-                #batch_proc_flag=False
+        def stop(self):
+            """
+            Requests the processing to stop.
+            """
+            self.__pipeline.stop()
 
-            #use multiprocessing or threading
-            if(self.__queue_max>0):
-                
-                #multiprocessing
-                #https://qiita.com/lijiming/items/6c1e0aa63ff0e36fedb9
-                if(self.__multi_processing_type==videoLib.videoStreamProc.MULTI_PROCESSING_TYPE_MULTIPROCESSING):
-                    def queue_work(q:mp.Queue,frame,counter):
-                        q.put(object())
-                        default_work(frame,counter)
-                        q.get()
-                    queue=mp.Queue(self.__queue_max)
-                    processes=[]
-                
-                #threading
-                elif(self.__multi_processing_type==videoLib.videoStreamProc.MULTI_PROCESSING_TYPE_THREADING):
-                    resource_lock=threading.Lock()
-                    def thread_work(frame,counter):
-                        with resource_lock:
-                            default_work(frame,counter)
-                            
-                    threads=[]
-                    [thread.start() for thread in threads]
-                    [thread.join() for thread in threads]
+        def isRunning(self):
+            """
+            Returns whether the wrapper is running.
 
-                #torch.multiprocessing
-                elif(self.__multi_processing_type==videoLib.videoStreamProc.MULTI_PROCESSING_TYPE_TORCH_MULTIPROCESSING):
-                    #manager=mp.Manager()
-                    #results=manager.dict()
-                    processes=[]
+            Returns:
+                bool: True if running.
+            """
+            return self.__pipeline.isRunning()
 
-            while True:
-                ret,frame=cap_input.read()
-                if not ret:
-                    break
-                
-                #batch size
-                if(self.__batch_size<=1):
-                    frame_func_input=frame
-                else:
-                    batch_n=counter%self.__batch_size
-                    if(batch_n==0):
-                        frame_func_input=[]
-                        batch_proc_flag=False
-                    elif(batch_n==self.__batch_size-1):
-                        batch_proc_flag=True
-                    frame_func_input.append(frame)
-                
-                if(batch_proc_flag):
-                    #use multiprocessing or threading
-                    if(self.__queue_max>0):
-                        #multiprocessing
-                        if(self.__multi_processing_type==videoLib.videoStreamProc.MULTI_PROCESSING_TYPE_MULTIPROCESSING):
-                            processes.append(mp.Process(target=queue_work,args=(queue,frame_func_input,counter)))
+        def getPipeline(self):
+            """
+            Returns the internal VideoPipeline.
 
-                        #threading
-                        elif(self.__multi_processing_type==videoLib.videoStreamProc.MULTI_PROCESSING_TYPE_THREADING):
-                            threads.append(threading.Thread(target=thread_work,args=(frame_func_input,counter)))
-                        
-                        #torch.multiprocessing
-                        elif(self.__multi_processing_type==videoLib.videoStreamProc.MULTI_PROCESSING_TYPE_TORCH_MULTIPROCESSING):
-                            if(not IMPORT_TORCH_FLAG):
-                                raise ImportError("torch is not installed.")
-                            
-                            p=torch_mp.Process(target=default_work,args=(frame_func_input,counter))
-                            p.start()
-                            processes.append(p)
-                    else:
-                        default_work(frame_func_input,counter)
-                
-                if(self.__wait_key_sec>0):
-                    key=cv2.waitKey(self.__wait_key_sec)
-                    if(key==27):# key 27 : ESC
-                        break
-                
-                #use multiprocessing or threading
-                if(self.__queue_max>0):
-                    #torch.multiprocessing
-                    if(len(processes)>=self.__queue_max):
-                        for p in processes:
-                            p.join()
-                        processes=[]
-                
-                counter+=1
+            Returns:
+                videoLib.VideoPipeline: Internal pipeline.
+            """
+            return self.__pipeline
 
-            #use multiprocessing or threading
-            if(self.__queue_max>0):
-                #multiprocessing
-                if(self.__multi_processing_type==videoLib.videoStreamProc.MULTI_PROCESSING_TYPE_MULTIPROCESSING):    
-                    [p.start() for p in processes]
-                    [p.join() for p in processes]
-                
-                #threading
-                elif(self.__multi_processing_type==videoLib.videoStreamProc.MULTI_PROCESSING_TYPE_THREADING):
-                
-                    [thread.start() for thread in threads]
-                    [thread.join() for thread in threads]
-                    
-                #torch.multiprocessing            
-                elif(self.__multi_processing_type==videoLib.videoStreamProc.MULTI_PROCESSING_TYPE_TORCH_MULTIPROCESSING):
-                    for p in processes:
-                        p.join()
+        def getLatestFrame(self,kind:str="processed",copy_flag:bool=True):
+            """
+            Returns the latest buffered frame.
 
-            cap_input.release()
-            out_video.release()
+            Args:
+                kind (str): Buffer name.
+                copy_flag (bool): Whether to return a copied frame.
+
+            Returns:
+                np.ndarray or None: Latest frame.
+            """
+            return self.__pipeline.getLatestFrame(kind=kind,copy_flag=copy_flag)
+
+        def getBufferedFrames(self,kind:str="processed",latest_n:int|None=None,copy_flag:bool=True):
+            """
+            Returns buffered frames.
+
+            Args:
+                kind (str): Buffer name.
+                latest_n (int or None): Number of latest frames to return.
+                copy_flag (bool): Whether to return copied frames.
+
+            Returns:
+                list: Frame list.
+            """
+            return self.__pipeline.getBufferedFrames(kind=kind,latest_n=latest_n,copy_flag=copy_flag)
+
+        def snapshotBuffer(self,kind:str="processed",latest_n:int|None=None):
+            """
+            Returns a snapshot of the specified buffer.
+
+            Args:
+                kind (str): Buffer name.
+                latest_n (int or None): Number of latest packets to include.
+
+            Returns:
+                videoLib.FrameBufferSnapshot: Buffer snapshot.
+            """
+            return self.__pipeline.snapshotBuffer(kind=kind,latest_n=latest_n)
+
+        def saveBufferToFileStore(self,store,kind:str="processed",latest_n:int|None=None):
+            """
+            Builds a FileStore compatible snapshot of the specified buffer.
+
+            Args:
+                store (IOLib.FileStore): FileStore instance.
+                kind (str): Buffer name.
+                latest_n (int or None): Number of latest packets to include.
+
+            Returns:
+                videoLib.FrameBufferSnapshot: Buffer snapshot.
+            """
+            return self.__pipeline.saveBufferToFileStore(store=store,kind=kind,latest_n=latest_n)
+
+        def getState(self,include_buffers:bool=False,latest_n:int|None=None,include_input_asset:bool|None=None,include_output_asset:bool|None=None):
+            """
+            Returns a serializable processing state.
+
+            Args:
+                include_buffers (bool): Whether to include buffer snapshots.
+                latest_n (int or None): Maximum number of packets in each snapshot.
+                include_input_asset (bool or None): Whether to include input FileAsset.
+                include_output_asset (bool or None): Whether to include output FileAsset.
+
+            Returns:
+                videoLib.VideoPipelineState: Serializable state.
+            """
+            return self.__pipeline.getState(
+                include_buffers=include_buffers,
+                latest_n=latest_n,
+                include_input_asset=include_input_asset,
+                include_output_asset=include_output_asset,
+            )
+
+        def saveStateToFileStore(self,store,include_buffers:bool=True,latest_n:int|None=None,include_input_asset:bool|None=None,include_output_asset:bool|None=None):
+            """
+            Builds a FileStore compatible state object.
+
+            Args:
+                store (IOLib.FileStore): FileStore instance.
+                include_buffers (bool): Whether to include buffer snapshots.
+                latest_n (int or None): Maximum number of packets in each snapshot.
+                include_input_asset (bool or None): Whether to include input FileAsset.
+                include_output_asset (bool or None): Whether to include output FileAsset.
+
+            Returns:
+                videoLib.VideoPipelineState: Serializable state.
+            """
+            return self.__pipeline.saveStateToFileStore(
+                store=store,
+                include_buffers=include_buffers,
+                latest_n=latest_n,
+                include_input_asset=include_input_asset,
+                include_output_asset=include_output_asset,
+            )
+
+        @classmethod
+        def fromState(cls,state,conv_func:Callable|None=None,file_store:object|None=None):
+            """
+            Creates a videoStreamProc instance from a saved pipeline state.
+
+            Args:
+                state (videoLib.VideoPipelineState): Saved pipeline state.
+                conv_func (callable or None): Conversion function to use after restoration.
+                file_store (object or None): Optional FileStore instance.
+
+            Returns:
+                videoLib.videoStreamProc: Restored instance.
+            """
+            if(not isinstance(state,videoLib.VideoPipelineState)):
+                raise TypeError("state must be videoLib.VideoPipelineState")
+            obj=cls.__new__(cls)
+            obj.__multi_processing_type=videoLib.videoStreamProc.MULTI_PROCESSING_TYPE_THREADING
+            obj.__conv_func=conv_func
+            obj.__config=pyExLib.safety_deepcopy(state.config)
+            obj.__pipeline=videoLib.VideoPipeline.fromState(state=state,processor=conv_func,file_store=file_store)
+            return obj
 
     class videoProcess():
         """
-        Class for video processing.
+        Class for list based video processing.
         """
 
-        def __init__(self,input_path:str=None):
+        def __init__(self,input_path:str=None,file_store:object|None=None):
             """
             Initializes the videoProcess instance.
 
             Args:
-                input_path (str): Path to the input video file.
+                input_path (str or None): Path to the input video file.
+                file_store (object or None): Optional FileStore instance.
 
             Raises:
                 ValueError: If the input video is invalid.
             """
             self.__input_path=None
+            self.__file_store=file_store
+            self.__raw_frames=[]
+            self.__frames=[]
+            self.__fps=None
+            self.__shape=None
 
             if(input_path!=None):
                 r=videoLib.VideoIO.video2list(input_path)
                 if(r!=None):
                     self.__input_path=input_path
-                    self.__raw_frames=r["frames"]
-                    self.__frames=r["frames"]
+                    self.__raw_frames=pyExLib.safety_deepcopy(r["frames"])
+                    self.__frames=pyExLib.safety_deepcopy(r["frames"])
                     self.__fps=r["fps"]
                     self.__shape=r["shape"]
                 else:
@@ -47591,11 +49392,12 @@ class videoLib:
             """
             self.__raw_frames=pyExLib.safety_deepcopy(frames)
             self.__frames=pyExLib.safety_deepcopy(frames)
-            self.__fps=fps
+            self.__fps=float(fps)
+            self.__shape=None if(len(frames)<=0 or not isinstance(frames[0],np.ndarray)) else tuple(frames[0].shape)
 
         def getImg(self,index:int):
             """
-            Gets a frame from the video.
+            Gets a frame from the current frame list.
 
             Args:
                 index (int): Index of the frame.
@@ -47605,33 +49407,70 @@ class videoLib:
             """
             return self.__frames[index]
         
-        def processAll(self,func:callable,ow_flag:bool=True):
+        def getRawImg(self,index:int):
             """
-            Processes all frames in the video using a specified function.
+            Gets a frame from the original frame list.
 
             Args:
-                func (function): Function to process each frame.
-                ow_flag (bool): Whether to overwrite the frames.
+                index (int): Index of the frame.
+
+            Returns:
+                np.ndarray: Frame at the specified index.
+            """
+            return self.__raw_frames[index]
+
+        def __runMemoryPipeline(self,frames:list,func:Callable|None=None,processor_mode:str="legacy_frame"):
+            """
+            Runs a temporary in-memory pipeline.
+
+            Args:
+                frames (list): Frame list to process.
+                func (callable or None): Processing function.
+                processor_mode (str): Processing mode.
+
+            Returns:
+                list: Output frame list.
+            """
+            config=videoLib.VideoPipelineConfig(
+                source_type=videoLib.VideoPipeline.SOURCE_TYPE_FRAME_LIST,
+                source_args={"frames":frames,"fps":self.__fps if(self.__fps is not None) else 30.0},
+                sink_type=videoLib.VideoPipeline.SINK_TYPE_MEMORY,
+                sink_args={"copy_packets":True,"maxlen":0},
+                is_color=True,
+                encode_str=videoLib.DEFAULT_VIDEO_ENCODE_STR,
+                batch_size=1,
+                processed_buffer_maxlen=len(frames),
+            )
+            pipeline=videoLib.VideoPipeline(config=config,processor=func,processor_mode=processor_mode,file_store=self.__file_store)
+            pipeline.run()
+            return pipeline.getMemoryFrames(copy_flag=True)
+
+        def processAll(self,func:callable,ow_flag:bool=True):
+            """
+            Processes all frames using a specified function.
+
+            Args:
+                func (callable): Function to process each frame.
+                ow_flag (bool): Whether to overwrite the current frames.
 
             Returns:
                 list: List of processed frames.
             """
-            r=[]
-            for i,frame in enumerate(self.__frames):
-                r.append(func(frame,i))
+            r=self.__runMemoryPipeline(frames=self.__frames,func=func,processor_mode=videoLib._ProcessorAdapter.MODE_LEGACY_FRAME)
             if(ow_flag):
-                self.__frames=r
+                self.__frames=pyExLib.safety_deepcopy(r)
+                self.__shape=None if(len(self.__frames)<=0 or not isinstance(self.__frames[0],np.ndarray)) else tuple(self.__frames[0].shape)
             return r
         
         def processAllAndsave(self,func:callable,out_path:str,isColor:bool=True,encode_str:str=None):
             """
-            Processes all frames in the video using a specified function and saves the result to a video file.
+            Processes all frames and saves the result to a video file.
 
             Args:
-                func (function): Function to process each frame.
+                func (callable): Function to process each frame.
                 out_path (str): Path to save the video file.
                 isColor (bool): Whether the video is in color.
-                encode_str (str): Video encoding format.
+                encode_str (str or None): Video encoding format.
             """
             if(encode_str==None):
                 encode_str=videoLib.DEFAULT_VIDEO_ENCODE_STR
@@ -47641,17 +49480,101 @@ class videoLib:
 
         def outVideo(self,out_path:str,isColor:bool=True,encode_str:str=None):
             """
-            Outputs the frames to a video file.
+            Outputs the current frames to a video file.
 
             Args:
                 out_path (str): Path to save the video file.
                 isColor (bool): Whether the video is in color.
-                encode_str (str): Video encoding format.
+                encode_str (str or None): Video encoding format.
             """
             if(encode_str==None):
                 encode_str=videoLib.DEFAULT_VIDEO_ENCODE_STR
 
             videoLib.VideoIO.outVideo(out_path=out_path,frames=self.__frames,fps=self.__fps,isColor=isColor,encode_str=encode_str)
+
+        def getFrames(self,copy_flag:bool=True):
+            """
+            Returns the current frame list.
+
+            Args:
+                copy_flag (bool): Whether to return a copied frame list.
+
+            Returns:
+                list: Current frame list.
+            """
+            if(copy_flag):
+                return pyExLib.safety_deepcopy(self.__frames)
+            return self.__frames
+
+        def getRawFrames(self,copy_flag:bool=True):
+            """
+            Returns the original frame list.
+
+            Args:
+                copy_flag (bool): Whether to return a copied frame list.
+
+            Returns:
+                list: Original frame list.
+            """
+            if(copy_flag):
+                return pyExLib.safety_deepcopy(self.__raw_frames)
+            return self.__raw_frames
+
+        def getState(self,include_input_asset:bool=False):
+            """
+            Returns a serializable state of the instance.
+
+            Args:
+                include_input_asset (bool): Reserved for interface symmetry. The returned state always stores the path and frames.
+
+            Returns:
+                videoLib.VideoProcessState: Serializable state.
+            """
+            _=include_input_asset
+            return videoLib.VideoProcessState(
+                input_path=self.__input_path,
+                fps=self.__fps,
+                shape=self.__shape,
+                raw_frames=pyExLib.safety_deepcopy(self.__raw_frames),
+                frames=pyExLib.safety_deepcopy(self.__frames),
+            )
+
+        def saveStateToFileStore(self,store,include_input_asset:bool=False):
+            """
+            Builds a FileStore compatible state object.
+
+            Args:
+                store (IOLib.FileStore): FileStore instance.
+                include_input_asset (bool): Reserved for interface symmetry.
+
+            Returns:
+                videoLib.VideoProcessState: Serializable state.
+            """
+            if(not isinstance(store,_FileStore)):
+                raise ValueError("store must be a FileStore instance")
+            return self.getState(include_input_asset=include_input_asset)
+
+        @classmethod
+        def fromState(cls,state,file_store:object|None=None):
+            """
+            Creates an instance from a saved state.
+
+            Args:
+                state (videoLib.VideoProcessState): Saved state.
+                file_store (object or None): Optional FileStore instance.
+
+            Returns:
+                videoLib.videoProcess: Restored instance.
+            """
+            if(not isinstance(state,videoLib.VideoProcessState)):
+                raise TypeError("state must be videoLib.VideoProcessState")
+            obj=cls(input_path=None,file_store=file_store)
+            obj.__input_path=state.input_path
+            obj.__fps=state.fps
+            obj.__shape=state.shape
+            obj.__raw_frames=pyExLib.safety_deepcopy(state.raw_frames)
+            obj.__frames=pyExLib.safety_deepcopy(state.frames)
+            return obj
 
     class VideoIO:
         """
@@ -47659,34 +49582,46 @@ class videoLib:
         """
 
         @staticmethod
-        def video2list(video_path:str):
+        def video2list(video_path:str,wait_key_sec:int=0,max_frames:int|None=None):
             """
             Converts a video to a list of frames.
 
             Args:
                 video_path (str): Path to the video file.
+                wait_key_sec (int): Wait time passed to cv2.waitKey().
+                max_frames (int or None): Maximum number of frames to read.
 
             Returns:
                 dict: Dictionary containing frames, fps, and shape.
             """
-            
             if(not IMPORT_OPENCV_FLAG):
                 raise RuntimeError("Error : The opencv package is not installed!")
+            if(not Path(video_path).exists()):
+                raise FileNotFoundError(f"Input video file not found: {video_path}")
             
             cap=cv2.VideoCapture(video_path)
-            fps=cap.get(cv2.CAP_PROP_FPS)
+            if(not cap.isOpened()):
+                raise ValueError(f"Failed to open input video: {video_path}")
+
+            fps=float(cap.get(cv2.CAP_PROP_FPS))
             frames=[]
+            counter=0
             while True:
                 ret,frame=cap.read()
-                if not ret:
+                if(not ret):
                     break
                 frames.append(frame)
-                key=cv2.waitKey(30)
+                counter+=1
+                if(max_frames is not None and counter>=int(max_frames)):
+                    break
+                if(wait_key_sec>0):
+                    key=cv2.waitKey(wait_key_sec)
                 if(key==27):
                     break
 
             cap.release()
-            return {"frames":frames,"fps":fps,"shape":frames[0].shape}
+            shape=None if(len(frames)<=0) else tuple(frames[0].shape)
+            return {"frames":frames,"fps":fps,"shape":shape}
 
         @staticmethod
         def outVideo(out_path:str,frames:list,fps:float,size:tuple=None,isColor:bool=True,encode_str:str=None):
@@ -47697,12 +49632,18 @@ class videoLib:
                 out_path (str): Path to save the video file.
                 frames (list): List of frames.
                 fps (float): Frames per second.
-                size (tuple): Size of the video.
+                size (tuple or None): Size of the video.
                 isColor (bool): Whether the video is in color.
-                encode_str (str): Video encoding format.
+                encode_str (str or None): Video encoding format.
+
+            Raises:
+                RuntimeError: If OpenCV is not installed.
+                ValueError: If frames is empty.
             """
             if(not IMPORT_OPENCV_FLAG):
                 raise RuntimeError("Error : The opencv package is not installed!")
+            if(len(frames)<=0):
+                raise ValueError("frames is empty")
 
             if(encode_str==None):
                 encode_str=videoLib.DEFAULT_VIDEO_ENCODE_STR
@@ -47710,7 +49651,10 @@ class videoLib:
             if(size==None):
                 size=frames[0].shape[0:2]
             fourcc=cv2.VideoWriter_fourcc(*encode_str)
+            Path(out_path).parent.mkdir(parents=True,exist_ok=True)
             video=cv2.VideoWriter(filename=out_path,fourcc=fourcc,fps=fps,frameSize=(size[1],size[0]),isColor=isColor)
+            if(not video.isOpened()):
+                raise ValueError(f"Failed to open output video: {out_path}")
             for frame in frames:
                 video.write(frame)
             video.release()
@@ -47750,11 +49694,15 @@ class videoLib:
                 "file_names":[]
             }
             file_names=[]
-            file_name_format_str="{{:0{}}}.png".format(math.floor(math.log10(save_frames_len))+1)
+            if(save_frames_len<=0):
+                file_name_format_str="{:01}.png"
+            else:
+                file_name_format_str="{{:0{}}}.png".format(max(1,math.floor(math.log10(save_frames_len))+1))
             
+            Path(out_dir).mkdir(parents=True,exist_ok=True)
             for i,frame in enumerate(save_frames):
                 file_name=file_name_format_str.format(i)
-                path=out_dir+file_name
+                path=str(Path(out_dir)/file_name)
                 if(print_log_flag):
                     print(path)
                 cv2.imwrite(path,frame)
@@ -47824,28 +49772,24 @@ class videoLib:
                 fourcc_str=videoLib.DEFAULT_VIDEO_ENCODE_STR
 
             cap=cv2.VideoCapture(input_movie)
-
             width=int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             height=int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             fps=cap.get(cv2.CAP_PROP_FPS)
-
             fourcc=cv2.VideoWriter_fourcc(*fourcc_str)
             writer=cv2.VideoWriter(tmp_movie,fourcc,fps,(width,height))
 
             while True:
                 ret,frame=cap.read()
-                writer.write(frame)
                 if(not ret):
                     break
+                writer.write(frame)
 
             writer.release()
             cap.release()
 
             video_clip=VideoFileClip(tmp_movie)
-            
             if(input_audio is not None):
                 audio_clip=AudioFileClip(input_audio)
                 video_clip=video_clip.set_audio(audio_clip)
-            
             video_clip.write_videofile(output_movie)
             os.remove(tmp_movie)
