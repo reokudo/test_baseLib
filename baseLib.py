@@ -1,4 +1,4 @@
-# baseLib.py v1.1.12
+# baseLib.py v1.1.13
 # - The library is a collection of various utility functions for Python programming.
 
 # standard libraries
@@ -25764,18 +25764,21 @@ class imgLib:
                 label_args (dict): Arguments for drawing labels.
                 label_org_function (callable): Function to get the label origin.
                 label_str_format (str): Format string for labels.
+                    In addition to ``cls_num``, ``score``, and ``name_class``,
+                    any per-box fields stored in ``final_ann`` (for example
+                    ``track_ids`` -> ``track_id``) are also available.
                 shape_colors: Color specification for shapes. Supported formats:
                     - None: use YOLOANN.staticColorOfANNClsNums(classes) (default behavior)
                     - tuple: (B, G, R) applied to all boxes
                     - list/tuple: list of (B, G, R) with the same length as bboxes
                     - dict: {cls_num: (B,G,R), "default"/None: (B,G,R)}
-                    - callable: f(cls_num:int, score:float, bbox:list, index:int)->(B,G,R)
+                    - callable: f(cls_num:int, score:float, bbox:list, index:int, **extra)->(B,G,R)
                 shape_thicknesses: Thickness specification for shapes. Supported formats:
                     - None: use default thickness 2
                     - int: applied to all boxes (0 is invalid; -1 means fill)
                     - list/tuple: list of int with the same length as bboxes
                     - dict: {cls_num: int, "default"/None: int}
-                    - callable: f(cls_num:int, score:float, bbox:list, index:int)->int
+                    - callable: f(cls_num:int, score:float, bbox:list, index:int, **extra)->int
 
             Returns:
                 np.ndarray: Image with optional drawing.
@@ -25799,15 +25802,83 @@ class imgLib:
             scores=ann_data["scores"]
             name_classes=[self.__getClsNameIndex(cls_num) for cls_num in classes]
 
+            extra_ann_items=[]
+            for extra_key,extra_values in ann_data.items():
+                if(extra_key in ("bboxes","classes","scores")):
+                    continue
+                if(isinstance(extra_values,(list,tuple)) and len(extra_values)==len(bboxes)):
+                    extra_ann_items.append((str(extra_key),list(extra_values)))
+
+            def _append_ann_context_aliases(dst:dict,key:str,value):
+                dst[key]=value
+                if(key.endswith("_ids") and len(key)>4):
+                    dst.setdefault(key[:-1],value)
+                elif(key.endswith("s") and len(key)>1):
+                    dst.setdefault(key[:-1],value)
+
+            def _build_ann_context(index:int,cls_num,score,bbox,name_class)->dict:
+                ctx={
+                    "cls_num":cls_num,
+                    "score":score,
+                    "name_class":name_class,
+                    "index":index,
+                    "bbox":bbox,
+                }
+                for extra_key,extra_values in extra_ann_items:
+                    _append_ann_context_aliases(ctx,extra_key,extra_values[index])
+                return ctx
+
+            def _call_ann_style_callable(fn:callable,ann_context:dict):
+                try:
+                    sig=inspect.signature(fn)
+                except (TypeError,ValueError):
+                    sig=None
+
+                if(sig is not None):
+                    params=list(sig.parameters.values())
+                    has_var_keyword=any([p.kind==inspect.Parameter.VAR_KEYWORD for p in params])
+                    has_positional_only=any([p.kind==inspect.Parameter.POSITIONAL_ONLY for p in params])
+                    required_names=[
+                        p.name for p in params
+                        if(
+                            p.kind in (
+                                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                                inspect.Parameter.KEYWORD_ONLY
+                            )
+                            and p.default is inspect._empty
+                        )
+                    ]
+                    if(has_var_keyword):
+                        return fn(**ann_context)
+                    if((not has_positional_only) and all([name in ann_context for name in required_names])):
+                        call_kwargs={k:v for k,v in ann_context.items() if k in sig.parameters}
+                        return fn(**call_kwargs)
+
+                try:
+                    return fn(
+                        ann_context.get("cls_num"),
+                        ann_context.get("score"),
+                        ann_context.get("bbox"),
+                        ann_context.get("index")
+                    )
+                except TypeError:
+                    try:
+                        return fn(
+                            ann_context.get("cls_num"),
+                            ann_context.get("score"),
+                            ann_context.get("bbox")
+                        )
+                    except TypeError:
+                        return fn(ann_context.get("cls_num"))
+
+            ann_context_list=[
+                _build_ann_context(i,cls_num,score,bbox,name_class)
+                for i,(cls_num,score,bbox,name_class) in enumerate(zip(classes,scores,bboxes,name_classes))
+            ]
+
             label_list=None
             if(label_flag):
-                label_list=[
-                    label_str_format.format(
-                        cls_num=cls_num,
-                        score=score,
-                        name_class=name_class
-                        ) for cls_num,score,name_class in zip(classes,scores,name_classes)
-                ]
+                label_list=[label_str_format.format(**ann_context) for ann_context in ann_context_list]
 
             if(not draw_rect_flag):
                 return tmp_img
@@ -25818,7 +25889,7 @@ class imgLib:
             #   - tuple: (B, G, R) applied to all boxes
             #   - list/tuple: list of (B, G, R) with the same length as bboxes
             #   - dict: {cls_num: (B,G,R), "default"/None: (B,G,R)}
-            #   - callable: f(cls_num:int, score:float, bbox:list, index:int)->(B,G,R)
+            #   - callable: f(cls_num:int, score:float, bbox:list, index:int, **extra)->(B,G,R)
             if("shape_colors" in draw_rect_args):
                 if(shape_colors is not None):
                     raise ValueError("Error : shape_colors is specified in both argument and draw_rect_args['shape_colors']!")
@@ -25828,12 +25899,10 @@ class imgLib:
                 tmp_shape_colors=imgLib.YOLOANN.staticColorOfANNClsNums(classes)
             elif(callable(shape_colors)):
                 tmp_shape_colors=[
-                    shape_colors(
-                        cls_num=int(cls_num),
-                        score=float(score),
-                        bbox=bbox,
-                        index=i
-                    ) for i,(cls_num,score,bbox) in enumerate(zip(classes,scores,bboxes))
+                    _call_ann_style_callable(
+                        shape_colors,
+                        ann_context
+                    ) for ann_context in ann_context_list
                 ]
             elif(isinstance(shape_colors, dict)):
                 default_color=shape_colors.get("default", shape_colors.get(None, imgLib.DEFAULT_FIGURE_FRAME_COLOR))
@@ -25853,7 +25922,7 @@ class imgLib:
             #   - int: applied to all boxes (0 is invalid; -1 means fill)
             #   - list/tuple: list of int with the same length as bboxes
             #   - dict: {cls_num: int, "default"/None: int}
-            #   - callable: f(cls_num:int, score:float, bbox:list, index:int)->int
+            #   - callable: f(cls_num:int, score:float, bbox:list, index:int, **extra)->int
             if("shape_thicknesses" in draw_rect_args):
                 if(shape_thicknesses is not None):
                     raise ValueError("Error : shape_thicknesses is specified in both argument and draw_rect_args['shape_thicknesses']!")
@@ -25863,12 +25932,10 @@ class imgLib:
                 tmp_shape_thicknesses=pyExLib.IterableLib.createConstInitList(len(bboxes),2)
             elif(callable(shape_thicknesses)):
                 tmp_shape_thicknesses=[
-                    int(shape_thicknesses(
-                        cls_num=int(cls_num),
-                        score=float(score),
-                        bbox=bbox,
-                        index=i
-                    )) for i,(cls_num,score,bbox) in enumerate(zip(classes,scores,bboxes))
+                    int(_call_ann_style_callable(
+                        shape_thicknesses,
+                        ann_context
+                    )) for ann_context in ann_context_list
                 ]
             elif(isinstance(shape_thicknesses, dict)):
                 default_thick=shape_thicknesses.get("default", shape_thicknesses.get(None, 2))
@@ -49845,6 +49912,9 @@ class videoLib:
         TEMPORAL_MODE_SMOOTH="smooth"
         TEMPORAL_MODE_TRACK="track"
 
+        OUTPUT_MODE_RAW="raw"
+        OUTPUT_MODE_BB_IMG_JSON="BBimgJson"
+
         @_protectedClass.fileStoreMyLibRegister
         @dataclass
         class TemporalYOLOPipelineConfig(_FileStore.FileStoreParser):
@@ -49873,6 +49943,9 @@ class videoLib:
                     separate drawing pass.  ``meta["detections"]`` is still populated regardless of this flag.
                 bbox_conf_threshold (float): Minimum confidence score for a detection to be drawn when
                     ``bbox_draw_flag`` is ``True``.
+                bbox_draw_bb_img_json_get_img_args (dict or None): Keyword arguments forwarded to
+                    ``imgLib.BBimgJson.getImg`` when ``bbox_draw_flag`` is ``True``. This allows
+                    label/color/thickness customization using the same API as ``BBimgJson``.
                 source_type (str): VideoPipeline source type.
                 source_args (dict or None): VideoPipeline source arguments.
                 sink_type (str or None): VideoPipeline sink type.
@@ -49909,6 +49982,7 @@ class videoLib:
             max_missing_frames:int=3
             bbox_draw_flag:bool=False
             bbox_conf_threshold:float=0.25
+            bbox_draw_bb_img_json_get_img_args:dict|None=None
             source_type:str="file"
             source_args:dict|None=None
             sink_type:str|None="null"
@@ -49941,6 +50015,191 @@ class videoLib:
 
             config:Any=None
             pipeline_state:Any=None
+
+        @staticmethod
+        def _normalizeOutputMode(output_mode:str|None)->str:
+            """
+            Normalizes TemporalYOLOPipeline result output mode.
+
+            Args:
+                output_mode (str or None): Requested output mode.
+
+            Returns:
+                str: Normalized output mode.
+            """
+            if(output_mode is None):
+                return videoLib.TemporalYOLOPipeline.OUTPUT_MODE_RAW
+            if(not isinstance(output_mode,str)):
+                raise TypeError("output_mode must be str or None")
+
+            v=str(output_mode).strip()
+            if(v==""):
+                return videoLib.TemporalYOLOPipeline.OUTPUT_MODE_RAW
+
+            lv=v.lower()
+            if(lv in ("auto","raw","dict","detection","detections")):
+                return videoLib.TemporalYOLOPipeline.OUTPUT_MODE_RAW
+            if(lv in ("bbimgjson","bb_img_json")):
+                return videoLib.TemporalYOLOPipeline.OUTPUT_MODE_BB_IMG_JSON
+
+            raise ValueError(
+                "output_mode must be one of "
+                f"'{videoLib.TemporalYOLOPipeline.OUTPUT_MODE_RAW}' or "
+                f"'{videoLib.TemporalYOLOPipeline.OUTPUT_MODE_BB_IMG_JSON}'."
+            )
+
+        @staticmethod
+        def _filterDetectionDictByConfidence(dets:dict|None,conf_threshold:float|None):
+            """
+            Filters a detection dict while preserving extra aligned list fields.
+
+            Args:
+                dets (dict or None): Detection dict.
+                conf_threshold (float or None): Minimum score to keep.
+
+            Returns:
+                dict or None: Filtered detection dict.
+            """
+            if(dets is None):
+                return None
+            if(conf_threshold is None):
+                return pyExLib.safety_deepcopy(dets)
+            if(not isinstance(dets,dict)):
+                raise TypeError("dets must be dict or None")
+
+            bboxes=list(dets.get("bboxes",[]) or [])
+            scores=list(dets.get("scores",[]) or [])
+            classes=list(dets.get("classes",[]) or [])
+            n=min(len(bboxes),len(scores),len(classes))
+            bboxes=bboxes[:n]
+            scores=scores[:n]
+            classes=classes[:n]
+
+            thr=float(conf_threshold)
+            keep_idx=[i for i,score in enumerate(scores) if float(score)>=thr]
+
+            out={}
+            for k,v in dets.items():
+                if(k in ("bboxes","scores","classes")):
+                    continue
+                if(isinstance(v,(list,tuple)) and len(v)>=n):
+                    out[k]=[pyExLib.safety_deepcopy(v[i]) for i in keep_idx]
+                else:
+                    out[k]=pyExLib.safety_deepcopy(v)
+
+            out["bboxes"]=[pyExLib.safety_deepcopy(bboxes[i]) for i in keep_idx]
+            out["scores"]=[pyExLib.safety_deepcopy(scores[i]) for i in keep_idx]
+            out["classes"]=[pyExLib.safety_deepcopy(classes[i]) for i in keep_idx]
+            return out
+
+        @staticmethod
+        def _makeBBimgJsonFromPacket(
+            packet,
+            dets:dict|None,
+            config,
+            frame_packet=None,
+            copy_frame:bool=True
+        ):
+            """
+            Builds a BBimgJson object for one video frame packet.
+
+            Args:
+                packet (videoLib.FramePacket): Packet providing frame index/timestamps and detection metadata.
+                dets (dict or None): Detection dict to store in ``final_ann``.
+                config (TemporalYOLOPipelineConfig): Pipeline configuration.
+                frame_packet (videoLib.FramePacket or None): Packet providing the raw frame image.
+                    If None, ``packet`` is used.
+                copy_frame (bool): Whether to copy the underlying frame array.
+
+            Returns:
+                imgLib.BBimgJson or None: Built BBimgJson object.
+            """
+            if(packet is None or dets is None):
+                return None
+            if(frame_packet is None):
+                frame_packet=packet
+            if(frame_packet is None):
+                return None
+
+            frame=frame_packet.frame
+            raw_img=None
+            if(isinstance(frame,np.ndarray)):
+                raw_img=frame.copy() if(copy_frame) else frame
+
+            source_args={}
+            if(config is not None):
+                source_args=getattr(config,"source_args",None) or {}
+            source_type=getattr(config,"source_type",None) if(config is not None) else None
+
+            frame_index=int(packet.index) if(packet.index is not None) else 0
+            raw_img_info={
+                "source_mode":"video_frame",
+                "frame_index":frame_index,
+                "source_type":source_type,
+            }
+
+            source_path=source_args.get("input_path",None) if isinstance(source_args,dict) else None
+            if(isinstance(source_path,str) and source_path!=""):
+                raw_img_path=f"{source_path}#frame={frame_index}"
+                img_name=f"{Path(source_path).stem}_frame_{frame_index:06d}"
+                raw_img_info["video_source_path"]=source_path
+            elif(source_type==videoLib.VideoPipeline.SOURCE_TYPE_CAMERA):
+                camera_index=0
+                if(isinstance(source_args,dict)):
+                    camera_index=int(source_args.get("camera_index",0))
+                raw_img_path=f"camera_{camera_index}#frame={frame_index}"
+                img_name=f"camera_{camera_index}_frame_{frame_index:06d}"
+                raw_img_info["camera_index"]=camera_index
+            else:
+                raw_img_path=f"frame_{frame_index:06d}.png"
+                img_name=f"frame_{frame_index:06d}"
+
+            if(isinstance(raw_img,np.ndarray) and raw_img.ndim>=2):
+                raw_img_info["wh"]=[int(raw_img.shape[1]),int(raw_img.shape[0])]
+            else:
+                img_wh=dets.get("img_wh",None) if isinstance(dets,dict) else None
+                if(isinstance(img_wh,(list,tuple)) and len(img_wh)>=2):
+                    raw_img_info["wh"]=[int(img_wh[0]),int(img_wh[1])]
+
+            ann={
+                "bboxes":pyExLib.safety_deepcopy(dets.get("bboxes",[])),
+                "scores":pyExLib.safety_deepcopy(dets.get("scores",[])),
+                "classes":pyExLib.safety_deepcopy(dets.get("classes",[])),
+            }
+            ann_len=len(ann["bboxes"])
+            for k,v in dets.items():
+                if(k in ("bboxes","scores","classes")):
+                    continue
+                if(isinstance(v,(list,tuple)) and len(v)==ann_len):
+                    ann[str(k)]=pyExLib.safety_deepcopy(list(v))
+
+            d={
+                "raw_img_path":str(raw_img_path),
+                "img_name":str(img_name),
+                "img_reshape_log":[],
+                "final_ann":ann,
+                "raw_img_info":raw_img_info,
+                "video_frame_info":{
+                    "frame_index":frame_index,
+                    "timestamp":None if(packet.timestamp is None) else float(packet.timestamp),
+                    "source_timestamp":None if(packet.source_timestamp is None) else float(packet.source_timestamp),
+                    "processed_timestamp":None if(packet.processed_timestamp is None) else float(packet.processed_timestamp),
+                    "source_type":source_type,
+                }
+            }
+
+            cls_names=imgLib.ensembleModel._clsNamesDictToList(dets.get("cls_names_dict",None))
+            if(cls_names is not None):
+                d["cls_names"]=cls_names
+
+            out_obj=imgLib.BBimgJson(d)
+            if(isinstance(raw_img,np.ndarray)):
+                try:
+                    setattr(out_obj,"_BBimgJson__raw_img",raw_img)
+                    setattr(out_obj,"_BBimgJson__img",raw_img.copy() if(copy_frame) else raw_img)
+                except Exception:
+                    pass
+            return out_obj
 
         class _TrackInfo:
             """
@@ -50045,7 +50304,7 @@ class videoLib:
 
                 out_frame=packet.frame
                 if(self.__config.bbox_draw_flag):
-                    out_frame=self.__drawBboxOnFrame(packet.frame,temporal_dets)
+                    out_frame=self.__drawBboxOnFrame(packet,temporal_dets)
 
                 return videoLib.FramePacket(
                     index=packet.index,
@@ -50056,16 +50315,17 @@ class videoLib:
                     meta=meta,
                 )
 
-            def __drawBboxOnFrame(self,frame:"np.ndarray",dets:dict)->"np.ndarray":
+            def __drawBboxOnFrame(self,packet:"videoLib.FramePacket",dets:dict)->"np.ndarray":
                 """
                 Draws bounding boxes from a detection dict onto a frame.
 
-                Only detections whose score is greater than or equal to
-                ``config.bbox_conf_threshold`` are drawn.  In
-                ``TEMPORAL_MODE_TRACK``, the track ID is prepended to each label.
+                The detection dict is first filtered by ``config.bbox_conf_threshold``
+                and then converted into ``imgLib.BBimgJson``. Drawing itself is
+                delegated to ``imgLib.BBimgJson.getImg(...)`` so callers can reuse
+                the same label/color/thickness API.
 
                 Args:
-                    frame (np.ndarray): Original frame image.
+                    packet (videoLib.FramePacket): Original frame packet.
                     dets (dict): Detection dict with keys ``"bboxes"``, ``"scores"``,
                         ``"classes"``, and optionally ``"cls_names_dict"`` and
                         ``"track_ids"``.
@@ -50073,39 +50333,48 @@ class videoLib:
                 Returns:
                     np.ndarray: Frame with bounding boxes drawn.
                 """
-                bboxes=dets.get("bboxes",[])
-                scores=dets.get("scores",[])
-                classes=dets.get("classes",[])
-                cls_names=dets.get("cls_names_dict",None)
-                track_ids=dets.get("track_ids",None)
+                if(packet is None):
+                    return None
+                frame=packet.frame
+                if(not isinstance(frame,np.ndarray)):
+                    return frame
 
-                if(not bboxes):
-                    return frame.copy() if(isinstance(frame,np.ndarray)) else frame
+                filtered_dets=videoLib.TemporalYOLOPipeline._filterDetectionDictByConfidence(
+                    dets=dets,
+                    conf_threshold=self.__config.bbox_conf_threshold
+                )
+                bb_obj=videoLib.TemporalYOLOPipeline._makeBBimgJsonFromPacket(
+                    packet=packet,
+                    dets=filtered_dets,
+                    config=self.__config,
+                    frame_packet=packet,
+                    copy_frame=True,
+                )
+                if(not isinstance(bb_obj,imgLib.BBimgJson)):
+                    return frame.copy()
 
-                conf_thr=self.__config.bbox_conf_threshold
-                n=len(bboxes)
-                tids=(track_ids if(track_ids is not None) else [None]*n)
+                get_img_args=self.__config.bbox_draw_bb_img_json_get_img_args
+                if(get_img_args is None):
+                    get_img_args={}
+                else:
+                    get_img_args=pyExLib.safety_deepcopy(get_img_args)
 
-                keep_bboxes=[]
-                keep_labels=[]
-                for bbox,score,cls,tid in zip(bboxes,scores,classes,tids):
-                    if(score<conf_thr):
-                        continue
-                    name=(cls_names[cls] if(cls_names and cls in cls_names) else str(cls))
-                    label=(f"#{tid} {name} {score:.2f}" if(tid is not None) else f"{name} {score:.2f}")
-                    keep_bboxes.append(bbox)
-                    keep_labels.append(label)
+                get_img_args.setdefault("draw_rect_flag",True)
+                get_img_args.setdefault("label_flag",True)
 
-                if(not keep_bboxes):
-                    return frame.copy() if(isinstance(frame,np.ndarray)) else frame
+                if("label_str_format" not in get_img_args):
+                    track_ids=filtered_dets.get("track_ids",None) if isinstance(filtered_dets,dict) else None
+                    if(
+                        isinstance(track_ids,(list,tuple))
+                        and len(track_ids)==len(filtered_dets.get("bboxes",[]))
+                        and all([(track_id is not None) for track_id in track_ids])
+                    ):
+                        get_img_args["label_str_format"]="#{track_id} {name_class} {score:.2f}"
+                    else:
+                        get_img_args["label_str_format"]="{name_class} {score:.2f}"
 
-                return imgLib.drawRect(
-                    img=frame,
-                    box_coords_list=keep_bboxes,
-                    flag_center=False,
-                    copy_flag=True,
-                    label_flag=True,
-                    label_list=keep_labels,
+                return bb_obj.getImg(
+                    **get_img_args
                 )
 
             @staticmethod
@@ -50463,26 +50732,88 @@ class videoLib:
             """
             return pyExLib.safety_deepcopy(self.__config)
 
-        def getLatestDetections(self,copy_flag:bool=True)->dict|None:
+        def __packetToDetectionOutput(
+            self,
+            packet,
+            frame_packet=None,
+            output_mode:str=OUTPUT_MODE_RAW,
+            detection_key:str="detections",
+            copy_flag:bool=True
+        ):
+            """
+            Converts one FramePacket detection payload to the requested output object.
+
+            Args:
+                packet (videoLib.FramePacket): Packet holding detection metadata.
+                frame_packet (videoLib.FramePacket or None): Packet providing the base image.
+                output_mode (str): Output mode.
+                detection_key (str): Meta key to read detections from.
+                copy_flag (bool): Whether copied objects should be returned.
+
+            Returns:
+                dict | imgLib.BBimgJson | None
+            """
+            if(packet is None or packet.meta is None):
+                return None
+
+            output_mode=videoLib.TemporalYOLOPipeline._normalizeOutputMode(output_mode)
+            dets=packet.meta.get(detection_key)
+            if(output_mode==videoLib.TemporalYOLOPipeline.OUTPUT_MODE_RAW):
+                if(copy_flag):
+                    return pyExLib.safety_deepcopy(dets)
+                return dets
+
+            if(frame_packet is None):
+                frame_packet=packet
+            return videoLib.TemporalYOLOPipeline._makeBBimgJsonFromPacket(
+                packet=packet,
+                dets=dets,
+                config=self.__config,
+                frame_packet=frame_packet,
+                copy_frame=copy_flag,
+            )
+
+        def __getLatestBaseFramePacket(self,packet,copy_flag:bool=True):
+            """
+            Tries to resolve the corresponding raw frame packet for a processed/output packet.
+
+            Args:
+                packet (videoLib.FramePacket): Target packet.
+                copy_flag (bool): Whether to return copied packets.
+
+            Returns:
+                videoLib.FramePacket or None: Raw frame packet when available, otherwise ``packet``.
+            """
+            if(packet is None):
+                return None
+            raw_packet=self.__pipeline.getLatestFramePacket(kind="raw",copy_flag=copy_flag)
+            if(raw_packet is not None and raw_packet.index==packet.index):
+                return raw_packet
+            return packet
+
+        def getLatestDetections(self,copy_flag:bool=True,output_mode:str=OUTPUT_MODE_RAW)->Any:
             """
             Returns the temporally post-processed detections from the most recently
             processed frame.
 
             Args:
                 copy_flag (bool): Whether to return a deep copy.
+                output_mode (str): ``"raw"`` for the detection dict or ``"BBimgJson"``
+                    for ``imgLib.BBimgJson`` output.
 
             Returns:
-                dict or None: Detection dict with keys ``"bboxes"``, ``"scores"``,
-                ``"classes"`` (and ``"track_ids"`` in track mode), or ``None`` when
-                no frame has been processed yet.
+                dict | imgLib.BBimgJson | None: Detection output for the latest
+                processed frame, or ``None`` when no frame has been processed yet.
             """
             packet=self.__pipeline.getLatestFramePacket(kind="processed",copy_flag=copy_flag)
-            if(packet is None or packet.meta is None):
-                return None
-            dets=packet.meta.get("detections")
-            if(copy_flag):
-                return pyExLib.safety_deepcopy(dets)
-            return dets
+            frame_packet=self.__getLatestBaseFramePacket(packet,copy_flag=copy_flag)
+            return self.__packetToDetectionOutput(
+                packet=packet,
+                frame_packet=frame_packet,
+                output_mode=output_mode,
+                detection_key="detections",
+                copy_flag=copy_flag,
+            )
 
         def getLatestFrame(self,kind:str="processed",copy_flag:bool=True)->np.ndarray|None:
             """
@@ -50524,7 +50855,7 @@ class videoLib:
             """
             return self.__pipeline.getBufferedFramePackets(kind=kind,latest_n=latest_n,copy_flag=copy_flag)
 
-        def getBufferedDetections(self,latest_n:int|None=None,copy_flag:bool=True)->list:
+        def getBufferedDetections(self,latest_n:int|None=None,copy_flag:bool=True,output_mode:str=OUTPUT_MODE_RAW)->list:
             """
             Returns a list of temporally post-processed detection dicts from the
             processed frame buffer, one entry per buffered frame.
@@ -50535,14 +50866,85 @@ class videoLib:
             Args:
                 latest_n (int or None): Number of latest frames to include.
                 copy_flag (bool): Whether to return deep copies.
+                output_mode (str): ``"raw"`` for detection dicts or ``"BBimgJson"``
+                    for ``imgLib.BBimgJson`` objects.
 
             Returns:
-                list: List of detection dicts (or ``None``) in chronological order.
+                list: List of detection dicts / BBimgJson objects (or ``None``) in chronological order.
             """
+            output_mode=videoLib.TemporalYOLOPipeline._normalizeOutputMode(output_mode)
             packets=self.__pipeline.getBufferedFramePackets(kind="processed",latest_n=latest_n,copy_flag=copy_flag)
-            result=[(p.meta.get("detections") if(p.meta is not None) else None) for p in packets]
-            if(copy_flag):
-                return pyExLib.safety_deepcopy(result)
+            raw_packet_map={}
+            if(output_mode==videoLib.TemporalYOLOPipeline.OUTPUT_MODE_BB_IMG_JSON):
+                raw_packets=self.__pipeline.getBufferedFramePackets(kind="raw",latest_n=None,copy_flag=copy_flag)
+                raw_packet_map={p.index:p for p in raw_packets if(p is not None and p.index is not None)}
+
+            result=[]
+            for packet in packets:
+                frame_packet=raw_packet_map.get(packet.index,packet)
+                result.append(self.__packetToDetectionOutput(
+                    packet=packet,
+                    frame_packet=frame_packet,
+                    output_mode=output_mode,
+                    detection_key="detections",
+                    copy_flag=copy_flag,
+                ))
+            return result
+
+        def getLatestBBimgJson(self,kind:str="processed",copy_flag:bool=True,detection_key:str="detections"):
+            """
+            Returns the latest detection result as ``imgLib.BBimgJson``.
+
+            Args:
+                kind (str): Buffer name (typically ``"processed"`` or ``"output"``).
+                copy_flag (bool): Whether to return copied image data.
+                detection_key (str): Meta key (for example ``"detections"`` or ``"raw_detections"``).
+
+            Returns:
+                imgLib.BBimgJson or None
+            """
+            packet=self.__pipeline.getLatestFramePacket(kind=kind,copy_flag=copy_flag)
+            frame_packet=self.__getLatestBaseFramePacket(packet,copy_flag=copy_flag)
+            return self.__packetToDetectionOutput(
+                packet=packet,
+                frame_packet=frame_packet,
+                output_mode=videoLib.TemporalYOLOPipeline.OUTPUT_MODE_BB_IMG_JSON,
+                detection_key=detection_key,
+                copy_flag=copy_flag,
+            )
+
+        def getBufferedBBimgJsonList(
+            self,
+            kind:str="processed",
+            latest_n:int|None=None,
+            copy_flag:bool=True,
+            detection_key:str="detections"
+        )->list:
+            """
+            Returns buffered detection results as ``imgLib.BBimgJson`` objects.
+
+            Args:
+                kind (str): Buffer name.
+                latest_n (int or None): Number of latest frames to include.
+                copy_flag (bool): Whether to return copied image data.
+                detection_key (str): Meta key (for example ``"detections"`` or ``"raw_detections"``).
+
+            Returns:
+                list: Buffered BBimgJson objects (or ``None``).
+            """
+            packets=self.__pipeline.getBufferedFramePackets(kind=kind,latest_n=latest_n,copy_flag=copy_flag)
+            raw_packets=self.__pipeline.getBufferedFramePackets(kind="raw",latest_n=None,copy_flag=copy_flag)
+            raw_packet_map={p.index:p for p in raw_packets if(p is not None and p.index is not None)}
+            result=[]
+            for packet in packets:
+                frame_packet=raw_packet_map.get(packet.index,packet)
+                result.append(self.__packetToDetectionOutput(
+                    packet=packet,
+                    frame_packet=frame_packet,
+                    output_mode=videoLib.TemporalYOLOPipeline.OUTPUT_MODE_BB_IMG_JSON,
+                    detection_key=detection_key,
+                    copy_flag=copy_flag,
+                ))
             return result
 
         def snapshotBuffer(self,kind:str="processed",latest_n:int|None=None)->"videoLib.FrameBufferSnapshot":
